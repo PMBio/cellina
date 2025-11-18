@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from scvi import REGISTRY_KEYS
 from scvi.distributions import ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
-from scvi.nn import DecoderSCVI, Encoder, one_hot
+from scvi.nn import DecoderSCVI, Encoder
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
 
@@ -116,10 +116,10 @@ class MyModule(BaseModuleClass):
         # log the input to the variational distribution for numerical stability
         x_ = torch.log(1 + x)
         # get variational parameters via the encoder networks
-        qz_m, qz_v, z = self.z_encoder(x_)
-        ql_m, ql_v, library = self.l_encoder(x_)
+        qzm, qzv, z = self.z_encoder(x_)
+        qlm, qlv, library = self.l_encoder(x_)
 
-        outputs = dict(z=z, qzm=qz_m, qzv=qz_v, ql_m=ql_m, ql_v=ql_v, library=library)
+        outputs = dict(z=z, qzm=qzm, qzv=qzv, qlm=qlm, qlv=qlv, library=library)
         return outputs
 
     @auto_move_data
@@ -140,26 +140,26 @@ class MyModule(BaseModuleClass):
     ):
         """Loss function."""
         x = tensors[REGISTRY_KEYS.X_KEY]
-        qz_m = inference_outputs["qzm"]
-        qz_v = inference_outputs["qzv"]
-        ql_m = inference_outputs["ql_m"]
-        ql_v = inference_outputs["ql_v"]
+        qzm = inference_outputs["qzm"]
+        qzv = inference_outputs["qzv"]
+        qlm = inference_outputs["qlm"]
+        qlv = inference_outputs["qlv"]
         px_rate = generative_outputs["px_rate"]
         px_r = generative_outputs["px_r"]
         px_dropout = generative_outputs["px_dropout"]
 
-        mean = torch.zeros_like(qz_m)
-        scale = torch.ones_like(qz_v)
+        mean = torch.zeros_like(qzm)
+        scale = torch.ones_like(qzv)
 
-        kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)).sum(dim=1)
+        kl_divergence_z = kl(Normal(qzm, torch.sqrt(qzv)), Normal(mean, scale)).sum(dim=1)
 
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
         n_batch = self.library_log_means.shape[1]
-        local_library_log_means = F.linear(one_hot(batch_index, n_batch), self.library_log_means)
-        local_library_log_vars = F.linear(one_hot(batch_index, n_batch), self.library_log_vars)
+        local_library_log_means = F.linear(F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means)
+        local_library_log_vars = F.linear(F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars)
 
         kl_divergence_l = kl(
-            Normal(ql_m, torch.sqrt(ql_v)),
+            Normal(qlm, torch.sqrt(qlv)),
             Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
         ).sum(dim=1)
 
@@ -237,11 +237,11 @@ class MyModule(BaseModuleClass):
         for i in range(n_mc_samples):
             # Distribution parameters and sampled variables
             inference_outputs, _, losses = self.forward(tensors)
-            qz_m = inference_outputs["qzm"]
-            qz_v = inference_outputs["qzv"]
+            qzm = inference_outputs["qzm"]
+            qzv = inference_outputs["qzv"]
             z = inference_outputs["z"]
-            ql_m = inference_outputs["ql_m"]
-            ql_v = inference_outputs["ql_v"]
+            qlm = inference_outputs["qlm"]
+            qlv = inference_outputs["qlv"]
             library = inference_outputs["library"]
 
             # Reconstruction Loss
@@ -249,17 +249,18 @@ class MyModule(BaseModuleClass):
 
             # Log-probabilities
             n_batch = self.library_log_means.shape[1]
-            local_library_log_means = F.linear(one_hot(batch_index, n_batch), self.library_log_means)
-            local_library_log_vars = F.linear(one_hot(batch_index, n_batch), self.library_log_vars)
+            local_library_log_means = F.linear(F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means)
+            local_library_log_vars = F.linear(F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars)
             p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
 
-            p_z = Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v)).log_prob(z).sum(dim=-1)
+            p_z = Normal(torch.zeros_like(qzm), torch.ones_like(qzv)).log_prob(z).sum(dim=-1)
             p_x_zl = -reconst_loss
-            q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
-            q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
+            q_z_x = Normal(qzm, qzv.sqrt()).log_prob(z).sum(dim=-1)
+            q_l_x = Normal(qlm, qlv.sqrt()).log_prob(library).sum(dim=-1)
 
             to_sum[:, i] = p_z + p_l + p_x_zl - q_z_x - q_l_x
 
         batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
         log_lkl = torch.sum(batch_log_lkl).item()
+        
         return log_lkl
