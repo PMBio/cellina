@@ -1,10 +1,11 @@
-from typing import Dict
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
 from scvi import REGISTRY_KEYS
 from scvi.distributions import NegativeBinomial, ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
+from scvi.module._classifier import Classifier
 from scvi.nn import DecoderSCVI, Encoder
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
@@ -43,6 +44,14 @@ class CellinaModule(BaseModuleClass):
         Dropout rate for neural networks.
     gene_likelihood
         One of "zinb" or "nb".
+    classifier_lambda
+        Weight for the supervised classifier loss. Set to 0 (default) to disable classifier.
+        When > 0, requires labels_key to be provided in setup_anndata().
+    classifier_kwargs
+        Extra keyword args forwarded to :class:`~scvi.module._classifier.Classifier`.
+    n_labels
+        Number of labels for the optional classifier head. Automatically set from adata
+        when labels_key is provided in setup_anndata().
     """
 
     def __init__(
@@ -57,11 +66,15 @@ class CellinaModule(BaseModuleClass):
         n_layers: int = 1,
         dropout_rate: float = 0.1,
         gene_likelihood: str = "zinb",
+        classifier_lambda: float = 0.0,
+        classifier_kwargs: Optional[Dict[str, Any]] = None,
+        n_labels: Optional[int] = None,
     ):
         super().__init__()
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
+        self.classifier_lambda = classifier_lambda
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
 
@@ -105,6 +118,16 @@ class CellinaModule(BaseModuleClass):
             n_layers=n_layers,
             n_hidden=n_hidden,
         )
+
+        self.classifier: Optional[Classifier] = None
+        if classifier_lambda > 0:
+            classifier_kwargs = dict(classifier_kwargs or {})
+            self.classifier = Classifier(
+                n_input=n_latent, 
+                n_labels=n_labels, 
+                logits=True, 
+                **classifier_kwargs
+            )
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
@@ -159,6 +182,8 @@ class CellinaModule(BaseModuleClass):
             qlm=qlm,
             qlv=qlv,
         )
+        if self.classifier is not None:
+            outputs["classifier_logits"] = self.classifier(z)
         return outputs
 
     @auto_move_data
@@ -230,14 +255,39 @@ class CellinaModule(BaseModuleClass):
 
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
 
-        loss = torch.mean(reconst_loss + weighted_kl_local)
+        classifier_loss = torch.zeros_like(reconst_loss)
+        if self.classifier is not None:
+            labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
+            classifier_logits = inference_outputs.get("classifier_logits")
+            if classifier_logits is None:
+                classifier_logits = self.classifier(inference_outputs["z"])
+            classifier_loss = F.cross_entropy(
+                classifier_logits,
+                labels,
+                reduction="none",
+            )
+
+        classifier_loss = self.classifier_lambda * classifier_loss
+        total_loss = reconst_loss + weighted_kl_local + classifier_loss
+        loss = torch.mean(total_loss)
 
         kl_local = dict(
             kl_divergence_l=kl_divergence_l,
             kl_divergence_z=kl_divergence_z,
             kl_divergence_s=kl_divergence_s,
         )
-        return LossOutput(loss=loss, reconstruction_loss=reconst_loss, kl_local=kl_local)
+        
+        extra_metrics = {}
+        if self.classifier is not None:
+            # Take mean to make it a scalar (0-d tensor) for logging
+            extra_metrics['classifier_loss'] = classifier_loss.mean()
+
+        return LossOutput(
+            loss=loss,
+            reconstruction_loss=reconst_loss,
+            kl_local=kl_local,
+            extra_metrics=extra_metrics,
+        )
 
     @torch.no_grad()
     def sample(

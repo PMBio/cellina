@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
 from cellina import CellinaModel
@@ -12,6 +13,8 @@ def adata_with_spatial():
     adata = synthetic_iid()
     n_spatial_features = 20
     adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    n_labels = 3
+    adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
     return adata
 
 
@@ -19,8 +22,12 @@ def test_cellina_model(adata_with_spatial):
     """Test basic CellinaModel functionality."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    CellinaModel.setup_anndata(adata_with_spatial,
+                               batch_key="batch",
+                               spatial_obsm_key="spatial_x",
+                               labels_key="cell_labels"
+                               )
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     
     # Test architecture
     assert model.module.n_latent == n_latent
@@ -41,7 +48,7 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
     
     CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     
     # Test forward pass produces correct outputs
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
@@ -61,12 +68,12 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     assert all(k in inference_outputs for k in ["z", "s", "qzm", "qzv", "qsm", "qsv"])
 
 
-def test_cellina_dual_kl_divergence(adata_with_spatial):
-    """Test that loss includes KL divergence for both z and s."""
+def test_cellina_losses(adata_with_spatial):
+    """Test that loss includes KL divergence for both z and s, and classifier loss when enabled."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
     
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
@@ -81,14 +88,38 @@ def test_cellina_dual_kl_divergence(adata_with_spatial):
     assert "kl_divergence_z" in loss_output.kl_local
     assert "kl_divergence_s" in loss_output.kl_local
     assert "kl_divergence_l" in loss_output.kl_local
+    
+    # Classifier loss should be in extra_metrics
+    assert "classifier_loss" in loss_output.extra_metrics
+    
+    # Check we can compute accuracy
+    classifier_logits = inference_outputs["classifier_logits"]
+    labels = batch[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
+    predictions = torch.argmax(classifier_logits, dim=1)
+    accuracy = (predictions == labels).float().mean()
+    assert 0 <= accuracy <= 1
+
+
+def test_classifier_disabled_by_default():
+    """Test that classifier is disabled when classifier_lambda=0."""
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
+    
+    # Should work fine without labels when classifier_lambda=0
+    model = CellinaModel(adata, n_latent=5, classifier_lambda=0.0)
+    assert model.module.classifier is None
+    assert model.module.classifier_lambda == 0.0
 
 
 def test_cellina_latent_representation(adata_with_spatial):
     """Test latent representation returns correct shapes and uses latent_key."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
     
     # Test separate representations

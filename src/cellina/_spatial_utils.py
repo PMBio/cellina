@@ -8,15 +8,12 @@ from sklearn.preprocessing import normalize
 def _gaussian(distance_mtx, bandwidth):
     return np.exp(-(distance_mtx ** 2.0) / (2.0 * bandwidth ** 2.0))
 
-
 def _exponential(distance_mtx, bandwidth):
     return np.exp(-distance_mtx / bandwidth)
-
 
 def _linear(distance_mtx, bandwidth):
     connectivity = 1 - distance_mtx / bandwidth
     return np.clip(connectivity, a_min=0, a_max=np.inf)
-
 
 def _spatial_neighbors_core(adata: AnnData,
                            bandwidth=None,

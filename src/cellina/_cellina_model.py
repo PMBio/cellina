@@ -85,6 +85,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_layers=n_layers,
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
+            n_labels=self.summary_stats["n_labels"],
             **model_kwargs,
         )
         self._model_summary_string = (
