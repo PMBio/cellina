@@ -1,0 +1,289 @@
+from typing import Dict
+
+import torch
+import torch.nn.functional as F
+from scvi import REGISTRY_KEYS
+from scvi.distributions import NegativeBinomial, ZeroInflatedNegativeBinomial
+from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
+from scvi.nn import DecoderSCVI, Encoder
+from torch.distributions import Normal
+from torch.distributions import kl_divergence as kl
+
+TensorDict = Dict[str, torch.Tensor]
+
+
+class CellinaModule(BaseModuleClass):
+    """
+    Cellina module with dual encoders (z from counts, s from spatial+z).
+
+    This module implements a dual-encoder variational autoencoder where:
+    - z_encoder processes count data to produce latent representation z
+    - s_encoder processes spatial features concatenated with z to produce latent representation s
+    - decoder reconstructs counts from shifted = z + s (element-wise sum)
+
+    Parameters
+    ----------
+    n_input
+        Number of input genes.
+    n_spatial_input
+        Number of spatial features.
+    library_log_means
+        1 x n_batch array of means of the log library sizes.
+    library_log_vars
+        1 x n_batch array of variances of the log library sizes.
+    n_batch
+        Number of batches, if 0, no batch correction is performed.
+    n_hidden
+        Number of nodes per hidden layer (shared by both encoders).
+    n_latent
+        Dimensionality of the latent space for both z and s encoders.
+    n_layers
+        Number of hidden layers (shared by both encoders).
+    dropout_rate
+        Dropout rate for neural networks.
+    gene_likelihood
+        One of "zinb" or "nb".
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_spatial_input: int,
+        library_log_means: torch.Tensor,
+        library_log_vars: torch.Tensor,
+        n_batch: int = 0,
+        n_hidden: int = 128,
+        n_latent: int = 10,
+        n_layers: int = 1,
+        dropout_rate: float = 0.1,
+        gene_likelihood: str = "zinb",
+    ):
+        super().__init__()
+        self.n_latent = n_latent
+        self.n_batch = n_batch
+        self.gene_likelihood = gene_likelihood
+        # this is needed to comply with some requirement of the VAEMixin class
+        self.latent_distribution = "normal"
+
+        self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
+        self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
+
+        # setup the parameters of the generative model
+        self.px_r = torch.nn.Parameter(torch.randn(n_input))
+
+        # Z encoder: counts -> z
+        self.z_encoder = Encoder(
+            n_input,
+            n_latent,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+        )
+
+        # S encoder: [spatial_x, z] -> s
+        self.s_encoder = Encoder(
+            n_spatial_input + n_latent,  # spatial features + z
+            n_latent,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+        )
+
+        # Library encoder
+        self.l_encoder = Encoder(
+            n_input,
+            1,
+            n_layers=1,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+        )
+
+        # Decoder: shifted (z + s) -> counts
+        self.decoder = DecoderSCVI(
+            n_latent,  # shifted = z + s
+            n_input,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+        )
+
+    def _get_inference_input(self, tensors):
+        """Parse the dictionary to get appropriate args"""
+        x = tensors[REGISTRY_KEYS.X_KEY]
+        spatial_x = tensors["spatial_x"]
+
+        input_dict = dict(x=x, spatial_x=spatial_x)
+        return input_dict
+
+    def _get_generative_input(self, tensors, inference_outputs):
+        shifted = inference_outputs["shifted"]
+        library = inference_outputs["library"]
+
+        input_dict = {
+            "shifted": shifted,
+            "library": library,
+        }
+        return input_dict
+
+    @auto_move_data
+    def inference(self, x, spatial_x):
+        """
+        High level inference method.
+
+        Runs the inference (encoder) model.
+        """
+        # log the input to the variational distribution for numerical stability
+        x_ = torch.log(1 + x)
+
+        # Encode counts -> z
+        qzm, qzv, z = self.z_encoder(x_)
+
+        # Concatenate spatial_x and z, then encode -> s
+        spatial_z_concat = torch.cat([spatial_x, z], dim=-1)
+        qsm, qsv, s = self.s_encoder(spatial_z_concat)
+
+        # Compute shifted = z + s
+        shifted = z + s
+
+        # Library size
+        qlm, qlv, library = self.l_encoder(x_)
+
+        outputs = dict(
+            z=z,
+            qzm=qzm,
+            qzv=qzv,
+            s=s,
+            qsm=qsm,
+            qsv=qsv,
+            shifted=shifted,
+            library=library,
+            qlm=qlm,
+            qlv=qlv,
+        )
+        return outputs
+
+    @auto_move_data
+    def generative(self, shifted, library):
+        """Runs the generative model."""
+        # Decode using shifted = z + s
+        px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library)
+        px_r = torch.exp(self.px_r)
+
+        return dict(px_scale=px_scale, px_r=px_r, px_rate=px_rate, px_dropout=px_dropout)
+
+    def loss(
+        self,
+        tensors,
+        inference_outputs,
+        generative_outputs,
+        kl_weight: float = 1.0,
+    ):
+        """Loss function."""
+        x = tensors[REGISTRY_KEYS.X_KEY]
+        qzm = inference_outputs["qzm"]
+        qzv = inference_outputs["qzv"]
+        qsm = inference_outputs["qsm"]
+        qsv = inference_outputs["qsv"]
+        qlm = inference_outputs["qlm"]
+        qlv = inference_outputs["qlv"]
+        px_rate = generative_outputs["px_rate"]
+        px_r = generative_outputs["px_r"]
+        px_dropout = generative_outputs["px_dropout"]
+
+        # Reconstruction loss
+        if self.gene_likelihood == "zinb":
+            reconst_loss = (
+                -ZeroInflatedNegativeBinomial(mu=px_rate, theta=px_r, zi_logits=px_dropout)
+                .log_prob(x)
+                .sum(dim=-1)
+            )
+        elif self.gene_likelihood == "nb":
+            reconst_loss = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(x).sum(dim=-1)
+
+        # KL divergence for z
+        mean = torch.zeros_like(qzm)
+        scale = torch.ones_like(qzv)
+        kl_divergence_z = kl(Normal(qzm, torch.sqrt(qzv)), Normal(mean, scale)).sum(dim=1)
+
+        # KL divergence for s
+        mean_s = torch.zeros_like(qsm)
+        scale_s = torch.ones_like(qsv)
+        kl_divergence_s = kl(Normal(qsm, torch.sqrt(qsv)), Normal(mean_s, scale_s)).sum(dim=1)
+
+        # KL divergence for library
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        n_batch = self.library_log_means.shape[1]
+        local_library_log_means = F.linear(
+            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
+        )
+        local_library_log_vars = F.linear(
+            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
+        )
+
+        kl_divergence_l = kl(
+            Normal(qlm, torch.sqrt(qlv)),
+            Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
+        ).sum(dim=1)
+
+        # Total KL for warmup (z and s)
+        kl_local_for_warmup = kl_divergence_z + kl_divergence_s
+        kl_local_no_warmup = kl_divergence_l
+
+        weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
+
+        loss = torch.mean(reconst_loss + weighted_kl_local)
+
+        kl_local = dict(
+            kl_divergence_l=kl_divergence_l,
+            kl_divergence_z=kl_divergence_z,
+            kl_divergence_s=kl_divergence_s,
+        )
+        return LossOutput(loss=loss, reconstruction_loss=reconst_loss, kl_local=kl_local)
+
+    @torch.no_grad()
+    def sample(
+        self,
+        tensors,
+        n_samples=1,
+        library_size=1,
+    ) -> torch.Tensor:
+        r"""
+        Generate observation samples from the posterior predictive distribution.
+
+        The posterior predictive distribution is written as :math:`p(\hat{x} \mid x)`.
+
+        Parameters
+        ----------
+        tensors
+            Tensors dict
+        n_samples
+            Number of required samples for each cell
+        library_size
+            Library size to scale samples to
+
+        Returns
+        -------
+        x_new : :py:class:`torch.Tensor`
+            tensor with shape (n_cells, n_genes, n_samples)
+        """
+        inference_kwargs = dict(n_samples=n_samples)
+        inference_outputs, generative_outputs, = self.forward(
+            tensors,
+            inference_kwargs=inference_kwargs,
+            compute_loss=False,
+        )
+
+        px_r = generative_outputs["px_r"]
+        px_rate = generative_outputs["px_rate"]
+        px_dropout = generative_outputs["px_dropout"]
+
+        if self.gene_likelihood == "zinb":
+            dist = ZeroInflatedNegativeBinomial(mu=px_rate, theta=px_r, zi_logits=px_dropout)
+        else:
+            dist = NegativeBinomial(mu=px_rate, theta=px_r)
+
+        if n_samples > 1:
+            exprs = dist.sample().permute([1, 2, 0])
+        else:
+            exprs = dist.sample()
+
+        return exprs.cpu()
