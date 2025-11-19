@@ -97,39 +97,58 @@ class CellinaModule(BaseModuleClass):
         # setup the parameters of the generative model
         self.px_r = torch.nn.Parameter(torch.randn(n_input))
 
+        # Batch injection setup
+        cat_list = [n_batch] if n_batch > 0 else None
+
         # Z encoder: counts -> z
         self.z_encoder = Encoder(
             n_input,
             n_latent,
+            n_cat_list=cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            inject_covariates=True,
+            use_batch_norm=True,
+            use_layer_norm=False,
         )
 
         # S encoder: [spatial_x, z] -> s
         self.s_encoder = Encoder(
             n_spatial_input + n_latent,  # spatial features + z
             n_latent,
+            n_cat_list=cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            inject_covariates=True,
+            use_batch_norm=True,
+            use_layer_norm=False,
         )
 
         # Library encoder
         self.l_encoder = Encoder(
             n_input,
             1,
+            n_cat_list=cat_list,
             n_layers=1,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            inject_covariates=True,
+            use_batch_norm=True,
+            use_layer_norm=False,
         )
 
         # Decoder: shifted (z concat s) -> counts
         self.decoder = DecoderSCVI(
             n_latent * 2,  # shifted = concat(z, s)
             n_input,
+            n_cat_list=cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
+            inject_covariates=True,
+            use_batch_norm=True,
+            use_layer_norm=False,
         )
 
         # Cell type classifier
@@ -165,22 +184,25 @@ class CellinaModule(BaseModuleClass):
         """Parse the dictionary to get appropriate args"""
         x = tensors[REGISTRY_KEYS.X_KEY]
         spatial_x = tensors["spatial_x"]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
-        input_dict = dict(x=x, spatial_x=spatial_x)
+        input_dict = dict(x=x, spatial_x=spatial_x, batch_index=batch_index)
         return input_dict
 
     def _get_generative_input(self, tensors, inference_outputs):
         shifted = inference_outputs["shifted"]
         library = inference_outputs["library"]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
         input_dict = {
             "shifted": shifted,
             "library": library,
+            "batch_index": batch_index,
         }
         return input_dict
 
     @auto_move_data
-    def inference(self, x, spatial_x):
+    def inference(self, x, spatial_x, batch_index):
         """
         High level inference method.
 
@@ -190,17 +212,17 @@ class CellinaModule(BaseModuleClass):
         x_ = torch.log(1 + x)
 
         # Encode counts -> z
-        qzm, qzv, z = self.z_encoder(x_)
+        qzm, qzv, z = self.z_encoder(x_, batch_index)
 
         # Concatenate spatial_x and z, then encode -> s
         spatial_z_concat = torch.cat([spatial_x, z], dim=-1)
-        qsm, qsv, s = self.s_encoder(spatial_z_concat)
+        qsm, qsv, s = self.s_encoder(spatial_z_concat, batch_index)
 
         # Compute shifted = concat(z, s)
         shifted = torch.cat([z, s], dim=-1)
 
         # Library size
-        qlm, qlv, library = self.l_encoder(x_)
+        qlm, qlv, library = self.l_encoder(x_, batch_index)
 
         outputs = dict(
             z=z,
@@ -226,10 +248,10 @@ class CellinaModule(BaseModuleClass):
         return outputs
 
     @auto_move_data
-    def generative(self, shifted, library):
+    def generative(self, shifted, library, batch_index):
         """Runs the generative model."""
         # Decode using shifted = concat(z, s)
-        px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library)
+        px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library, batch_index)
         px_r = torch.exp(self.px_r)
 
         return dict(px_scale=px_scale, px_r=px_r, px_rate=px_rate, px_dropout=px_dropout)

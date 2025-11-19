@@ -171,6 +171,7 @@ def test_discriminator_enabled():
     test_batch = {
         "x": torch.abs(torch.randn(10, adata.n_vars)),  # Use positive values
         "spatial_x": torch.randn(10, n_spatial_features),
+        "batch_index": torch.zeros(10, 1, dtype=torch.long),  # Add batch_index
     }
     with torch.no_grad():
         outputs = model.module.inference(**test_batch)
