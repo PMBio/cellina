@@ -22,7 +22,7 @@ class CellinaModule(BaseModuleClass):
     This module implements a dual-encoder variational autoencoder where:
     - z_encoder processes count data to produce latent representation z
     - s_encoder processes spatial features concatenated with z to produce latent representation s
-    - decoder reconstructs counts from shifted = z + s (element-wise sum)
+    - decoder reconstructs counts from shifted = concat(z, s)
 
     Parameters
     ----------
@@ -124,9 +124,9 @@ class CellinaModule(BaseModuleClass):
             dropout_rate=dropout_rate,
         )
 
-        # Decoder: shifted (z + s) -> counts
+        # Decoder: shifted (z concat s) -> counts
         self.decoder = DecoderSCVI(
-            n_latent,  # shifted = z + s
+            n_latent * 2,  # shifted = concat(z, s)
             n_input,
             n_layers=n_layers,
             n_hidden=n_hidden,
@@ -196,8 +196,8 @@ class CellinaModule(BaseModuleClass):
         spatial_z_concat = torch.cat([spatial_x, z], dim=-1)
         qsm, qsv, s = self.s_encoder(spatial_z_concat)
 
-        # Compute shifted = z + s
-        shifted = z + s
+        # Compute shifted = concat(z, s)
+        shifted = torch.cat([z, s], dim=-1)
 
         # Library size
         qlm, qlv, library = self.l_encoder(x_)
@@ -228,7 +228,7 @@ class CellinaModule(BaseModuleClass):
     @auto_move_data
     def generative(self, shifted, library):
         """Runs the generative model."""
-        # Decode using shifted = z + s
+        # Decode using shifted = concat(z, s)
         px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library)
         px_r = torch.exp(self.px_r)
 

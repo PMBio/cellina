@@ -194,7 +194,7 @@ def test_cellina_latent_representation(adata_with_spatial):
     
     assert latent_z.shape == (adata_with_spatial.n_obs, n_latent)
     assert latent_s.shape == (adata_with_spatial.n_obs, n_latent)
-    assert latent_shifted.shape == (adata_with_spatial.n_obs, n_latent)
+    assert latent_shifted.shape == (adata_with_spatial.n_obs, n_latent * 2)  # concat(z, s)
     
     # Default should be shifted (what goes into decoder)
     latent_default = model.get_latent_representation()

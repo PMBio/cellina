@@ -101,7 +101,7 @@ adata.obsm['X_cellina_s'] = model.get_latent_representation(latent_key='s')
 Cellina implements a dual-encoder VAE:
 - **z encoder**: Processes count data to capture biological identity
 - **s encoder**: Processes spatial features (concatenated with z) to capture spatial context
-- **Decoder**: Reconstructs counts from shifted = z + s
+- **Decoder**: Reconstructs counts from shifted = concat(z, s)
 
 Optional components:
 - **Cell type classifier**: Supervised head on z for cell type prediction
