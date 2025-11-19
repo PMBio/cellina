@@ -4,21 +4,21 @@ requires = ["hatchling"]
 
 
 [project]
-name = "simple-scvi"
+name = "cellina"
 version = "0.0.1"
-description = "External and simple implementation of scVI"
+description = "Cellina: Dual-encoder VAE for spatial transcriptomics with adversarial domain forgetting"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Adam Gayoso"},
+    {name = "Dimitrov Lab"},
 ]
 maintainers = [
-    {name = "Adam Gayoso", email = "adamgayoso@berkeley.edu"},
+    {name = "Dimitrov Lab"},
 ]
-urls.Documentation = "https://simple-scvi.readthedocs.io/"
-urls.Source = "https://github.com/scverse/simple-scvi"
-urls.Home-page = "https://github.com/scverse/simple-scvi"
+urls.Documentation = "https://github.com/PMBio/cellina"
+urls.Source = "https://github.com/PMBio/cellina"
+urls.Home-page = "https://github.com/PMBio/cellina"
 dependencies = [
     "anndata",
     # for debug logging (referenced from the issue template)

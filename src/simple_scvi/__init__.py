@@ -25,4 +25,4 @@ logger.propagate = False
 
 __all__ = ["MyModel", "MyModule"]
 
-__version__ = version("simple-scvi")
+__version__ = version("cellina")
