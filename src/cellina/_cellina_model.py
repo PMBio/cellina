@@ -199,44 +199,21 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         # Set training plan class
         if self.module.discriminator_lambda > 0:
-            # Temporarily override the training plan class
-            original_training_plan_cls = self._training_plan_cls
+            # Use adversarial training plan when discriminator is enabled
             self._training_plan_cls = CellinaAdversarialTrainingPlan
-            
-            # Add discriminator_lambda to plan_kwargs
-            plan_kwargs = plan_kwargs or {}
-            plan_kwargs["discriminator_lambda"] = self.module.discriminator_lambda
-            
-            try:
-                super().train(
-                    max_epochs=max_epochs,
-                    accelerator=accelerator,
-                    devices=devices,
-                    train_size=train_size,
-                    validation_size=validation_size,
-                    shuffle_set_split=shuffle_set_split,
-                    batch_size=batch_size,
-                    datasplitter_kwargs=datasplitter_kwargs,
-                    plan_kwargs=plan_kwargs,
-                    **kwargs,
-                )
-            finally:
-                # Restore original training plan class
-                self._training_plan_cls = original_training_plan_cls
-        else:
-            # Use default training plan
-            super().train(
-                max_epochs=max_epochs,
-                accelerator=accelerator,
-                devices=devices,
-                train_size=train_size,
-                validation_size=validation_size,
-                shuffle_set_split=shuffle_set_split,
-                batch_size=batch_size,
-                datasplitter_kwargs=datasplitter_kwargs,
-                plan_kwargs=plan_kwargs,
-                **kwargs,
-            )
+        
+        super().train(
+            max_epochs=max_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            train_size=train_size,
+            validation_size=validation_size,
+            shuffle_set_split=shuffle_set_split,
+            batch_size=batch_size,
+            datasplitter_kwargs=datasplitter_kwargs,
+            plan_kwargs=plan_kwargs,
+            **kwargs,
+        )
 
     @torch.inference_mode()
     def get_latent_representation(

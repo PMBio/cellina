@@ -232,6 +232,57 @@ class CellinaModule(BaseModuleClass):
 
         return dict(px_scale=px_scale, px_r=px_r, px_rate=px_rate, px_dropout=px_dropout)
 
+    def _compute_classifier_metrics(
+        self,
+        classifier: Optional[Classifier],
+        weight: float,
+        inference_outputs: dict,
+        labels: torch.Tensor,
+        reconst_loss_shape: torch.Tensor,
+        metric_name: str,
+    ) -> tuple[torch.Tensor, float, float]:
+        """
+        Compute loss and accuracy for a classifier (cell type classifier or domain discriminator).
+        
+        Parameters
+        ----------
+        classifier
+            The classifier network (or None if disabled)
+        weight
+            Weight for the classifier loss (e.g., classifier_lambda or discriminator_weight)
+        inference_outputs
+            Outputs from inference containing z and optionally pre-computed logits
+        labels
+            True labels for classification
+        reconst_loss_shape
+            Shape reference for zero loss tensor
+        metric_name
+            Base name for metrics (e.g., 'classifier' or 'discriminator')
+        
+        Returns
+        -------
+        Tuple of (loss_tensor, loss_scalar, accuracy_scalar)
+        """
+        if weight != 0.0 and classifier is not None:
+            # Get or compute logits
+            logits_key = f"{metric_name}_logits"
+            logits = inference_outputs.get(logits_key)
+            if logits is None:
+                logits = classifier(inference_outputs["z"])
+            
+            # Compute cross-entropy loss
+            loss = F.cross_entropy(logits, labels, reduction="none")
+            loss = weight * loss
+            
+            # Compute accuracy
+            predictions = torch.argmax(logits, dim=1)
+            accuracy = (predictions == labels).float().mean().item()
+            
+            return loss, loss.mean().item(), accuracy
+        else:
+            # Return zeros when classifier is disabled
+            return torch.zeros_like(reconst_loss_shape), 0.0, 0.0
+
     def loss(
         self,
         tensors,
@@ -310,38 +361,27 @@ class CellinaModule(BaseModuleClass):
 
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
 
-        classifier_loss = torch.zeros_like(reconst_loss)
-        if self.classifier is not None:
-            labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
-            classifier_logits = inference_outputs.get("classifier_logits")
-            if classifier_logits is None:
-                classifier_logits = self.classifier(inference_outputs["z"])
-            classifier_loss = F.cross_entropy(
-                classifier_logits,
-                labels,
-                reduction="none",
-            )
-        
-        # NOTE: do we also apply warmup to the classifier loss?
-        classifier_loss = self.classifier_lambda * classifier_loss # * kl_local_for_warmup
+        # Cell type classifier
+        labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
+        classifier_loss, classifier_loss_metric, classifier_accuracy = self._compute_classifier_metrics(
+            classifier=self.classifier,
+            weight=self.classifier_lambda,
+            inference_outputs=inference_outputs,
+            labels=labels,
+            reconst_loss_shape=reconst_loss,
+            metric_name="classifier",
+        )
 
-        # Domain discriminator loss
-        discriminator_loss = torch.zeros_like(reconst_loss)
-        if discriminator_weight != 0.0 and self.domain_discriminator is not None:
-            domain_labels = tensors["domain_key"].reshape(-1).long()
-            z = inference_outputs["z"]
-            discriminator_logits = inference_outputs.get("discriminator_logits")
-            if discriminator_logits is None:
-                discriminator_logits = self.domain_discriminator(z)
-            
-            # Standard cross-entropy with true domain labels
-            discriminator_loss = F.cross_entropy(
-                discriminator_logits,
-                domain_labels,
-                reduction="none",
-            )
-            # Sign of discriminator_weight controls gradient direction
-            discriminator_loss = discriminator_weight * discriminator_loss
+        # Domain discriminator
+        domain_labels = tensors["domain_key"].reshape(-1).long()
+        discriminator_loss, discriminator_loss_metric, discriminator_accuracy = self._compute_classifier_metrics(
+            classifier=self.domain_discriminator,
+            weight=discriminator_weight,
+            inference_outputs=inference_outputs,
+            labels=domain_labels,
+            reconst_loss_shape=reconst_loss,
+            metric_name="discriminator",
+        )
 
         total_loss = reconst_loss + weighted_kl_local + classifier_loss + discriminator_loss
         loss = torch.mean(total_loss)
@@ -352,19 +392,12 @@ class CellinaModule(BaseModuleClass):
             kl_divergence_s=kl_divergence_s,
         )
         
-        extra_metrics = {}
-        extra_metrics['classifier_loss'] = classifier_loss.mean()
-        # Note: discriminator_loss sign indicates training phase (pos=train disc, neg=fool disc)
-        extra_metrics['discriminator_loss'] = discriminator_loss.mean()
-            
-        if discriminator_weight != 0.0 and self.domain_discriminator is not None:
-            # Compute discriminator accuracy for monitoring
-            discriminator_logits = inference_outputs.get("discriminator_logits")
-            if discriminator_logits is None:
-                discriminator_logits = self.domain_discriminator(z)
-            predictions = torch.argmax(discriminator_logits, dim=1)
-            accuracy = (predictions == domain_labels).float().mean()
-            extra_metrics['discriminator_accuracy'] = accuracy
+        extra_metrics = {
+            'classifier_loss': classifier_loss_metric,
+            'classifier_accuracy': classifier_accuracy,
+            'discriminator_loss': discriminator_loss_metric,
+            'discriminator_accuracy': discriminator_accuracy,
+        }
 
         return LossOutput(
             loss=loss,
