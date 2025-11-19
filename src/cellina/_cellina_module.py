@@ -10,6 +10,8 @@ from scvi.nn import DecoderSCVI, Encoder
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
 
+from ._constants import DOMAINS_KEY
+
 TensorDict = Dict[str, torch.Tensor]
 
 
@@ -54,11 +56,11 @@ class CellinaModule(BaseModuleClass):
         when labels_key is provided in setup_anndata().
     discriminator_lambda
         Weight for the adversarial domain discriminator loss. Set to 0 (default) to disable.
-        When > 0, requires domain_key to be provided in setup_anndata().
+        When > 0, requires domains_key to be provided in setup_anndata().
     discriminator_kwargs
         Extra keyword args forwarded to domain discriminator Classifier.
     n_domains
-        Number of domain labels. Automatically set from adata when domain_key is provided.
+        Number of domain labels. Automatically set from adata when domains_key is provided.
     """
 
     def __init__(
@@ -147,7 +149,7 @@ class CellinaModule(BaseModuleClass):
             if n_domains is None or n_domains < 2:
                 raise ValueError(
                     "discriminator_lambda > 0 requires n_domains >= 2. "
-                    "Please provide domain_key in setup_anndata()."
+                    "Please provide domains_key in setup_anndata()."
                 )
             discriminator_kwargs = dict(discriminator_kwargs or {})
             self.domain_discriminator = Classifier(
@@ -373,7 +375,7 @@ class CellinaModule(BaseModuleClass):
         )
 
         # Domain discriminator
-        domain_labels = tensors["domain_key"].reshape(-1).long()
+        domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
         discriminator_loss, discriminator_loss_metric, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
             weight=discriminator_weight,

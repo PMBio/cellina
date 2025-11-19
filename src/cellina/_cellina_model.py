@@ -18,13 +18,10 @@ from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
 from scvi.utils import setup_anndata_dsp
 
 from ._cellina_module import CellinaModule
+from ._constants import DOMAINS_KEY, SPATIAL_X_KEY
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
-
-# Custom registry keys
-SPATIAL_X_KEY = "spatial_x"
-DOMAIN_KEY = "domain_key"
 
 class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
@@ -91,7 +88,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             library_log_vars=library_log_vars,
             n_labels=self.summary_stats.get("n_labels"),
             discriminator_lambda=discriminator_lambda,
-            n_domains=self.summary_stats.get("n_domain_key"),
+            n_domains=self.summary_stats.get("n_domains"),
             **model_kwargs,
         )
         
@@ -112,7 +109,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         spatial_obsm_key: str = "spatial_x",
         batch_key: Optional[str] = None,
         labels_key: Optional[str] = None,
-        domain_key: Optional[str] = None,
+        domains_key: Optional[str] = None,
         layer: Optional[str] = None,
         categorical_covariate_keys: Optional[List[str]] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
@@ -128,7 +125,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Key in `adata.obsm` containing spatial features matrix.
         %(param_batch_key)s
         %(param_labels_key)s
-        domain_key
+        domains_key
             Key in `adata.obs` for domain labels (categorical). Required if discriminator_lambda > 0.
         %(param_layer)s
         %(param_cat_cov_keys)s
@@ -144,7 +141,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             ObsmField(SPATIAL_X_KEY, spatial_obsm_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
-            CategoricalObsField(DOMAIN_KEY, domain_key),
+            CategoricalObsField(DOMAINS_KEY, domains_key),
             CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
         ]
@@ -220,7 +217,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices: Optional[list] = None,
-        give_mean: bool = True,
+        give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: Optional[str] = "shifted",
     ):
@@ -267,7 +264,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             elif latent_key == 's':
                 lat = outputs["qsm"] if give_mean else outputs["s"]
             else:  # shifted
-                if give_mean:
+                if give_mean: # TODO: this should not work like this, potentially inconsistent
                     # For mean, sum the means
                     lat = outputs["qzm"] + outputs["qsm"]
                 else:

@@ -3,6 +3,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
+from ._constants import SPATIAL_X_KEY
 
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):
@@ -181,7 +182,7 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def weighted_pseudobulks(adata, sp, groupby, obsm_key='spatial_pseodobulks', binarize=True):
+def weighted_pseudobulks(adata, sp, groupby, obsm_key=SPATIAL_X_KEY, binarize=True):
     # Ensure `sp` is a sparse matrix
     if not isinstance(sp, csr_matrix):
         sp = csr_matrix(sp)

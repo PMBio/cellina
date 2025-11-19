@@ -147,7 +147,7 @@ def test_discriminator_enabled():
         adata, 
         batch_key="batch", 
         spatial_obsm_key="spatial_x",
-        domain_key="domain"
+        domains_key="domain"
     )
     
     n_latent = 5

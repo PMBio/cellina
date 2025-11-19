@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from scvi.train import TrainingPlan
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+from ._constants import DOMAINS_KEY
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +79,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             z = inference_outputs["z"].detach()  # Explicitly detach
         
         # Compute discriminator loss (predicting true domains)
-        domain_labels = batch["domain_key"].reshape(-1).long()
+        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
         disc_logits = self.module.domain_discriminator(z)
         disc_loss = F.cross_entropy(
             disc_logits,
@@ -182,7 +184,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         
         # Compute discriminator metrics
-        domain_labels = batch["domain_key"].reshape(-1).long()
+        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
         disc_logits = inference_outputs.get("discriminator_logits")
         
         if disc_logits is not None:

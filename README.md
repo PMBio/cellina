@@ -77,6 +77,7 @@ CellinaModel.setup_anndata(
     adata, 
     batch_key="batch", 
     labels_key="cell_type",
+    domains_key="niche",
     spatial_obsm_key="spatial_x"
 )
 
