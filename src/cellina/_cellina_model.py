@@ -18,12 +18,13 @@ from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
 from scvi.utils import setup_anndata_dsp
 
 from ._cellina_module import CellinaModule
+from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
 
-# Custom registry key for spatial data
+# Custom registry keys
 SPATIAL_X_KEY = "spatial_x"
-
+DOMAIN_KEY = "domain_key"
 
 class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
@@ -44,6 +45,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Dimensionality of the latent space for both z and s encoders.
     n_layers
         Number of hidden layers (shared by both encoders).
+    discriminator_lambda
+        Weight for adversarial domain forgetting. Set to 0 (default) to disable.
     **model_kwargs
         Keyword args for :class:`~cellina.CellinaModule`
 
@@ -65,6 +68,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_hidden: int = 128,
         n_latent: int = 10,
         n_layers: int = 1,
+        discriminator_lambda: float = 0.0,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -85,15 +89,20 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_layers=n_layers,
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
-            n_labels=self.summary_stats["n_labels"],
+            n_labels=self.summary_stats.get("n_labels"),
+            discriminator_lambda=discriminator_lambda,
+            n_domains=self.summary_stats.get("n_domain_key"),
             **model_kwargs,
         )
+        
+        # Update summary string
+        adv_str = f" with adversarial domain forgetting" if discriminator_lambda > 0 else ""
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders)"
+            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}"
         )
         self.init_params_ = self._get_init_params(locals())
 
-        logger.info("The Cellina model has been initialized")
+        logger.info(f"The Cellina model has been initialized{adv_str}")
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -103,6 +112,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         spatial_obsm_key: str = "spatial_x",
         batch_key: Optional[str] = None,
         labels_key: Optional[str] = None,
+        domain_key: Optional[str] = None,
         layer: Optional[str] = None,
         categorical_covariate_keys: Optional[List[str]] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
@@ -118,6 +128,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Key in `adata.obsm` containing spatial features matrix.
         %(param_batch_key)s
         %(param_labels_key)s
+        domain_key
+            Key in `adata.obs` for domain labels (categorical). Required if discriminator_lambda > 0.
         %(param_layer)s
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
@@ -132,12 +144,99 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             ObsmField(SPATIAL_X_KEY, spatial_obsm_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
+            CategoricalObsField(DOMAIN_KEY, domain_key),
             CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
+
+    def train(
+        self,
+        max_epochs: int = 400,
+        accelerator: str = "auto",
+        devices: int | list[int] | str = "auto",
+        train_size: float = 0.9,
+        validation_size: float | None = None,
+        shuffle_set_split: bool = True,
+        batch_size: int = 128,
+        datasplitter_kwargs: dict | None = None,
+        plan_kwargs: dict | None = None,
+        **kwargs,
+    ):
+        """
+        Train the model.
+        
+        Parameters
+        ----------
+        max_epochs
+            Number of passes through the dataset.
+        accelerator
+            Supports passing different accelerator types ("cpu", "gpu", "tpu", "ipu", "hpu", "mps", "auto")
+            as well as custom accelerator instances.
+        devices
+            The devices to use. Can be set to a positive number (int or str), a sequence of device indices
+            (list or str), the value ``-1`` to indicate all available devices should be used, or ``"auto"`` for
+            automatic selection based on the chosen accelerator.
+        train_size
+            Size of training set in the range [0.0, 1.0].
+        validation_size
+            Size of the validation set. If `None`, defaults to 1 - `train_size`. If
+            `train_size + validation_size < 1`, the remaining cells belong to a test set.
+        shuffle_set_split
+            Whether to shuffle indices before splitting. If `False`, the val, train, and test set are split in
+            the sequential order of the data according to `validation_size` and `train_size` percentages.
+        batch_size
+            Minibatch size to use during training.
+        datasplitter_kwargs
+            Additional keyword arguments passed into :class:`~scvi.dataloaders.DataSplitter`.
+        plan_kwargs
+            Keyword args for :class:`~cellina.CellinaAdversarialTrainingPlan` or :class:`~scvi.train.TrainingPlan`.
+            Keyword arguments passed to `train()` will overwrite values present in `plan_kwargs`, when appropriate.
+        **kwargs
+            Other keyword args for :class:`~scvi.train.Trainer`.
+        """
+        # Set training plan class
+        if self.module.discriminator_lambda > 0:
+            # Temporarily override the training plan class
+            original_training_plan_cls = self._training_plan_cls
+            self._training_plan_cls = CellinaAdversarialTrainingPlan
+            
+            # Add discriminator_lambda to plan_kwargs
+            plan_kwargs = plan_kwargs or {}
+            plan_kwargs["discriminator_lambda"] = self.module.discriminator_lambda
+            
+            try:
+                super().train(
+                    max_epochs=max_epochs,
+                    accelerator=accelerator,
+                    devices=devices,
+                    train_size=train_size,
+                    validation_size=validation_size,
+                    shuffle_set_split=shuffle_set_split,
+                    batch_size=batch_size,
+                    datasplitter_kwargs=datasplitter_kwargs,
+                    plan_kwargs=plan_kwargs,
+                    **kwargs,
+                )
+            finally:
+                # Restore original training plan class
+                self._training_plan_cls = original_training_plan_cls
+        else:
+            # Use default training plan
+            super().train(
+                max_epochs=max_epochs,
+                accelerator=accelerator,
+                devices=devices,
+                train_size=train_size,
+                validation_size=validation_size,
+                shuffle_set_split=shuffle_set_split,
+                batch_size=batch_size,
+                datasplitter_kwargs=datasplitter_kwargs,
+                plan_kwargs=plan_kwargs,
+                **kwargs,
+            )
 
     @torch.inference_mode()
     def get_latent_representation(

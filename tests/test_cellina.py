@@ -27,7 +27,7 @@ def test_cellina_model(adata_with_spatial):
                                spatial_obsm_key="spatial_x",
                                labels_key="cell_labels"
                                )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     
     # Test architecture
     assert model.module.n_latent == n_latent
@@ -112,6 +112,71 @@ def test_classifier_disabled_by_default():
     model = CellinaModel(adata, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
+
+
+def test_discriminator_disabled_by_default():
+    """Test that discriminator is disabled when discriminator_lambda=0 (default)."""
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
+    
+    # Default discriminator_lambda should be 0
+    model = CellinaModel(adata, n_latent=5)
+    assert model.module.domain_discriminator is None
+    assert model.module.discriminator_lambda == 0.0
+    
+    # Explicitly set to 0
+    model2 = CellinaModel(adata, n_latent=5, discriminator_lambda=0.0)
+    assert model2.module.domain_discriminator is None
+    assert model2.module.discriminator_lambda == 0.0
+
+
+def test_discriminator_enabled():
+    """Test that discriminator works when discriminator_lambda > 0."""
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    # Add domain labels (required for discriminator)
+    n_domains = 3
+    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
+    
+    CellinaModel.setup_anndata(
+        adata, 
+        batch_key="batch", 
+        spatial_obsm_key="spatial_x",
+        domain_key="domain"
+    )
+    
+    n_latent = 5
+    model = CellinaModel(adata, n_latent=n_latent, discriminator_lambda=1.0)
+    
+    # Check discriminator is initialized
+    assert model.module.domain_discriminator is not None
+    assert model.module.discriminator_lambda == 1.0
+    
+    # Test training with adversarial plan
+    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
+    
+    # Check that discriminator metrics are logged
+    history_keys = list(model.history_.keys())
+    assert any("discriminator" in key for key in history_keys), \
+        f"No discriminator metrics found in history. Keys: {history_keys}"
+    
+    # Verify inference outputs include discriminator logits
+    model.module.eval()
+    model.module.to("cpu")  # Move to CPU for testing
+    test_batch = {
+        "x": torch.abs(torch.randn(10, adata.n_vars)),  # Use positive values
+        "spatial_x": torch.randn(10, n_spatial_features),
+    }
+    with torch.no_grad():
+        outputs = model.module.inference(**test_batch)
+    
+    assert "discriminator_logits" in outputs
+    assert outputs["discriminator_logits"].shape == (10, n_domains)
 
 
 def test_cellina_latent_representation(adata_with_spatial):

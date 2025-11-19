@@ -52,6 +52,13 @@ class CellinaModule(BaseModuleClass):
     n_labels
         Number of labels for the optional classifier head. Automatically set from adata
         when labels_key is provided in setup_anndata().
+    discriminator_lambda
+        Weight for the adversarial domain discriminator loss. Set to 0 (default) to disable.
+        When > 0, requires domain_key to be provided in setup_anndata().
+    discriminator_kwargs
+        Extra keyword args forwarded to domain discriminator Classifier.
+    n_domains
+        Number of domain labels. Automatically set from adata when domain_key is provided.
     """
 
     def __init__(
@@ -69,12 +76,16 @@ class CellinaModule(BaseModuleClass):
         classifier_lambda: float = 0.0,
         classifier_kwargs: Optional[Dict[str, Any]] = None,
         n_labels: Optional[int] = None,
+        discriminator_lambda: float = 0.0,
+        discriminator_kwargs: Optional[Dict[str, Any]] = None,
+        n_domains: Optional[int] = None,
     ):
         super().__init__()
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
+        self.discriminator_lambda = discriminator_lambda
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
 
@@ -119,6 +130,7 @@ class CellinaModule(BaseModuleClass):
             n_hidden=n_hidden,
         )
 
+        # Cell type classifier
         self.classifier: Optional[Classifier] = None
         if classifier_lambda > 0:
             classifier_kwargs = dict(classifier_kwargs or {})
@@ -127,6 +139,24 @@ class CellinaModule(BaseModuleClass):
                 n_labels=n_labels, 
                 logits=True, 
                 **classifier_kwargs
+            )
+
+        # Domain discriminator
+        self.domain_discriminator: Optional[Classifier] = None
+        if discriminator_lambda > 0:
+            if n_domains is None or n_domains < 2:
+                raise ValueError(
+                    "discriminator_lambda > 0 requires n_domains >= 2. "
+                    "Please provide domain_key in setup_anndata()."
+                )
+            discriminator_kwargs = dict(discriminator_kwargs or {})
+            self.domain_discriminator = Classifier(
+                n_input=n_latent,
+                n_labels=n_domains,
+                n_hidden=discriminator_kwargs.pop("n_hidden", 32),
+                n_layers=discriminator_kwargs.pop("n_layers", 2),
+                logits=True,
+                **discriminator_kwargs
             )
 
     def _get_inference_input(self, tensors):
@@ -182,8 +212,15 @@ class CellinaModule(BaseModuleClass):
             qlm=qlm,
             qlv=qlv,
         )
+        
+        # Cell type classifier
         if self.classifier is not None:
             outputs["classifier_logits"] = self.classifier(z)
+        
+        # Domain discriminator
+        if self.domain_discriminator is not None:
+            outputs["discriminator_logits"] = self.domain_discriminator(z)
+        
         return outputs
 
     @auto_move_data
@@ -201,8 +238,26 @@ class CellinaModule(BaseModuleClass):
         inference_outputs,
         generative_outputs,
         kl_weight: float = 1.0,
+        discriminator_weight: float = 0.0,
     ):
-        """Loss function."""
+        """
+        Loss function.
+        
+        Parameters
+        ----------
+        tensors
+            Input tensors from data loader
+        inference_outputs
+            Outputs from inference method
+        generative_outputs
+            Outputs from generative method
+        kl_weight
+            Weight for KL divergence terms (warmup)
+        discriminator_weight
+            Weight for discriminator loss. Sign controls gradient direction:
+            - Positive: train discriminator to predict domains (Step 1)
+            - Negative: train encoder to fool discriminator (Step 2)
+        """
         x = tensors[REGISTRY_KEYS.X_KEY]
         qzm = inference_outputs["qzm"]
         qzv = inference_outputs["qzv"]
@@ -266,9 +321,29 @@ class CellinaModule(BaseModuleClass):
                 labels,
                 reduction="none",
             )
+        
+        # NOTE: do we also apply warmup to the classifier loss?
+        classifier_loss = self.classifier_lambda * classifier_loss # * kl_local_for_warmup
 
-        classifier_loss = self.classifier_lambda * classifier_loss
-        total_loss = reconst_loss + weighted_kl_local + classifier_loss
+        # Domain discriminator loss
+        discriminator_loss = torch.zeros_like(reconst_loss)
+        if discriminator_weight != 0.0 and self.domain_discriminator is not None:
+            domain_labels = tensors["domain_key"].reshape(-1).long()
+            z = inference_outputs["z"]
+            discriminator_logits = inference_outputs.get("discriminator_logits")
+            if discriminator_logits is None:
+                discriminator_logits = self.domain_discriminator(z)
+            
+            # Standard cross-entropy with true domain labels
+            discriminator_loss = F.cross_entropy(
+                discriminator_logits,
+                domain_labels,
+                reduction="none",
+            )
+            # Sign of discriminator_weight controls gradient direction
+            discriminator_loss = discriminator_weight * discriminator_loss
+
+        total_loss = reconst_loss + weighted_kl_local + classifier_loss + discriminator_loss
         loss = torch.mean(total_loss)
 
         kl_local = dict(
@@ -278,9 +353,18 @@ class CellinaModule(BaseModuleClass):
         )
         
         extra_metrics = {}
-        if self.classifier is not None:
-            # Take mean to make it a scalar (0-d tensor) for logging
-            extra_metrics['classifier_loss'] = classifier_loss.mean()
+        extra_metrics['classifier_loss'] = classifier_loss.mean()
+        # Note: discriminator_loss sign indicates training phase (pos=train disc, neg=fool disc)
+        extra_metrics['discriminator_loss'] = discriminator_loss.mean()
+            
+        if discriminator_weight != 0.0 and self.domain_discriminator is not None:
+            # Compute discriminator accuracy for monitoring
+            discriminator_logits = inference_outputs.get("discriminator_logits")
+            if discriminator_logits is None:
+                discriminator_logits = self.domain_discriminator(z)
+            predictions = torch.argmax(discriminator_logits, dim=1)
+            accuracy = (predictions == domain_labels).float().mean()
+            extra_metrics['discriminator_accuracy'] = accuracy
 
         return LossOutput(
             loss=loss,
