@@ -3,12 +3,11 @@
 ## Core
 
 ```{eval-rst}
-.. module:: simple_scvi
-.. currentmodule:: simple_scvi
+.. module:: cellina
+.. currentmodule:: cellina
 
 .. autosummary::
     :toctree: generated
 
-    MyModel
-    MyPyroModel
+    CellinaModel
 ```

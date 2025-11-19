@@ -52,7 +52,7 @@ test = [
 ]
 
 [tool.coverage.run]
-source = ["simple_scvi"]
+source = ["cellina"]
 omit = [
     "**/test_*.py",
 ]
@@ -108,12 +108,12 @@ skip = [
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "src/simple_scvi"
+    "src/cellina"
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/simple_scvi",
+    "src/cellina",
     "pyproject.toml",
     "README.md",
     "LICENSE",
