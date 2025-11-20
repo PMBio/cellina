@@ -264,7 +264,7 @@ class CellinaModule(BaseModuleClass):
         labels: torch.Tensor,
         reconst_loss_shape: torch.Tensor,
         metric_name: str,
-    ) -> tuple[torch.Tensor, float, float]:
+    ) -> tuple[torch.Tensor, float]:
         """
         Compute loss and accuracy for a classifier (cell type classifier or domain discriminator).
         
@@ -285,7 +285,7 @@ class CellinaModule(BaseModuleClass):
         
         Returns
         -------
-        Tuple of (loss_tensor, loss_scalar, accuracy_scalar)
+        Tuple of (loss_tensor, accuracy_scalar)
         """
         if weight != 0.0 and classifier is not None:
             # Get or compute logits
@@ -302,10 +302,10 @@ class CellinaModule(BaseModuleClass):
             predictions = torch.argmax(logits, dim=1)
             accuracy = (predictions == labels).float().mean().item()
             
-            return loss, loss.mean().item(), accuracy
+            return loss, accuracy
         else:
             # Return zeros when classifier is disabled
-            return torch.zeros_like(reconst_loss_shape), 0.0, 0.0
+            return torch.zeros_like(reconst_loss_shape), 0.0
 
     def loss(
         self,
@@ -386,7 +386,7 @@ class CellinaModule(BaseModuleClass):
 
         # Cell type classifier
         labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
-        classifier_loss, classifier_loss_metric, classifier_accuracy = self._compute_classifier_metrics(
+        classifier_loss, classifier_accuracy = self._compute_classifier_metrics(
             classifier=self.classifier,
             weight=self.classifier_lambda,
             inference_outputs=inference_outputs,
@@ -397,7 +397,7 @@ class CellinaModule(BaseModuleClass):
 
         # Domain discriminator
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
-        discriminator_loss, discriminator_loss_metric, discriminator_accuracy = self._compute_classifier_metrics(
+        discriminator_loss, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
             weight=discriminator_lambda,
             inference_outputs=inference_outputs,
@@ -422,10 +422,10 @@ class CellinaModule(BaseModuleClass):
         
         extra_metrics = {
             'vae_loss': vae_loss.item(),
-            'classifier_loss': classifier_loss_metric,
+            'classifier_loss': classifier_loss.mean(),
             'classifier_accuracy': classifier_accuracy,
-            'discriminator_loss': discriminator_loss_metric,
-            'discriminator_accuracy': discriminator_accuracy,
+            'fool_loss': discriminator_loss.mean(),
+            'fool_accuracy': discriminator_accuracy,
         }
 
         return LossOutput(

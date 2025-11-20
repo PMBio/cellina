@@ -79,7 +79,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         
         # Compute discriminator loss and accuracy using shared method
         domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
-        disc_loss_tensor, _, disc_accuracy = self.module._compute_classifier_metrics(
+        disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
             classifier=self.module.domain_discriminator,
             weight=kappa,
             inference_outputs={"z": z_detach},
@@ -101,42 +101,27 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # =====================================================================
         # STEP 2: Train VAE + Fool Discriminator (Frozen Discriminator)
         # =====================================================================
-        # Full forward pass through VAE (computes z with gradients)
-        inference_inputs = self.module._get_inference_input(batch)
-        inference_outputs = self.module.inference(**inference_inputs)
-        generative_inputs = self.module._get_generative_input(batch, inference_outputs)
-        generative_outputs = self.module.generative(**generative_inputs)
+        # Freeze discriminator parameters
+        for param in self.module.domain_discriminator.parameters():
+            param.requires_grad = False
         
-        # Compute VAE loss WITHOUT discriminator (discriminator_lambda=0)
+        # Compute VAE loss WITHOUT discriminator (discriminator_lambda=-kappa)
+        inference_outputs, generative_outputs, scvi_loss = self.forward(
+                batch,
+                loss_kwargs={
+                    "kl_weight": self.kl_weight,
+                    "discriminator_lambda": kappa,  # Exclude discriminator from validation loss
+                }
+            )
+        
         scvi_loss = self.module.loss(
             batch,
             inference_outputs,
             generative_outputs,
             kl_weight=self.kl_weight,
-            discriminator_lambda=0.0,
+            discriminator_lambda=-kappa,
         )
-        
-        # Compute adversarial loss separately (gradients to encoder only)
-        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
-        
-        # Freeze discriminator parameters
-        for param in self.module.domain_discriminator.parameters():
-            param.requires_grad = False
-        
-        # Compute adversarial loss using shared method (reuses discriminator_logits from inference_outputs)
-        fool_loss_tensor, _, _ = self.module._compute_classifier_metrics(
-            classifier=self.module.domain_discriminator,
-            weight=-kappa,  # Negative weight to fool discriminator
-            inference_outputs=inference_outputs,
-            labels=domain_labels,
-            reconst_loss_shape=None,
-            metric_name="discriminator"
-        )
-        fool_loss = fool_loss_tensor.mean()
-        
-        # Unfreeze discriminator for next iteration
-        for param in self.module.domain_discriminator.parameters():
-            param.requires_grad = True
+        fool_loss = scvi_loss.extra_metrics["fool_loss"]
         
         # Total training loss = scvi_loss (VAE + classifier with gradients) + adversarial
         total_train_loss = scvi_loss.loss + fool_loss
@@ -145,6 +130,10 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         opt_vae.zero_grad()
         self.manual_backward(total_train_loss)
         opt_vae.step()
+        
+        # Unfreeze discriminator for next iteration
+        for param in self.module.domain_discriminator.parameters():
+            param.requires_grad = True
         
         # Log total and adversarial loss
         self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -163,26 +152,33 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Compute kappa for discriminator weighting
         kappa = self._get_kappa()
         
-        # Prepare loss kwargs for validation
-        loss_kwargs = {
-            "kl_weight": self.kl_weight,
-            "discriminator_lambda": kappa,
-        }
-        
-        # Forward pass
-        inference_outputs, generative_outputs, scvi_loss = self.forward(
-            batch,
-            loss_kwargs=loss_kwargs
-        )
-        
-        # Total validation loss (VAE + classifier, consistent with train_loss)
-        loss = scvi_loss.loss
-        
-        # Log validation loss and all metrics from extra_metrics
-        self.log("validation_loss", loss, on_step=False, on_epoch=True)
+        with torch.no_grad():
+            # Forward pass WITHOUT discriminator in loss (consistent with training)
+            inference_outputs, generative_outputs, scvi_loss = self.forward(
+                batch,
+                loss_kwargs={
+                    "kl_weight": self.kl_weight,
+                    "discriminator_lambda": kappa,  # Exclude discriminator from validation loss
+                }
+            )
+            
+            # Manually compute discriminator metrics for logging only
+            domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
+            disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
+                classifier=self.module.domain_discriminator,
+                weight=-kappa,
+                inference_outputs=inference_outputs,
+                labels=domain_labels,
+                reconst_loss_shape=None,
+                metric_name="discriminator"
+            )
+            scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean()
+            scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
+
+        self.log("validation_loss", scvi_loss.loss, on_step=False, on_epoch=True)
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         
-        return loss
+        return scvi_loss.loss
 
     def configure_optimizers(self):
         """
