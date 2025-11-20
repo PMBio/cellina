@@ -89,8 +89,17 @@ def test_cellina_losses(adata_with_spatial):
     assert "kl_divergence_s" in loss_output.kl_local
     assert "kl_divergence_l" in loss_output.kl_local
     
-    # Classifier loss should be in extra_metrics
+    # Explicit loss components should be in extra_metrics
+    assert "vae_loss" in loss_output.extra_metrics
     assert "classifier_loss" in loss_output.extra_metrics
+    assert "discriminator_loss" in loss_output.extra_metrics
+    
+    # Verify vae_loss is just reconstruction + KL (no classifier)
+    vae_loss = loss_output.extra_metrics["vae_loss"]
+    assert vae_loss > 0
+    
+    # Classifier loss should be positive when enabled
+    assert loss_output.extra_metrics["classifier_loss"] > 0
     
     # Check we can compute accuracy
     classifier_logits = inference_outputs["classifier_logits"]

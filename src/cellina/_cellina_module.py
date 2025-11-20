@@ -313,7 +313,7 @@ class CellinaModule(BaseModuleClass):
         inference_outputs,
         generative_outputs,
         kl_weight: float = 1.0,
-        discriminator_weight: float = 0.0,
+        discriminator_lambda: float = 0.0,
     ):
         """
         Loss function.
@@ -328,10 +328,9 @@ class CellinaModule(BaseModuleClass):
             Outputs from generative method
         kl_weight
             Weight for KL divergence terms (warmup)
-        discriminator_weight
-            Weight for discriminator loss. Sign controls gradient direction:
-            - Positive: train discriminator to predict domains (Step 1)
-            - Negative: train encoder to fool discriminator (Step 2)
+        discriminator_lambda
+            Weight multiplier for discriminator loss. Used to scale discriminator contribution.
+            Set to 0 to exclude discriminator from loss computation.
         """
         x = tensors[REGISTRY_KEYS.X_KEY]
         qzm = inference_outputs["qzm"]
@@ -400,14 +399,19 @@ class CellinaModule(BaseModuleClass):
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
         discriminator_loss, discriminator_loss_metric, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
-            weight=discriminator_weight,
+            weight=discriminator_lambda,
             inference_outputs=inference_outputs,
             labels=domain_labels,
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
 
-        total_loss = reconst_loss + weighted_kl_local + classifier_loss + discriminator_loss
+        # VAE loss (reconstruction + KL only)
+        vae_loss_tensor = reconst_loss + weighted_kl_local
+        vae_loss = torch.mean(vae_loss_tensor)
+        
+        # NOTE: Total loss (VAE + classifier, no discriminator)
+        total_loss = vae_loss_tensor + classifier_loss
         loss = torch.mean(total_loss)
 
         kl_local = dict(
@@ -417,6 +421,7 @@ class CellinaModule(BaseModuleClass):
         )
         
         extra_metrics = {
+            'vae_loss': vae_loss.item(),
             'classifier_loss': classifier_loss_metric,
             'classifier_accuracy': classifier_accuracy,
             'discriminator_loss': discriminator_loss_metric,

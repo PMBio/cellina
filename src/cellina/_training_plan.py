@@ -72,36 +72,31 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # =====================================================================
         # STEP 1: Train Domain Discriminator (Frozen VAE)
         # =====================================================================
-        # Get z without gradients to VAE
         with torch.no_grad():
             inference_inputs = self.module._get_inference_input(batch)
             inference_outputs = self.module.inference(**inference_inputs)
-            z = inference_outputs["z"].detach()  # Explicitly detach
+            z_detach = inference_outputs["z"].detach() # NOTE: overkill but just to be safe
         
-        # Compute discriminator loss (predicting true domains)
+        # Compute discriminator loss and accuracy using shared method
         domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
-        disc_logits = self.module.domain_discriminator(z)
-        disc_loss = F.cross_entropy(
-            disc_logits,
-            domain_labels,
-            reduction="mean",
+        disc_loss_tensor, _, disc_accuracy = self.module._compute_classifier_metrics(
+            classifier=self.module.domain_discriminator,
+            weight=kappa,
+            inference_outputs={"z": z_detach},
+            labels=domain_labels,
+            reconst_loss_shape=None,
+            metric_name="discriminator"
         )
-        disc_loss = kappa * disc_loss
+        disc_loss = disc_loss_tensor.mean()
         
-        # Backward only to discriminator
+        # Backward only to discriminator (VAE frozen above)
         opt_discriminator.zero_grad()
         self.manual_backward(disc_loss)
         opt_discriminator.step()
         
-        # Log discriminator training loss (the actual loss for training discriminator)
-        # Note: compute_and_log_metrics below will log discriminator_loss_train=0 from extra_metrics
-        # This is the real discriminator training loss
-        self.log(
-            "discriminator_loss_train",
-            disc_loss,
-            on_step=False,
-            on_epoch=True,
-        )
+        # Log discriminator metrics
+        self.log("discriminator_loss_train", disc_loss, on_step=False, on_epoch=True)
+        self.log("discriminator_accuracy_train", disc_accuracy, on_step=False, on_epoch=True)
         
         # =====================================================================
         # STEP 2: Train VAE + Fool Discriminator (Frozen Discriminator)
@@ -112,147 +107,83 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         generative_inputs = self.module._get_generative_input(batch, inference_outputs)
         generative_outputs = self.module.generative(**generative_inputs)
         
-        # Compute VAE loss WITHOUT discriminator
+        # Compute VAE loss WITHOUT discriminator (discriminator_lambda=0)
         scvi_loss = self.module.loss(
             batch,
             inference_outputs,
             generative_outputs,
             kl_weight=self.kl_weight,
-            discriminator_weight=0.0,  # Don't include discriminator in main loss
+            discriminator_lambda=0.0,
         )
         
         # Compute adversarial loss separately (gradients to encoder only)
-        z = inference_outputs["z"]
+        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
         
         # Freeze discriminator parameters
         for param in self.module.domain_discriminator.parameters():
             param.requires_grad = False
         
-        # Compute discriminator predictions on z (with gradients to encoder)
-        fool_logits = self.module.domain_discriminator(z)
-        
-        # Loss to fool discriminator (negative cross-entropy)
-        fool_loss = F.cross_entropy(
-            fool_logits,
-            domain_labels,
-            reduction="mean",
+        # Compute adversarial loss using shared method (reuses discriminator_logits from inference_outputs)
+        fool_loss_tensor, _, _ = self.module._compute_classifier_metrics(
+            classifier=self.module.domain_discriminator,
+            weight=-kappa,  # Negative weight to fool discriminator
+            inference_outputs=inference_outputs,
+            labels=domain_labels,
+            reconst_loss_shape=None,
+            metric_name="discriminator"
         )
-        fool_loss = -kappa * fool_loss  # Negative to fool
+        fool_loss = fool_loss_tensor.mean()
         
         # Unfreeze discriminator for next iteration
         for param in self.module.domain_discriminator.parameters():
             param.requires_grad = True
         
-        # Total VAE loss = main loss + adversarial loss
-        total_vae_loss = scvi_loss.loss + fool_loss
+        # Total training loss = scvi_loss (VAE + classifier with gradients) + adversarial
+        total_train_loss = scvi_loss.loss + fool_loss
         
         # Backward only to VAE (discriminator was frozen during fool_loss computation)
         opt_vae.zero_grad()
-        self.manual_backward(total_vae_loss)
+        self.manual_backward(total_train_loss)
         opt_vae.step()
         
-        # Log metrics
-        self.log("train_loss", total_vae_loss, on_step=False, on_epoch=True, prog_bar=True)
+        # Log total and adversarial loss
+        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("adversarial_loss_train", fool_loss, on_step=False, on_epoch=True)
         
-        # Remove discriminator metrics from extra_metrics to avoid redundant logging
-        # (we log discriminator_train_loss manually above)
-        scvi_loss.extra_metrics.pop("discriminator_loss", None)
-        scvi_loss.extra_metrics.pop("discriminator_accuracy", None)
-        
+        # Log standard metrics (reconstruction, KL, vae_loss, classifier_loss, classifier_accuracy)
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
         
         # Return dict for logging (Lightning expects this format)
-        return {"loss": total_vae_loss}
+        return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
         """
         Validation step with discriminator metrics.
         """
-        # Prepare loss kwargs for validation (only valid parameters)
-        loss_kwargs = {"kl_weight": self.kl_weight}
+        # Compute kappa for discriminator weighting
+        kappa = self._get_kappa()
+        
+        # Prepare loss kwargs for validation
+        loss_kwargs = {
+            "kl_weight": self.kl_weight,
+            "discriminator_lambda": kappa,
+        }
         
         # Forward pass
         inference_outputs, generative_outputs, scvi_loss = self.forward(
             batch,
             loss_kwargs=loss_kwargs
         )
+        
+        # Total validation loss (VAE + classifier, consistent with train_loss)
         loss = scvi_loss.loss
         
-        # Log standard metrics
+        # Log validation loss and all metrics from extra_metrics
         self.log("validation_loss", loss, on_step=False, on_epoch=True)
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         
-        # Compute discriminator metrics
-        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
-        disc_logits = inference_outputs.get("discriminator_logits")
-        
-        if disc_logits is not None:
-            # Compute discriminator loss (weighted for consistency with training)
-            kappa = self._get_kappa()
-            disc_loss_val = F.cross_entropy(
-                disc_logits,
-                domain_labels,
-                reduction="mean",
-            )
-            disc_loss_val = kappa * disc_loss_val  # Apply same weighting as training
-            
-            # Compute discriminator accuracy
-            disc_preds = disc_logits.argmax(dim=-1)
-            disc_acc = (disc_preds == domain_labels).float().mean()
-            
-            # Log discriminator metrics (consistent naming with _validation suffix)
-            self.log(
-                "discriminator_loss_validation",
-                disc_loss_val,
-                on_step=False,
-                on_epoch=True,
-            )
-            self.log(
-                "discriminator_accuracy_validation",
-                disc_acc,
-                on_step=False,
-                on_epoch=True,
-            )
-        
         return loss
 
-    def configure_optimizers(self):
-        """
-        Configure optimizers.
-        
-        Returns 2 optimizers if discriminator_lambda > 0:
-        - opt1: VAE parameters (encoders, decoder, classifiers)
-        - opt2: Domain discriminator parameters only
-        """
-        # VAE optimizer (all parameters except discriminator)
-        if self.discriminator_lambda > 0:
-            # Exclude discriminator parameters
-            params_vae = [
-                p for name, p in self.module.named_parameters()
-                if p.requires_grad and "domain_discriminator" not in name
-            ]
-        else:
-            params_vae = filter(lambda p: p.requires_grad, self.module.parameters())
-        
-        optimizer_vae = self.get_optimizer_creator()(params_vae)
-        config_vae = {"optimizer": optimizer_vae}
-        
-        # Add learning rate scheduler if requested
-        if self.reduce_lr_on_plateau:
-            scheduler_vae = ReduceLROnPlateau(
-                optimizer_vae,
-                patience=self.lr_patience,
-                factor=self.lr_factor,
-                threshold=self.lr_threshold,
-                min_lr=self.lr_min,
-                threshold_mode="abs",
-            )
-            config_vae["lr_scheduler"] = {
-                "scheduler": scheduler_vae,
-                "monitor": self.lr_scheduler_metric,
-            }
-        
     def configure_optimizers(self):
         """
         Configure 2 optimizers for adversarial training:
