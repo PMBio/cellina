@@ -216,7 +216,7 @@ class CellinaModule(BaseModuleClass):
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
         # Concatenate spatial_x and z, then encode -> s
-        spatial_z_concat = torch.cat([spatial_x, z], dim=-1)
+        spatial_z_concat = torch.cat([spatial_x, z.detach()], dim=-1)
         qsm, qsv, s = self.s_encoder(spatial_z_concat, batch_index)
 
         # Compute shifted = concat(z, s)
