@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from scvi import REGISTRY_KEYS
@@ -483,3 +484,74 @@ class CellinaModule(BaseModuleClass):
             exprs = dist.sample()
 
         return exprs.cpu()
+
+    @torch.no_grad()
+    @auto_move_data
+    def marginal_ll(self, tensors: TensorDict, n_mc_samples: int):
+        """
+        Marginal ll approximation via Monte Carlo Importance Sampling.
+        Used for model evaluation.
+        Parameters
+        ----------
+        tensors
+            Input tensors from data loader
+        n_mc_samples
+            Number of Monte Carlo samples for approximation
+        """
+        sample_batch = tensors[REGISTRY_KEYS.X_KEY]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+
+        to_sum = torch.zeros(sample_batch.size()[0], n_mc_samples)
+
+        for i in range(n_mc_samples):
+            # Distribution parameters and sampled variables
+            inference_outputs, generative_outputs = self.forward(tensors, compute_loss=False)
+
+            # Intrinsic latent
+            qz_m = inference_outputs["qzm"]
+            qz_v = inference_outputs["qzv"]
+            z = inference_outputs["z"]
+            # Spatial latent
+            qs_m = inference_outputs["qsm"]
+            qs_v = inference_outputs["qsv"]
+            s = inference_outputs["s"]
+            # Library latent
+            ql_m = inference_outputs["qlm"]
+            ql_v = inference_outputs["qlv"]
+            library = inference_outputs["library"]
+
+            # Reconstruction Loss
+            px_rate = generative_outputs["px_rate"]
+            px_r = generative_outputs["px_r"]
+            px_dropout = generative_outputs["px_dropout"]
+
+            if self.gene_likelihood == "zinb":
+                reconst_loss = (
+                    -ZeroInflatedNegativeBinomial(mu=px_rate, theta=px_r, zi_logits=px_dropout)
+                    .log_prob(sample_batch)
+                    .sum(dim=-1)
+                )
+            elif self.gene_likelihood == "nb":
+                reconst_loss = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(sample_batch).sum(dim=-1)
+
+            # Log-probabilities
+            n_batch = self.library_log_means.shape[1]
+            local_library_log_means = F.linear(
+                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
+            )
+            local_library_log_vars = F.linear(
+                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
+            )
+            p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
+            p_z = Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v)).log_prob(z).sum(dim=-1)
+            p_s = Normal(torch.zeros_like(qs_m), torch.ones_like(qs_v)).log_prob(s).sum(dim=-1)
+            p_x_zsl = -reconst_loss
+            q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
+            q_s_x = Normal(qs_m, qs_v.sqrt()).log_prob(s).sum(dim=-1)
+            q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
+
+            to_sum[:, i] = p_z + p_s + p_l + p_x_zsl - q_z_x - q_s_x - q_l_x
+
+        batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
+        log_lkl = torch.sum(batch_log_lkl).item()
+        return log_lkl
