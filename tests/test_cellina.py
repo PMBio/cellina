@@ -307,3 +307,40 @@ def test_weighted_pseudobulks(adata_with_spatial):
     
     # Check that spatial_var was added to uns
     assert '_spatial_var' in adata_with_spatial.uns
+
+
+def test_marginal_ll(adata_with_spatial):
+    """Test get_marginal_ll method and underlying module.marginal_ll."""
+    n_latent = 5
+    
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
+    
+    # Test basic computation (returns list by default)
+    marginal_ll_list = model.get_marginal_ll(n_mc_samples=100)
+    assert isinstance(marginal_ll_list, list)
+    assert len(marginal_ll_list) > 0
+    assert all(isinstance(ll, float) and np.isfinite(ll) for ll in marginal_ll_list)
+    
+    # Test mean reduction
+    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=100, reduce='mean')
+    assert isinstance(marginal_ll_mean, (float, np.floating))
+    assert marginal_ll_mean == pytest.approx(np.mean(marginal_ll_list), rel=1e-5)
+    
+    # Test sum reduction
+    marginal_ll_sum = model.get_marginal_ll(n_mc_samples=100, reduce='sum')
+    assert isinstance(marginal_ll_sum, (float, np.floating))
+    assert marginal_ll_sum == pytest.approx(np.sum(marginal_ll_list), rel=1e-5)
+    
+    # Test invalid reduction raises error
+    with pytest.raises(ValueError, match="Reduction must be None, 'mean' or 'sum'"):
+        model.get_marginal_ll(reduce='invalid')
+    
+    # Test underlying module.marginal_ll
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+    model.module.eval()
+    with torch.no_grad():
+        log_lkl = model.module.marginal_ll(batch, n_mc_samples=100)
+    assert isinstance(log_lkl, float) and np.isfinite(log_lkl)
