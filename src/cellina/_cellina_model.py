@@ -301,7 +301,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             - 'sum': return sum of marginal log-likelihoods across all batches
         Returns
         -------
-        Marginal log-likelihood (aggregate) of the data per batch as a list.
+        Marginal log-likelihood of the data.
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
