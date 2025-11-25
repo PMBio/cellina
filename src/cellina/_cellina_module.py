@@ -410,10 +410,7 @@ class CellinaModule(BaseModuleClass):
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
-        
-        # NOTE: Total loss (VAE + classifier, no discriminator)
-        total_loss = vae_loss_tensor + classifier_loss
-        loss = torch.mean(total_loss)
+        loss = vae_loss
 
         kl_local = dict(
             kl_divergence_l=kl_divergence_l,
