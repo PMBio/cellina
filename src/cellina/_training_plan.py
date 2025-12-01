@@ -148,9 +148,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         clf_loss = scvi_loss.extra_metrics["classifier_loss"]
 
         # ------------------ EMA UPDATE ------------------
-        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss))
-        self._ema["clf"] = self._ema_update(self._ema["clf"], float(clf_loss))
-        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss)))
+        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
+        self._ema["clf"] = self._ema_update(self._ema["clf"], float(clf_loss.item()))
+        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss.item())))
 
         # ------------------ APPLY EMA NORMALIZATION ------------------
         # Compute scale multipliers
