@@ -194,6 +194,16 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         **kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
+        # Ensure plan_kwargs is a dict we can mutate
+        if plan_kwargs is None:
+            plan_kwargs = {}
+        
+        # If adversarial training is disabled, remove plan-only keys that would be
+        # handled by the adversarial plan (avoid forwarding them to module.loss)
+        if self.module.discriminator_lambda == 0:
+            plan_kwargs.pop("normalize_losses", None)
+            plan_kwargs.pop("scale_adversarial_loss", None)
+        
         # Set training plan class
         if self.module.discriminator_lambda > 0:
             # Use adversarial training plan when discriminator is enabled
