@@ -82,6 +82,7 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         discriminator_kwargs: Optional[Dict[str, Any]] = None,
         n_domains: Optional[int] = None,
+        condition_on_intrinsic: bool = True,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -115,8 +116,11 @@ class CellinaModule(BaseModuleClass):
         )
 
         # S encoder: [spatial_x, z] -> s
+        # Set whether to condition spatial encoder on intrinsic latent
+        self.condition_on_intrinsic = condition_on_intrinsic
+        n_input_s = n_spatial_input + n_latent if condition_on_intrinsic else n_spatial_input
         self.s_encoder = Encoder(
-            n_spatial_input + n_latent,  # spatial features + z
+            n_input_s,  # spatial features + z OR spatial features only
             n_latent,
             n_cat_list=cat_list,
             n_layers=n_layers,
@@ -215,9 +219,12 @@ class CellinaModule(BaseModuleClass):
         # Encode counts -> z
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        # Concatenate spatial_x and z, then encode -> s
-        spatial_z_concat = torch.cat([spatial_x, z.detach()], dim=-1)
-        qsm, qsv, s = self.s_encoder(spatial_z_concat, batch_index)
+        # (Optionally) Concatenate spatial_x and z, then encode -> s
+        if self.condition_on_intrinsic:
+            spatial_input = torch.cat([spatial_x, z.detach()], dim=-1)
+        else:
+            spatial_input = spatial_x
+        qsm, qsv, s = self.s_encoder(spatial_input, batch_index)
 
         # Compute shifted = concat(z, s)
         shifted = torch.cat([z, s], dim=-1)

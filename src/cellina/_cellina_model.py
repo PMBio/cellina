@@ -66,6 +66,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
+        condition_on_intrinsic: bool = True,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -89,6 +90,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_labels=self.summary_stats.get("n_labels"),
             discriminator_lambda=discriminator_lambda,
             n_domains=self.summary_stats.get("n_domains"),
+            condition_on_intrinsic=condition_on_intrinsic,
             **model_kwargs,
         )
         
