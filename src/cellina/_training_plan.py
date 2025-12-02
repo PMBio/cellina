@@ -49,13 +49,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Always use manual optimization for two-step training
         self.automatic_optimization = False
 
-        # Warmup collection: collect first-epoch losses without backward to compute
-        # normalization constants for scvi, fool and classifier losses.
+        # Warmup collection: collect first-epoch losses to initialize EMA
         self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
         self._warmup_done = False
-        self._norm_constants = {"scvi": 1.0, "fool": 1.0, "clf": 1.0}
         self._normalize_losses = normalize_losses
 
+        # EMA tracking for loss normalization
         self._ema = {"vae": 1.0, "clf": 1.0, "fool": 1.0}
         self._ema_alpha = 0.01
 
@@ -77,12 +76,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     batch,
                     loss_kwargs={
                         "kl_weight": self.kl_weight,
-                        "discriminator_lambda": -1.0 if kappa!=0.0 else 0.0,
+                        "discriminator_lambda": -kappa if kappa != 0.0 else 0.0,
                     }
                 )
                 scvi_val = float(scvi_loss.loss.detach().cpu().item())
-                fool_val = float(scvi_loss.extra_metrics.get("fool_loss", 0.0))
-                clf_val = float(scvi_loss.extra_metrics.get("classifier_loss", 0.0))
+                fool_val = abs(float(scvi_loss.extra_metrics.get("fool_loss", 0.0)))
+                clf_val = abs(float(scvi_loss.extra_metrics.get("classifier_loss", 0.0)))
 
                 self._warmup_stats["scvi"].append(scvi_val)
                 self._warmup_stats["fool"].append(fool_val)
@@ -96,6 +95,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self._ema["clf"] = np.mean(self._warmup_stats["clf"])
             self._ema["fool"] = np.mean(self._warmup_stats["fool"])
             self._warmup_done = True
+            self._warmup_stats.clear()  # Free memory
 
         # ------------------ STEP 1: Train Discriminator ------------------
         with torch.no_grad():
@@ -126,34 +126,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         for p in self.module.domain_discriminator.parameters():
             p.requires_grad = False
 
-        inference_outputs, generative_outputs, scvi_loss = self.forward(
-            batch,
-            loss_kwargs={
-                "kl_weight": self.kl_weight,
-                "discriminator_lambda": kappa,
-            }
-        )
-
-        scvi_loss = self.module.loss(
-            batch,
-            inference_outputs,
-            generative_outputs,
-            kl_weight=self.kl_weight,
-            discriminator_lambda=-1.0 if kappa!=0.0 else 0.0,
-        )
-
-        # Raw terms
-        vae_loss = scvi_loss.loss
-        fool_loss = scvi_loss.extra_metrics["fool_loss"]
-        clf_loss = scvi_loss.extra_metrics["classifier_loss"]
-
-        # ------------------ EMA UPDATE ------------------
-        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
-        self._ema["clf"] = self._ema_update(self._ema["clf"], float(clf_loss.item()))
-        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss.item())))
-
-        # ------------------ APPLY EMA NORMALIZATION ------------------
-        # Compute scale multipliers
+        # Compute normalization scales from EMA
         if self._normalize_losses:
             target = self._ema["vae"]
             scale_clf = target / (self._ema["clf"] + 1e-8)
@@ -161,14 +134,29 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         else:
             scale_clf = 1.0
             scale_fool = 1.0
-            
-        vae_loss_scaled = vae_loss
-        fool_loss_scaled = fool_loss * scale_fool * self.module.discriminator_lambda
-        # Classifier lambda already applied in module.loss - only normalize here
-        clf_loss_scaled = clf_loss * scale_clf
 
-        total_train_loss = vae_loss_scaled + clf_loss_scaled + fool_loss_scaled
+        # Single forward pass with scales
+        inference_outputs, generative_outputs, scvi_loss = self.forward(
+            batch,
+            loss_kwargs={
+                "kl_weight": self.kl_weight,
+                "discriminator_lambda": -kappa,  # Negative for adversarial (fool) loss
+                "classifier_scale": scale_clf,
+                "discriminator_scale": scale_fool,
+            }
+        )
 
+        # Extract losses (tensors for gradient flow)
+        vae_loss = scvi_loss.loss
+        clf_loss_raw = scvi_loss.extra_metrics["classifier_loss_raw"]
+        clf_loss = scvi_loss.extra_metrics["classifier_loss"]  # scaled is default
+        fool_loss_raw = scvi_loss.extra_metrics["fool_loss_raw"]
+        fool_loss = scvi_loss.extra_metrics["fool_loss"]  # scaled is default
+
+        # Total training loss (with gradients)
+        total_train_loss = vae_loss + clf_loss + fool_loss
+
+        # Backward pass
         opt_vae.zero_grad()
         self.manual_backward(total_train_loss)
         opt_vae.step()
@@ -176,10 +164,22 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         for p in self.module.domain_discriminator.parameters():
             p.requires_grad = True
 
-        # Log total and adversarial loss 
-        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True) 
-        self.log("adversarial_loss_train", fool_loss, on_step=False, on_epoch=True) 
-        # Log standard metrics (reconstruction, KL, vae_loss, classifier_loss, classifier_accuracy) 
+        # ------------------ UPDATE EMA WITH RAW LOSSES ------------------
+        # Track raw losses to compute normalization for next iteration
+        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
+        self._ema["clf"] = self._ema_update(self._ema["clf"], abs(float(clf_loss_raw.item())))
+        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss_raw.item())))
+
+        # ------------------ LOGGING ------------------
+        # Log total loss (sum of vae + scaled classifier + scaled fool)
+        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
+        
+        # Log normalization scales (not in extra_metrics)
+        if self._normalize_losses:
+            self.log("scale_classifier_train", scale_clf, on_step=False, on_epoch=True)
+            self.log("scale_fool_train", scale_fool, on_step=False, on_epoch=True)
+        
+        # Log all metrics from extra_metrics (raw/scaled losses, accuracies, reconstruction, KL)
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
         
         return {"loss": total_train_loss}
@@ -187,25 +187,35 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
     def validation_step(self, batch, batch_idx):
         """
         Validation step with discriminator metrics.
+        Uses training EMA scales for consistent evaluation.
         """
-        # Compute kappa for discriminator weighting
-        kappa = self._get_kappa()
+        # Compute normalization scales from training EMA (for consistency)
+        if self._normalize_losses and self._warmup_done:
+            target = self._ema["vae"]
+            scale_clf = target / (self._ema["clf"] + 1e-8)
+            scale_fool = target / (self._ema["fool"] + 1e-8)
+        else:
+            scale_clf = 1.0
+            scale_fool = 1.0
         
         with torch.no_grad():
-            # Forward pass WITHOUT discriminator in loss (consistent with training)
+            # Forward pass with negative discriminator_lambda for fool loss
+            kappa = self.module.discriminator_lambda
             inference_outputs, generative_outputs, scvi_loss = self.forward(
                 batch,
                 loss_kwargs={
                     "kl_weight": self.kl_weight,
-                    "discriminator_lambda": kappa,  # Exclude discriminator from validation loss
+                    "discriminator_lambda": -kappa,  # Negative for adversarial
+                    "classifier_scale": scale_clf,
+                    "discriminator_scale": scale_fool,
                 }
             )
             
-            # Manually compute discriminator metrics for logging only
+            # Manually compute discriminator training loss (positive weight) for monitoring
             domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
             disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
                 classifier=self.module.domain_discriminator,
-                weight=-kappa,
+                weight=kappa,
                 inference_outputs=inference_outputs,
                 labels=domain_labels,
                 reconst_loss_shape=None,
@@ -278,21 +288,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             return self.scale_adversarial_loss * self.module.discriminator_lambda
 
     def on_train_epoch_end(self):
-        # Only compute norms after the first epoch's collection
+        """Log EMA values at end of warmup epoch."""
         if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
-            # Compute mean constants, protect against empty lists
-            for key in ("scvi", "fool", "clf"):
-                vals = self._warmup_stats.get(key, [])
-                if len(vals) > 0:
-                    mean_val = float(sum(vals) / len(vals))
-                    # Use absolute value for norms to avoid zero/negative normalization
-                    self._norm_constants[key] = max(abs(mean_val), 1e-8)
-                else:
-                    self._norm_constants[key] = 1.0
-            # Mark warmup as done and clear buffers
-            self._warmup_done = True
-            self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
-            # Log normalization constants
-            self.log("norm_scvi", self._norm_constants["scvi"], on_step=False, on_epoch=True)
-            self.log("norm_fool", self._norm_constants["fool"], on_step=False, on_epoch=True)
-            self.log("norm_clf", self._norm_constants["clf"], on_step=False, on_epoch=True)
+            # Log initial EMA values for transparency
+            self.log("ema_vae_init", self._ema["vae"], on_step=False, on_epoch=True)
+            self.log("ema_clf_init", self._ema["clf"], on_step=False, on_epoch=True)
+            self.log("ema_fool_init", self._ema["fool"], on_step=False, on_epoch=True)

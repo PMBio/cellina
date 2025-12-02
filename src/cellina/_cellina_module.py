@@ -322,6 +322,8 @@ class CellinaModule(BaseModuleClass):
         generative_outputs,
         kl_weight: float = 1.0,
         discriminator_lambda: float = 0.0,
+        classifier_scale: float = 1.0,
+        discriminator_scale: float = 1.0,
     ):
         """
         Loss function.
@@ -339,6 +341,10 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda
             Weight multiplier for discriminator loss. Used to scale discriminator contribution.
             Set to 0 to exclude discriminator from loss computation.
+        classifier_scale
+            EMA-based normalization scale for classifier loss (default 1.0)
+        discriminator_scale
+            EMA-based normalization scale for discriminator/fool loss (default 1.0)
         """
         x = tensors[REGISTRY_KEYS.X_KEY]
         qzm = inference_outputs["qzm"]
@@ -402,10 +408,11 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
+        classifier_loss_scaled = classifier_loss * classifier_scale
 
-        # Domain discriminator
+        # Domain discriminator (fool loss - always negative for adversarial training)
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
-        discriminator_loss, discriminator_accuracy = self._compute_classifier_metrics(
+        fool_loss, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
             weight=discriminator_lambda,
             inference_outputs=inference_outputs,
@@ -413,6 +420,7 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
+        fool_loss_scaled = fool_loss * discriminator_scale
 
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
@@ -426,10 +434,12 @@ class CellinaModule(BaseModuleClass):
         )
         
         extra_metrics = {
-            'vae_loss': vae_loss.item(),
-            'classifier_loss': classifier_loss.mean(),
+            'vae_loss': vae_loss,
+            'classifier_loss_raw': classifier_loss.mean(),
+            'classifier_loss': classifier_loss_scaled.mean(),
             'classifier_accuracy': classifier_accuracy,
-            'fool_loss': discriminator_loss.mean(),
+            'fool_loss_raw': fool_loss.mean(),
+            'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
         }
 
