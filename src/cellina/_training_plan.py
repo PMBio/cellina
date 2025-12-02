@@ -2,9 +2,9 @@
 
 import logging
 from typing import Literal
+import numpy as np
 
 import torch
-import torch.nn.functional as F
 from scvi.train import TrainingPlan
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -39,6 +39,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self,
         module,
         scale_adversarial_loss: float | Literal["auto"] = "auto",
+        normalize_losses: bool = False,
         **kwargs,
     ):
         super().__init__(module=module, **kwargs)
@@ -48,36 +49,60 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Always use manual optimization for two-step training
         self.automatic_optimization = False
 
+        # Warmup collection: collect first-epoch losses without backward to compute
+        # normalization constants for scvi, fool and classifier losses.
+        self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
+        self._warmup_done = False
+        self._norm_constants = {"scvi": 1.0, "fool": 1.0, "clf": 1.0}
+        self._normalize_losses = normalize_losses
+
+        self._ema = {"vae": 1.0, "clf": 1.0, "fool": 1.0}
+        self._ema_alpha = 0.01
+
+    def _ema_update(self, old, new):
+        return old * (1 - self._ema_alpha) + new * self._ema_alpha
+
     def training_step(self, batch, batch_idx):
-        """
-        Two-step adversarial training.
-        
-        Step 1: Train discriminator to predict domains (frozen VAE)
-        Step 2: Train VAE to fool discriminator (frozen discriminator)
-        """
         opts = self.optimizers()
         if not isinstance(opts, list):
             raise ValueError("Expected 2 optimizers for adversarial training")
         opt_vae, opt_discriminator = opts
-        
-        # Compute kappa (adversarial weight)
-        kappa = self._get_kappa()
-        
-        # Log KL weight and kappa
-        if "kl_weight" in self.loss_kwargs:
-            self.loss_kwargs.update({"kl_weight": self.kl_weight})
-            self.log("kl_weight", self.kl_weight, on_step=False, on_epoch=True)
-        self.log("adversarial_kappa", kappa, on_step=False, on_epoch=True)
-        
-        # =====================================================================
-        # STEP 1: Train Domain Discriminator (Frozen VAE)
-        # =====================================================================
+
+        kappa = self.module.discriminator_lambda
+
+        # ---------------------- WARMUP COLLECTION ----------------------
+        if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
+            with torch.no_grad():
+                inference_outputs, generative_outputs, scvi_loss = self.forward(
+                    batch,
+                    loss_kwargs={
+                        "kl_weight": self.kl_weight,
+                        "discriminator_lambda": -1.0 if kappa!=0.0 else 0.0,
+                    }
+                )
+                scvi_val = float(scvi_loss.loss.detach().cpu().item())
+                fool_val = float(scvi_loss.extra_metrics.get("fool_loss", 0.0))
+                clf_val = float(scvi_loss.extra_metrics.get("classifier_loss", 0.0))
+
+                self._warmup_stats["scvi"].append(scvi_val)
+                self._warmup_stats["fool"].append(fool_val)
+                self._warmup_stats["clf"].append(clf_val)
+
+                return {"loss": scvi_loss.loss}
+
+        # ---------- END OF WARMUP → INITIALIZE EMA ----------
+        if (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
+            self._ema["vae"] = np.mean(self._warmup_stats["scvi"])
+            self._ema["clf"] = np.mean(self._warmup_stats["clf"])
+            self._ema["fool"] = np.mean(self._warmup_stats["fool"])
+            self._warmup_done = True
+
+        # ------------------ STEP 1: Train Discriminator ------------------
         with torch.no_grad():
             inference_inputs = self.module._get_inference_input(batch)
             inference_outputs = self.module.inference(**inference_inputs)
-            z_detach = inference_outputs["z"].detach() # NOTE: overkill but just to be safe
-        
-        # Compute discriminator loss and accuracy using shared method
+            z_detach = inference_outputs["z"].detach()
+
         domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
         disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
             classifier=self.module.domain_discriminator,
@@ -85,64 +110,78 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             inference_outputs={"z": z_detach},
             labels=domain_labels,
             reconst_loss_shape=None,
-            metric_name="discriminator"
+            metric_name="discriminator",
         )
         disc_loss = disc_loss_tensor.mean()
-        
-        # Backward only to discriminator (VAE frozen above)
+
         opt_discriminator.zero_grad()
         self.manual_backward(disc_loss)
         opt_discriminator.step()
-        
-        # Log discriminator metrics
-        self.log("discriminator_loss_train", disc_loss, on_step=False, on_epoch=True)
+
+        # Log discriminator metrics 
+        self.log("discriminator_loss_train", disc_loss, on_step=False, on_epoch=True) 
         self.log("discriminator_accuracy_train", disc_accuracy, on_step=False, on_epoch=True)
-        
-        # =====================================================================
-        # STEP 2: Train VAE + Fool Discriminator (Frozen Discriminator)
-        # =====================================================================
-        # Freeze discriminator parameters
-        for param in self.module.domain_discriminator.parameters():
-            param.requires_grad = False
-        
-        # Compute VAE loss WITHOUT discriminator (discriminator_lambda=-kappa)
+
+        # ------------------ STEP 2: Train VAE + Fool Discriminator ------------------
+        for p in self.module.domain_discriminator.parameters():
+            p.requires_grad = False
+
         inference_outputs, generative_outputs, scvi_loss = self.forward(
-                batch,
-                loss_kwargs={
-                    "kl_weight": self.kl_weight,
-                    "discriminator_lambda": kappa,  # Exclude discriminator from validation loss
-                }
-            )
-        
+            batch,
+            loss_kwargs={
+                "kl_weight": self.kl_weight,
+                "discriminator_lambda": kappa,
+            }
+        )
+
         scvi_loss = self.module.loss(
             batch,
             inference_outputs,
             generative_outputs,
             kl_weight=self.kl_weight,
-            discriminator_lambda=-kappa,
+            discriminator_lambda=-1.0 if kappa!=0.0 else 0.0,
         )
+
+        # Raw terms
+        vae_loss = scvi_loss.loss
         fool_loss = scvi_loss.extra_metrics["fool_loss"]
-        
-        # Total training loss = scvi_loss (VAE + classifier with gradients) + adversarial
-        total_train_loss = scvi_loss.loss + fool_loss
-        
-        # Backward only to VAE (discriminator was frozen during fool_loss computation)
+        clf_loss = scvi_loss.extra_metrics["classifier_loss"]
+
+        # ------------------ EMA UPDATE ------------------
+        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
+        self._ema["clf"] = self._ema_update(self._ema["clf"], float(clf_loss.item()))
+        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss.item())))
+
+        # ------------------ APPLY EMA NORMALIZATION ------------------
+        # Compute scale multipliers
+        if self._normalize_losses:
+            target = self._ema["vae"]
+            scale_clf = target / (self._ema["clf"] + 1e-8)
+            scale_fool = target / (self._ema["fool"] + 1e-8)
+        else:
+            scale_clf = 1.0
+            scale_fool = 1.0
+            
+        vae_loss_scaled = vae_loss
+        fool_loss_scaled = fool_loss * scale_fool * self.module.discriminator_lambda
+        # Classifier lambda already applied in module.loss - only normalize here
+        clf_loss_scaled = clf_loss * scale_clf
+
+        total_train_loss = vae_loss_scaled + clf_loss_scaled + fool_loss_scaled
+
         opt_vae.zero_grad()
         self.manual_backward(total_train_loss)
         opt_vae.step()
-        
-        # Unfreeze discriminator for next iteration
-        for param in self.module.domain_discriminator.parameters():
-            param.requires_grad = True
-        
-        # Log total and adversarial loss
-        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("adversarial_loss_train", fool_loss, on_step=False, on_epoch=True)
-        
-        # Log standard metrics (reconstruction, KL, vae_loss, classifier_loss, classifier_accuracy)
+
+        for p in self.module.domain_discriminator.parameters():
+            p.requires_grad = True
+
+        # Log total and adversarial loss 
+        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True) 
+        self.log("adversarial_loss_train", fool_loss, on_step=False, on_epoch=True) 
+        # Log standard metrics (reconstruction, KL, vae_loss, classifier_loss, classifier_accuracy) 
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
         
-        # Return dict for logging (Lightning expects this format)
         return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
@@ -237,3 +276,23 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             return (1 - self.kl_weight) * self.module.discriminator_lambda
         else:
             return self.scale_adversarial_loss * self.module.discriminator_lambda
+
+    def on_train_epoch_end(self):
+        # Only compute norms after the first epoch's collection
+        if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
+            # Compute mean constants, protect against empty lists
+            for key in ("scvi", "fool", "clf"):
+                vals = self._warmup_stats.get(key, [])
+                if len(vals) > 0:
+                    mean_val = float(sum(vals) / len(vals))
+                    # Use absolute value for norms to avoid zero/negative normalization
+                    self._norm_constants[key] = max(abs(mean_val), 1e-8)
+                else:
+                    self._norm_constants[key] = 1.0
+            # Mark warmup as done and clear buffers
+            self._warmup_done = True
+            self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
+            # Log normalization constants
+            self.log("norm_scvi", self._norm_constants["scvi"], on_step=False, on_epoch=True)
+            self.log("norm_fool", self._norm_constants["fool"], on_step=False, on_epoch=True)
+            self.log("norm_clf", self._norm_constants["clf"], on_step=False, on_epoch=True)
