@@ -47,7 +47,6 @@ def make_counterfactual_adata(
 
     # 3. Sampling: if true, compute representative NB dist and sample from it
     if sample:
-        #
         mu = spatial_counts_cf.mean(axis=0)
         var = spatial_counts_cf.var(axis=0)
         theta = np.maximum((mu**2) / (var - mu + 1e-8), 1e-8)

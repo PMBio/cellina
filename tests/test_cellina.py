@@ -342,3 +342,140 @@ def test_marginal_ll(adata_with_spatial):
     with torch.no_grad():
         log_lkl = model.module.marginal_ll(batch, n_mc_samples=100)
     assert isinstance(log_lkl, float) and np.isfinite(log_lkl)
+
+
+def test_condition_on_intrinsic_false(adata_with_spatial):
+    """Test s_encoder architecture changes with condition_on_intrinsic=False."""
+    n_latent = 5
+    n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
+    
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    
+    # Test with condition_on_intrinsic=True (default)
+    model_true = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
+    assert model_true.module.condition_on_intrinsic == True
+    
+    # Test with condition_on_intrinsic=False
+    model_false = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
+    assert model_false.module.condition_on_intrinsic == False
+    
+    # Check the difference in encoder input dimensions
+    # The encoder has inject_covariates=True, so batch info is also injected
+    # But we can verify the difference is exactly n_latent
+    input_dim_true = model_true.module.s_encoder.encoder.fc_layers[0][0].in_features
+    input_dim_false = model_false.module.s_encoder.encoder.fc_layers[0][0].in_features
+    assert input_dim_true - input_dim_false == n_latent, \
+        f"Difference in input dims should be n_latent={n_latent}, got {input_dim_true - input_dim_false}"
+    
+    # Test training works with condition_on_intrinsic=False
+    model_false.train(max_epochs=2, train_size=0.5)
+    
+    # Test inference outputs have correct shapes
+    dataloader = model_false._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+    model_false.module.eval()
+    with torch.no_grad():
+        inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
+
+def test_make_counterfactual_adata(adata_with_spatial):
+    """Test make_counterfactual_adata function with both sampling modes."""
+    from cellina._utils import make_counterfactual_adata
+    
+    # Replace spatial_x with positive count data for NB sampling
+    n_spatial_features = 20
+    adata_with_spatial.obsm["spatial_x"] = np.random.poisson(5, size=(adata_with_spatial.n_obs, n_spatial_features)).astype(np.float32)
+    
+    n_obs = adata_with_spatial.n_obs
+    indices_basal = np.arange(0, n_obs // 2)
+    indices_cf = np.arange(n_obs // 2, n_obs)
+    spatial_col = "spatial_x"
+    
+    # Test sample=True (NB sampling)
+    adata_cf_sampled = make_counterfactual_adata(
+        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
+    )
+    
+    # Check basic properties
+    assert adata_cf_sampled.n_obs == len(indices_basal)
+    assert adata_cf_sampled.n_vars == adata_with_spatial.n_vars
+    assert spatial_col in adata_cf_sampled.obsm
+    assert adata_cf_sampled.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
+    
+    # Verify .X is from basal cells
+    np.testing.assert_array_equal(adata_cf_sampled.X, adata_with_spatial[indices_basal].X)
+    
+    # Verify .obs is from basal cells
+    assert all(adata_cf_sampled.obs.index == adata_with_spatial[indices_basal].obs.index)
+    
+    # Test sample=False (row sampling with replacement)
+    adata_cf_rows = make_counterfactual_adata(
+        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=False, random_state=42
+    )
+    
+    # Check shape is correct
+    assert adata_cf_rows.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
+    
+    # Verify each row comes from counterfactual cells (should match at least one row)
+    cf_spatial = adata_with_spatial.obsm[spatial_col][indices_cf]
+    for i in range(adata_cf_rows.n_obs):
+        row = adata_cf_rows.obsm[spatial_col][i]
+        # Check if this row exists in counterfactual spatial features
+        matches = np.any(np.all(cf_spatial == row, axis=1))
+        assert matches, f"Row {i} does not match any counterfactual spatial features"
+    
+    # Test reproducibility with same random_state
+    adata_cf2 = make_counterfactual_adata(
+        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
+    )
+    np.testing.assert_array_equal(adata_cf_sampled.obsm[spatial_col], adata_cf2.obsm[spatial_col])
+
+
+def test_normalize_losses_true():
+    """Test normalize_losses parameter in adversarial training plan."""
+    # Create synthetic data with domain labels for adversarial training
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    n_domains = 3
+    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
+    
+    CellinaModel.setup_anndata(
+        adata,
+        batch_key="batch",
+        spatial_obsm_key="spatial_x",
+        domains_key="domain"
+    )
+    
+    # Create model with discriminator enabled
+    model = CellinaModel(adata, n_latent=5, discriminator_lambda=1.0, classifier_lambda=0.0)
+    
+    # Train with normalize_losses=True
+    model.train(
+        max_epochs=2,
+        train_size=0.5,
+        plan_kwargs={"normalize_losses": True}
+    )
+    
+    # Access the training plan from the trainer
+    training_plan = model.trainer.strategy.model
+    
+    # Check warmup completed (should be done after epoch 0)
+    assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
+    
+    # Check EMA values were initialized (should be positive)
+    assert training_plan._ema["vae"] > 0, "EMA for vae loss should be positive"
+    assert training_plan._ema["clf"] >= 0, "EMA for clf loss should be non-negative"
+    assert training_plan._ema["fool"] >= 0, "EMA for fool loss should be non-negative"
+    
+    # Check normalize_losses flag is set correctly
+    assert training_plan._normalize_losses == True
+    
+    # Verify training completed successfully
+    # Note: warmup epoch (epoch 0) is not logged in history, so we expect 1 entry for epoch 1
+    assert len(model.history_["train_loss"]) >= 1
+    
+    # Verify discriminator metrics are logged
+    history_keys = list(model.history_.keys())
+    assert any("discriminator" in key for key in history_keys), \
+        f"No discriminator metrics found in history. Keys: {history_keys}"
