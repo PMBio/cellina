@@ -67,9 +67,26 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
         condition_on_intrinsic: bool = True,
+        link_prediction_weight: float = 0.0,
+        num_neighbors: List[int] = None,
         **model_kwargs,
     ):
         super().__init__(adata)
+
+        # Check if spatial components should be used
+        self.use_spatial = link_prediction_weight > 0
+        
+        if self.use_spatial:
+            # Use PyG-based data splitter for edge prediction
+            from ._edge_data_splitter import GraphJointDataSplitter
+            self._data_splitter_cls = GraphJointDataSplitter
+            # Store edge prediction parameters
+            self._num_neighbors = num_neighbors or [-1]
+            self._data_splitter_kwargs = {
+                'num_neighbors': self._num_neighbors,
+                'neg_sampling_ratio': 1.0,  # 1:1 positive to negative edges
+            }
+        # else: use default data splitter from parent class
 
         library_log_means, library_log_vars = _init_library_size(
             self.adata_manager, self.summary_stats["n_batch"]
@@ -91,17 +108,29 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             discriminator_lambda=discriminator_lambda,
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
+            link_prediction_weight=link_prediction_weight,
             **model_kwargs,
         )
         
         # Update summary string
         adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
+        edge_str = " with edge prediction" if link_prediction_weight > 0 else ""
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}"
+            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}{edge_str}"
         )
         self.init_params_ = self._get_init_params(locals())
 
-        logger.info(f"The Cellina model has been initialized{adv_str}")
+        logger.info(f"The Cellina model has been initialized{adv_str}{edge_str}")
+
+    def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False, data_splitter_kwargs=None):
+        """Create data loader - PyG-aware if spatial is enabled, standard otherwise."""
+        if not self.use_spatial:
+            # Use parent class's standard data loader
+            return super()._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, shuffle=shuffle)
+        
+        # For inference with spatial mode, fall back to parent class
+        # The EdgeDataSplitter is only used during training 
+        return super()._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, shuffle=shuffle)
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -115,6 +144,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         layer: Optional[str] = None,
         categorical_covariate_keys: Optional[List[str]] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
+        spatial_connectivities_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[AnnData]:
         """
@@ -132,6 +162,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         %(param_layer)s
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
+        spatial_connectivities_key
+            Key in `adata.obsp` containing spatial connectivity matrix. Required if link_prediction_weight > 0.
 
         Returns
         -------
@@ -149,6 +181,12 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
+        
+        # Store spatial connectivities key in adata.uns for EdgeDataSplitter
+        if spatial_connectivities_key is not None:
+            from ._constants import SPATIAL_CONNECTIVITIES_KEY
+            adata.uns[SPATIAL_CONNECTIVITIES_KEY] = spatial_connectivities_key
+            
         cls.register_manager(adata_manager)
 
     def train(

@@ -177,10 +177,18 @@ def test_discriminator_enabled():
     # Verify inference outputs include discriminator logits
     model.module.eval()
     model.module.to("cpu")  # Move to CPU for testing
+    
+    # Create simple edge_index (fully connected for test)
+    num_nodes = 10
+    edge_index = torch.stack([torch.arange(num_nodes).repeat_interleave(num_nodes), 
+                              torch.arange(num_nodes).repeat(num_nodes)], dim=0)
+    
     test_batch = {
-        "x": torch.abs(torch.randn(10, adata.n_vars)),  # Use positive values
-        "spatial_x": torch.randn(10, n_spatial_features),
-        "batch_index": torch.zeros(10, 1, dtype=torch.long),  # Add batch_index
+        "x": torch.abs(torch.randn(num_nodes, adata.n_vars)),  # Use positive values
+        "spatial_x": torch.randn(num_nodes, n_spatial_features),
+        "edge_index": edge_index,
+        "batch_size": num_nodes,
+        "batch_index": torch.zeros(num_nodes, 1, dtype=torch.long),  # Add batch_index
     }
     with torch.no_grad():
         outputs = model.module.inference(**test_batch)
@@ -479,3 +487,110 @@ def test_normalize_losses_true():
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
+
+
+def test_edge_prediction_loss():
+    """Test edge prediction functionality when link_prediction_weight > 0."""
+    import scipy.sparse as sp
+    
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    # Add labels and domains for classifier/discriminator
+    n_labels = 3
+    n_domains = 2
+    adata.obs["cell_type"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
+    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
+    
+    # Create a simple spatial connectivity matrix (random edges)
+    n_obs = adata.n_obs
+    n_edges = min(n_obs * 2, 200)  # Limit edges to avoid memory issues
+    
+    # Generate random edges
+    edges_i = np.random.randint(0, n_obs, n_edges)
+    edges_j = np.random.randint(0, n_obs, n_edges)
+    # Remove self-edges and duplicates
+    mask = edges_i != edges_j
+    edges_i, edges_j = edges_i[mask], edges_j[mask]
+    unique_edges = list(set(zip(edges_i, edges_j)))
+    edges_i = np.array([e[0] for e in unique_edges])
+    edges_j = np.array([e[1] for e in unique_edges])
+    
+    # Create symmetric connectivity matrix
+    connectivity = sp.csr_matrix(
+        (np.ones(len(edges_i)), (edges_i, edges_j)), 
+        shape=(n_obs, n_obs)
+    )
+    connectivity = connectivity + connectivity.T  # Make symmetric
+    connectivity.eliminate_zeros()
+    
+    adata.obsp["spatial_connectivities"] = connectivity
+    
+    # Setup model with edge prediction, labels, and domains
+    CellinaModel.setup_anndata(
+        adata,
+        batch_key="batch",
+        labels_key="cell_type",
+        domains_key="domain",
+        spatial_obsm_key="spatial_x",
+        spatial_connectivities_key="spatial_connectivities"
+    )
+    
+    n_latent = 5
+    link_prediction_weight = 0.1
+    model = CellinaModel(
+        adata, 
+        n_latent=n_latent, 
+        link_prediction_weight=link_prediction_weight,
+        classifier_lambda=1.0,
+        discriminator_lambda=1.0
+    )
+    
+    # Verify edge prediction is enabled
+    assert model.module.link_prediction_weight == link_prediction_weight
+    assert model.module.link_prediction_weight > 0
+    
+    # Verify edge data splitter class is used
+    from cellina._edge_data_splitter import GraphJointDataSplitter
+    assert hasattr(model, '_data_splitter_cls')
+    assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
+    
+    # Test training works
+    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
+    
+    # Verify edge loss is computed and logged
+    history_keys = list(model.history_.keys())
+    edge_loss_keys = [k for k in history_keys if "edge_prediction_loss" in k]
+    assert len(edge_loss_keys) > 0, f"No edge prediction metrics found in history. Keys: {history_keys}"
+    
+    # Verify that edge prediction loss values are reasonable  
+    edge_train_loss = model.history_["edge_prediction_loss_train"].iloc[-1].item()
+    assert edge_train_loss >= 0, f"Edge prediction train loss should be non-negative, got {edge_train_loss}"
+    
+    edge_val_loss = model.history_["edge_prediction_loss_validation"].iloc[-1].item()
+    assert edge_val_loss >= 0, f"Edge prediction validation loss should be non-negative, got {edge_val_loss}"
+
+
+def test_edge_prediction_disabled_by_default():
+    """Test that edge prediction is disabled when link_prediction_weight=0 (default)."""
+    adata = synthetic_iid()
+    n_spatial_features = 20
+    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    
+    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
+    
+    # Default should have link_prediction_weight=0
+    model = CellinaModel(adata, n_latent=5)
+    assert model.module.link_prediction_weight == 0.0
+    
+    # Should use regular DataSplitter, not GraphJointDataSplitter
+    from scvi.dataloaders import DataSplitter
+    from cellina._edge_data_splitter import GraphJointDataSplitter
+    assert hasattr(model, '_data_splitter_cls')
+    assert issubclass(model._data_splitter_cls, DataSplitter)
+    assert not issubclass(model._data_splitter_cls, GraphJointDataSplitter)
+    
+    # Explicitly set to 0
+    model2 = CellinaModel(adata, n_latent=5, link_prediction_weight=0.0)
+    assert model2.module.link_prediction_weight == 0.0

@@ -103,7 +103,13 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             inference_outputs = self.module.inference(**inference_inputs)
             z_detach = inference_outputs["z"].detach()
 
-        domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
+        # Handle both graph-aware and standard batch formats
+        if 'node_batch' in batch:
+            domain_labels = batch['node_batch'].get(DOMAINS_KEY, torch.zeros(1, dtype=torch.long)).reshape(-1).long()
+            batch_size = batch['node_batch']['batch_size']
+            domain_labels = domain_labels[:batch_size]
+        else:
+            domain_labels = batch.get(DOMAINS_KEY, torch.zeros(1, dtype=torch.long)).reshape(-1).long()
         disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
             classifier=self.module.domain_discriminator,
             weight=kappa,
@@ -212,7 +218,14 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             )
             
             # Manually compute discriminator training loss (positive weight) for monitoring
-            domain_labels = batch[DOMAINS_KEY].reshape(-1).long()
+            # Handle both graph-aware and standard batch formats
+            if 'node_batch' in batch:
+                domain_labels = batch['node_batch'].get(DOMAINS_KEY, torch.zeros(1, dtype=torch.long)).reshape(-1).long()
+                # Slice to batch_size to match inference outputs (which are already sliced)
+                batch_size = batch['node_batch']['batch_size']
+                domain_labels = domain_labels[:batch_size]
+            else:
+                domain_labels = batch.get(DOMAINS_KEY, torch.zeros(1, dtype=torch.long)).reshape(-1).long()
             disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
                 classifier=self.module.domain_discriminator,
                 weight=kappa,
