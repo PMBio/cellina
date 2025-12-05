@@ -94,6 +94,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self._ema["vae"] = np.mean(self._warmup_stats["scvi"])
             self._ema["clf"] = np.mean(self._warmup_stats["clf"])
             self._ema["fool"] = np.mean(self._warmup_stats["fool"])
+            # TODO: add scale for edge_loss 
             self._warmup_done = True
             self._warmup_stats.clear()  # Free memory
 
@@ -158,9 +159,10 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         clf_loss = scvi_loss.extra_metrics["classifier_loss"]  # scaled is default
         fool_loss_raw = scvi_loss.extra_metrics["fool_loss_raw"]
         fool_loss = scvi_loss.extra_metrics["fool_loss"]  # scaled is default
+        edge_loss = scvi_loss.extra_metrics.get("edge_loss", torch.tensor(0.0))
 
         # Total training loss (with gradients)
-        total_train_loss = vae_loss + clf_loss + fool_loss
+        total_train_loss = vae_loss + clf_loss + fool_loss + edge_loss
 
         # Backward pass
         opt_vae.zero_grad()
