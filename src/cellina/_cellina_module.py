@@ -566,6 +566,8 @@ class CellinaModule(BaseModuleClass):
 
             to_sum[:, i] = p_z + p_s + p_l + p_x_zsl - q_z_x - q_s_x - q_l_x
 
+        # per-cell marginal log-likelihood (numerically stable log-sum-exp estimator)
         batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
-        log_lkl = torch.sum(batch_log_lkl).item()
-        return log_lkl
+
+        # RETURN per-cell log-likelihoods (1D tensor) instead of a summed scalar
+        return batch_log_lkl.cpu()

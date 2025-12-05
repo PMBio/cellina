@@ -293,49 +293,35 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         n_mc_samples: int = 1000,
-        reduce: str | None = None
+        return_mean: bool = True,
     ):
         """Get marginal log-likelihood of the data.
-        Parameters
-        ----------
-        adata
-            AnnData object with equivalent structure to initial AnnData.
-        indices
-            Indices of cells in adata to use.
-        batch_size
-            Minibatch size for data loading into model.
-        n_mc_samples
-            Number of Monte Carlo samples for approximation.
-        reduce
-            Reduction method to apply to the marginal log-likelihoods. Options are:
-            - None: return list of marginal log-likelihoods per batch
-            - 'mean': return mean marginal log-likelihood across all batches
-            - 'sum': return sum of marginal log-likelihoods across all batches
-        Returns
-        -------
-        Marginal log-likelihood of the data.
+        ...
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
 
-        if reduce not in [None, 'mean', 'sum']:
-            raise ValueError(f"Reduction must be None, 'mean' or 'sum', got {reduce}")
-
         scdl = self._make_data_loader(
             adata=adata, indices=indices, batch_size=batch_size
         )
-        marginal_ll = []
+        per_batch_mlls = []
 
         for tensors in scdl:
-            outputs = self.module.marginal_ll(
-                tensors, n_mc_samples
-            )
-            marginal_ll.append(outputs)
+            # returns a 1D tensor per batch (per-cell log-likelihoods)
+            batch_mll = self.module.marginal_ll(tensors, n_mc_samples)
+            # ensure tensor on CPU
+            if not torch.is_tensor(batch_mll):
+                batch_mll = torch.as_tensor(batch_mll)
+            per_batch_mlls.append(batch_mll.cpu())
 
-        # Apply reduction if specified
-        if reduce == 'mean':
-            marginal_ll = np.mean(marginal_ll)
-        elif reduce == 'sum':
-            marginal_ll = np.sum(marginal_ll)
+        if len(per_batch_mlls) == 0:
+            return np.array([])
 
-        return marginal_ll
+        # concatenate per-cell log-likelihoods across batches
+        all_mll = torch.cat(per_batch_mlls, dim=0).numpy()
+
+        if return_mean:
+            return float(np.mean(all_mll))
+        else:
+            # return per-cell array
+            return all_mll
