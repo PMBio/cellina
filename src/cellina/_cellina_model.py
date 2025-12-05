@@ -339,3 +339,53 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             marginal_ll = np.sum(marginal_ll)
 
         return marginal_ll
+
+    def get_normalized_expression(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: Optional[int] = None,
+        return_numpy: bool = True,
+    ):
+        """
+        Return the model's normalized expression (expected counts) for each cell.
+
+        Parameters
+        ----------
+        adata
+            AnnData object with equivalent structure to initial AnnData.
+        indices
+            Indices of cells in adata to use.
+        batch_size
+            Minibatch size for data loading into model.
+        return_numpy
+            If True (default) return a numpy array, otherwise return a torch.Tensor on CPU.
+
+        Returns
+        -------
+        Normalized expression matrix (n_cells, n_genes) as numpy array (or torch.Tensor if return_numpy=False).
+        The values are the model's expected gene expression per cell (px_rate from the generative output).
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+
+        exprs = []
+        with torch.no_grad():
+            for tensors in scdl:
+                inference_inputs = self.module._get_inference_input(tensors)
+                inference_outputs = self.module.inference(**inference_inputs)
+                generative_inputs = self.module._get_generative_input(
+                    tensors, inference_outputs
+                )
+                generative_outputs = self.module.generative(**generative_inputs)
+
+                # px_rate is the expected expression (mean) per cell/gene
+                px_rate = generative_outputs["px_rate"]
+                exprs.append(px_rate.cpu())
+
+        exprs = torch.cat(exprs, dim=0)
+        if return_numpy:
+            return exprs.numpy()
+        return exprs
