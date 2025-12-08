@@ -135,7 +135,10 @@ class GraphJointDataSplitter(DataSplitter):
             
         # Get spatial features
         spatial_key = self.adata_manager.registry["setup_args"]["spatial_obsm_key"]
-        spatial_x = torch.tensor(self.adata_manager.adata.obsm[spatial_key], dtype=torch.float32)
+        if sp.issparse(self.adata_manager.adata.obsm[spatial_key]):
+            spatial_x = torch.tensor(self.adata_manager.adata.obsm[spatial_key].toarray(), dtype=torch.float32)
+        else:
+            spatial_x = torch.tensor(self.adata_manager.adata.obsm[spatial_key], dtype=torch.float32)
         
         # Get domains
         domains_data = self.adata_manager.get_from_registry(DOMAINS_KEY)

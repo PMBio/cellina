@@ -294,13 +294,11 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         else:
             return opts
 
-    def _get_kappa(self) -> float:
+    def _get_kappa(self) -> float: # NOTE: not used - but probably a better way to anneal
         """Get current adversarial weight (kappa)."""
         if self.scale_adversarial_loss == "auto":
             # Inverse of KL warmup: strong at end of training
             return (1 - self.kl_weight) * self.module.discriminator_lambda
-        else:
-            return self.scale_adversarial_loss * self.module.discriminator_lambda
 
     def on_train_epoch_end(self):
         """Log EMA values at end of warmup epoch."""
