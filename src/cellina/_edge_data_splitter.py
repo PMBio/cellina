@@ -210,12 +210,8 @@ class GraphJointDataSplitter(DataSplitter):
         shuffle
             Whether to shuffle
         """
-        # Create node loader - add self-loops for node-level tasks
-        node_data = self.pyg_data.clone()
-        node_data.edge_index, _ = add_self_loops(node_data.edge_index, num_nodes=node_data.num_nodes)
-        
         node_loader = NeighborLoader(
-            node_data,
+            self.pyg_data,
             num_neighbors=self.num_neighbors,
             input_nodes=torch.tensor(node_indices, dtype=torch.long),
             batch_size=self.batch_size,
