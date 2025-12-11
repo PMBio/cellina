@@ -67,6 +67,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
         condition_on_intrinsic: bool = True,
+        use_observed_lib_size: bool = True,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -77,6 +78,22 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         # Get spatial input dimensions from registry
         n_spatial_input = self.summary_stats["n_spatial_x"]
+
+        # If requested, compute & register observed library size
+        # under scvi's registry key so dataloaders will provide it.
+        if use_observed_lib_size:
+            lib_key = REGISTRY_KEYS.OBSERVED_LIB_SIZE
+            if lib_key not in self.adata.obs.columns:
+                X = self.adata.X
+                try:
+                    import scipy.sparse as _sparse
+                except Exception:
+                    _sparse = None
+                if _sparse is not None and _sparse.issparse(X):
+                    tot = np.asarray(X.sum(axis=1)).ravel()
+                else:
+                    tot = np.array(X).sum(axis=1)
+                self.adata.obs[lib_key] = np.log(tot + 1e-8)
 
         self.module = CellinaModule(
             n_input=self.summary_stats["n_vars"],
@@ -93,7 +110,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             condition_on_intrinsic=condition_on_intrinsic,
             **model_kwargs,
         )
-        
+        # apply runtime flag to module so it uses observed lib size when present
+        self.module.use_observed_lib_size = bool(use_observed_lib_size)
+
         # Update summary string
         adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
         self._model_summary_string = (
