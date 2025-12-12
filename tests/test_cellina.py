@@ -318,22 +318,13 @@ def test_marginal_ll(adata_with_spatial):
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
     
     # Test basic computation (returns list by default)
-    marginal_ll_list = model.get_marginal_ll(n_mc_samples=100)
-    assert isinstance(marginal_ll_list, list)
-    assert len(marginal_ll_list) > 0
-    assert all(isinstance(ll, float) and np.isfinite(ll) for ll in marginal_ll_list)
+    marginal_ll_list = model.get_marginal_ll(n_mc_samples=100, return_mean=False)
+    assert isinstance(marginal_ll_list, np.ndarray)
+    assert marginal_ll_list.shape[0] == adata_with_spatial.n_obs
     
     # Test mean reduction
-    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=100, reduce='mean')
+    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=100, return_mean=True)
     assert isinstance(marginal_ll_mean, (float, np.floating))
-    
-    # Test sum reduction
-    marginal_ll_sum = model.get_marginal_ll(n_mc_samples=100, reduce='sum')
-    assert isinstance(marginal_ll_sum, (float, np.floating))
-    
-    # Test invalid reduction raises error
-    with pytest.raises(ValueError, match="Reduction must be None, 'mean' or 'sum'"):
-        model.get_marginal_ll(reduce='invalid')
     
     # Test underlying module.marginal_ll
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
@@ -341,7 +332,7 @@ def test_marginal_ll(adata_with_spatial):
     model.module.eval()
     with torch.no_grad():
         log_lkl = model.module.marginal_ll(batch, n_mc_samples=100)
-    assert isinstance(log_lkl, float) and np.isfinite(log_lkl)
+    assert isinstance(log_lkl, torch.Tensor) and np.isfinite(log_lkl).all()
 
 
 def test_condition_on_intrinsic_false(adata_with_spatial):
