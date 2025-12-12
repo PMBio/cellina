@@ -90,6 +90,7 @@ class CellinaModule(BaseModuleClass):
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
+        self.use_observed_lib_size = False
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
 
@@ -196,7 +197,14 @@ class CellinaModule(BaseModuleClass):
 
     def _get_generative_input(self, tensors, inference_outputs):
         shifted = inference_outputs["shifted"]
-        library = inference_outputs["library"]
+        # Prefer observed library size when requested and available in the batch
+        if getattr(self, "use_observed_lib_size", False) and REGISTRY_KEYS.OBSERVED_LIB_SIZE in tensors:
+            library = tensors[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
+            # ensure shape is (n_cells, 1)
+            if library.dim() == 1:
+                library = library.unsqueeze(-1)
+        else:
+            library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
         input_dict = {
@@ -379,18 +387,22 @@ class CellinaModule(BaseModuleClass):
 
         # KL divergence for library
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        n_batch = self.library_log_means.shape[1]
-        local_library_log_means = F.linear(
-            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
-        )
-        local_library_log_vars = F.linear(
-            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
-        )
+        if not getattr(self, "use_observed_lib_size", False):
+            n_batch = self.library_log_means.shape[1]
+            local_library_log_means = F.linear(
+                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
+            )
+            local_library_log_vars = F.linear(
+                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
+            )
 
-        kl_divergence_l = kl(
-            Normal(qlm, torch.sqrt(qlv)),
-            Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
-        ).sum(dim=1)
+            kl_divergence_l = kl(
+                Normal(qlm, torch.sqrt(qlv)),
+                Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
+            ).sum(dim=1)
+        else:
+            # no library latent KL when using observed library sizes
+            kl_divergence_l = torch.zeros_like(kl_divergence_z)
 
         # Total KL for warmup (z and s)
         kl_local_for_warmup = kl_divergence_z + kl_divergence_s
