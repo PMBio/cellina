@@ -470,3 +470,23 @@ def test_normalize_losses_true():
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
+
+
+def test_get_normalized_expression(adata_with_spatial):
+    """Test get_normalized_expression method returns correct shapes."""
+    n_latent = 5
+    
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    model.train(max_epochs=2, train_size=0.5)
+    
+    # Test default (numpy array)
+    normalized_expr = model.get_normalized_expression()
+    assert isinstance(normalized_expr, np.ndarray)
+    assert normalized_expr.shape == (adata_with_spatial.n_obs, adata_with_spatial.n_vars)
+    assert np.all(normalized_expr >= 0)  # Expression should be non-negative
+    
+    # Test return_numpy=False
+    normalized_expr_tensor = model.get_normalized_expression(return_numpy=False)
+    assert isinstance(normalized_expr_tensor, torch.Tensor)
+    assert normalized_expr_tensor.shape == (adata_with_spatial.n_obs, adata_with_spatial.n_vars)
