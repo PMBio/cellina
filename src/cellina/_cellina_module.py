@@ -83,6 +83,7 @@ class CellinaModule(BaseModuleClass):
         discriminator_kwargs: Optional[Dict[str, Any]] = None,
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
+        use_observed_lib_size: bool = True,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -90,7 +91,7 @@ class CellinaModule(BaseModuleClass):
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
-        self.use_observed_lib_size = False
+        self.use_observed_lib_size = use_observed_lib_size
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
 
@@ -197,14 +198,7 @@ class CellinaModule(BaseModuleClass):
 
     def _get_generative_input(self, tensors, inference_outputs):
         shifted = inference_outputs["shifted"]
-        # Prefer observed library size when requested and available in the batch
-        if getattr(self, "use_observed_lib_size", False) and REGISTRY_KEYS.OBSERVED_LIB_SIZE in tensors:
-            library = tensors[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
-            # ensure shape is (n_cells, 1)
-            if library.dim() == 1:
-                library = library.unsqueeze(-1)
-        else:
-            library = inference_outputs["library"]
+        library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
         input_dict = {
@@ -224,6 +218,13 @@ class CellinaModule(BaseModuleClass):
         # log the input to the variational distribution for numerical stability
         x_ = torch.log(1 + x)
 
+        # Library size
+        if self.use_observed_lib_size:
+            library = torch.log(x.sum(1)).unsqueeze(1)
+            qlm, qlv = None, None
+        else:
+            qlm, qlv, library = self.l_encoder(x_, batch_index)
+
         # Encode counts -> z
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
@@ -236,9 +237,6 @@ class CellinaModule(BaseModuleClass):
 
         # Compute shifted = concat(z, s)
         shifted = torch.cat([z, s], dim=-1)
-
-        # Library size
-        qlm, qlv, library = self.l_encoder(x_, batch_index)
 
         outputs = dict(
             z=z,
@@ -271,6 +269,28 @@ class CellinaModule(BaseModuleClass):
         px_r = torch.exp(self.px_r)
 
         return dict(px_scale=px_scale, px_r=px_r, px_rate=px_rate, px_dropout=px_dropout)
+
+    def _get_local_library_params(self, batch_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get batch-specific library log means and log variances.
+        
+        Parameters
+        ----------
+        batch_index
+            Batch indices for each sample
+            
+        Returns
+        -------
+        Tuple of (local_library_log_means, local_library_log_vars)
+        """
+        n_batch = self.library_log_means.shape[1]
+        local_library_log_means = F.linear(
+            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
+        )
+        local_library_log_vars = F.linear(
+            F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
+        )
+        return local_library_log_means, local_library_log_vars
 
     def _compute_classifier_metrics(
         self,
@@ -387,15 +407,8 @@ class CellinaModule(BaseModuleClass):
 
         # KL divergence for library
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        if not getattr(self, "use_observed_lib_size", False):
-            n_batch = self.library_log_means.shape[1]
-            local_library_log_means = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
-            )
-            local_library_log_vars = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
-            )
-
+        if not self.use_observed_lib_size:
+            local_library_log_means, local_library_log_vars = self._get_local_library_params(batch_index)
             kl_divergence_l = kl(
                 Normal(qlm, torch.sqrt(qlv)),
                 Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
@@ -561,22 +574,20 @@ class CellinaModule(BaseModuleClass):
                 reconst_loss = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(sample_batch).sum(dim=-1)
 
             # Log-probabilities
-            n_batch = self.library_log_means.shape[1]
-            local_library_log_means = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
-            )
-            local_library_log_vars = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
-            )
-            p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
             p_z = Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v)).log_prob(z).sum(dim=-1)
             p_s = Normal(torch.zeros_like(qs_m), torch.ones_like(qs_v)).log_prob(s).sum(dim=-1)
             p_x_zsl = -reconst_loss
             q_z_x = Normal(qz_m, qz_v.sqrt()).log_prob(z).sum(dim=-1)
             q_s_x = Normal(qs_m, qs_v.sqrt()).log_prob(s).sum(dim=-1)
-            q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
-
-            to_sum[:, i] = p_z + p_s + p_l + p_x_zsl - q_z_x - q_s_x - q_l_x
+            
+            # Library size terms (only when using latent library)
+            if not self.use_observed_lib_size:
+                local_library_log_means, local_library_log_vars = self._get_local_library_params(batch_index)
+                p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
+                q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
+                to_sum[:, i] = p_z + p_s + p_l + p_x_zsl - q_z_x - q_s_x - q_l_x
+            else:
+                to_sum[:, i] = p_z + p_s + p_x_zsl - q_z_x - q_s_x
 
         # per-cell marginal log-likelihood (numerically stable log-sum-exp estimator)
         batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
