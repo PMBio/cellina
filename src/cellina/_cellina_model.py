@@ -335,6 +335,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         return_numpy: bool = True,
+        key: Optional[str] = 'px_scale',
     ):
         """
         Return the model's normalized expression (expected counts) for each cell.
@@ -350,8 +351,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             If True (default) return a numpy array, otherwise return a torch.Tensor on CPU.
         Returns
         -------
-        Normalized expression matrix (n_cells, n_genes) as numpy array (or torch.Tensor if return_numpy=False).
-        The values are the model's expected gene expression per cell (px_rate from the generative output).
+        Expected or normalized expression matrix (n_cells, n_genes) as numpy array (or torch.Tensor if return_numpy=False).
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
@@ -368,9 +368,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 )
                 generative_outputs = self.module.generative(**generative_inputs)
 
-                # px_rate is the expected expression (mean) per cell/gene
-                px_rate = generative_outputs["px_rate"]
-                exprs.append(px_rate.cpu())
+                # Expected expression (mean) or normalized expression (scale) per cell/gene
+                px = generative_outputs[key]
+                exprs.append(px.cpu())
 
         exprs = torch.cat(exprs, dim=0)
         if return_numpy:

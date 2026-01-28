@@ -62,4 +62,7 @@ def make_counterfactual_adata(
     # 4. Replace spatial_column in .obsm
     adata_cf.obsm[spatial_column] = spatial_counts_basal_cf
 
+    # 5. Keep original target cells to compare later if needed
+    adata_cf.uns["target_cells"] = adata[indices_counterfactual].X.copy()
+
     return adata_cf
