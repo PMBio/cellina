@@ -3,7 +3,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
-from ._constants import SPATIAL_X_KEY
+SPATIAL_X_KEY = "spatial_x"  # Default obsm key for weighted pseudobulks
 
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):

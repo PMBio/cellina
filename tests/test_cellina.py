@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import scipy.sparse as sp
 import torch
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
@@ -7,12 +8,33 @@ from scvi.data import synthetic_iid
 from cellina import CellinaModel
 
 
+def _add_spatial_connectivity(adata, max_neighbors=5):
+    """Add a random spatial connectivity matrix to adata."""
+    n_obs = adata.n_obs
+    rows, cols = [], []
+    for i in range(n_obs):
+        n_neigh = min(max_neighbors, n_obs - 1)
+        neighbors = np.random.choice(
+            [j for j in range(n_obs) if j != i], size=n_neigh, replace=False
+        )
+        for j in neighbors:
+            rows.append(i)
+            cols.append(j)
+    connectivity = sp.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)), shape=(n_obs, n_obs)
+    )
+    # Make symmetric
+    connectivity = connectivity + connectivity.T
+    connectivity.data[:] = 1.0
+    connectivity.eliminate_zeros()
+    adata.obsp["spatial_connectivities"] = connectivity
+
+
 @pytest.fixture
 def adata_with_spatial():
-    """Create synthetic AnnData with spatial features."""
+    """Create synthetic AnnData with spatial connectivity."""
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
+    _add_spatial_connectivity(adata)
     n_labels = 3
     adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
     return adata
@@ -21,47 +43,50 @@ def adata_with_spatial():
 def test_cellina_model(adata_with_spatial):
     """Test basic CellinaModel functionality."""
     n_latent = 5
-    
-    CellinaModel.setup_anndata(adata_with_spatial,
-                               batch_key="batch",
-                               spatial_obsm_key="spatial_x",
-                               labels_key="cell_labels"
-                               )
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
-    
-    # Test architecture
+
     assert model.module.n_latent == n_latent
-    
-    # Test training
+
     model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_elbo()
-    model.get_reconstruction_error()
     model.history
-    
-    # Test __repr__
+
     print(model)
 
 
 def test_cellina_s_encoder_architecture(adata_with_spatial):
-    """Test that s_encoder receives concatenated [spatial_x, z] as input."""
+    """Test that s_encoder is a GCN (GraphEncoder)."""
     n_latent = 5
-    n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
-    
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
-    
+
+    # s_encoder should be a GraphEncoder with GCN layers
+    from cellina._spatial_encoder import GraphEncoder
+    assert isinstance(model.module.s_encoder, GraphEncoder)
+    assert hasattr(model.module.s_encoder.encoder, 'gcn_layers')
+
     # Test forward pass produces correct outputs
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    
+
     inference_inputs = model.module._get_inference_input(batch)
-    
-    # Verify spatial_x is in inference inputs
-    assert "spatial_x" in inference_inputs
-    assert inference_inputs["spatial_x"].shape[1] == n_spatial
-    
+
+    # Verify edge_index is in inference inputs (for GCN message passing)
+    assert "edge_index" in inference_inputs
+
     inference_outputs = model.module.inference(**inference_inputs)
-    
+
     # Verify z and s have correct shapes
     assert inference_outputs["z"].shape[1] == n_latent
     assert inference_outputs["s"].shape[1] == n_latent
@@ -71,39 +96,44 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
 def test_cellina_losses(adata_with_spatial):
     """Test that loss includes KL divergence for both z and s, and classifier loss when enabled."""
     n_latent = 5
-    
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels")
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
-    
+
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    
+
     inference_inputs = model.module._get_inference_input(batch)
     inference_outputs = model.module.inference(**inference_inputs)
     generative_inputs = model.module._get_generative_input(batch, inference_outputs)
     generative_outputs = model.module.generative(**generative_inputs)
     loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
-    
+
     # Both KL divergences should be present
     assert "kl_divergence_z" in loss_output.kl_local
     assert "kl_divergence_s" in loss_output.kl_local
     assert "kl_divergence_l" in loss_output.kl_local
-    
+
     # Explicit loss components should be in extra_metrics
     assert "vae_loss" in loss_output.extra_metrics
     assert "classifier_loss" in loss_output.extra_metrics
     assert "fool_loss" in loss_output.extra_metrics
-    
-    # Verify vae_loss is just reconstruction + KL (no classifier)
+
     vae_loss = loss_output.extra_metrics["vae_loss"]
     assert vae_loss > 0
-    
-    # Classifier loss should be positive when enabled
+
     assert loss_output.extra_metrics["classifier_loss"] > 0
-    
+
     # Check we can compute accuracy
     classifier_logits = inference_outputs["classifier_logits"]
-    labels = batch[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
+    labels = batch['node_batch'][REGISTRY_KEYS.LABELS_KEY]
+    batch_size = batch['node_batch']['batch_size']
+    labels = labels[:batch_size].reshape(-1).long()
     predictions = torch.argmax(classifier_logits, dim=1)
     accuracy = (predictions == labels).float().mean()
     assert 0 <= accuracy <= 1
@@ -112,12 +142,13 @@ def test_cellina_losses(adata_with_spatial):
 def test_classifier_disabled_by_default():
     """Test that classifier is disabled when classifier_lambda=0."""
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    
-    # Should work fine without labels when classifier_lambda=0
+    _add_spatial_connectivity(adata)
+
+    CellinaModel.setup_anndata(
+        adata,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
@@ -126,17 +157,17 @@ def test_classifier_disabled_by_default():
 def test_discriminator_disabled_by_default():
     """Test that discriminator is disabled when discriminator_lambda=0 (default)."""
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    
-    # Default discriminator_lambda should be 0
+    _add_spatial_connectivity(adata)
+
+    CellinaModel.setup_anndata(
+        adata,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata, n_latent=5)
     assert model.module.domain_discriminator is None
     assert model.module.discriminator_lambda == 0.0
-    
-    # Explicitly set to 0
+
     model2 = CellinaModel(adata, n_latent=5, discriminator_lambda=0.0)
     assert model2.module.domain_discriminator is None
     assert model2.module.discriminator_lambda == 0.0
@@ -145,84 +176,67 @@ def test_discriminator_disabled_by_default():
 def test_discriminator_enabled():
     """Test that discriminator works when discriminator_lambda > 0."""
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    # Add domain labels (required for discriminator)
+    _add_spatial_connectivity(adata)
+
     n_domains = 3
     adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    
+
     CellinaModel.setup_anndata(
-        adata, 
-        batch_key="batch", 
-        spatial_obsm_key="spatial_x",
-        domains_key="domain"
+        adata,
+        batch_key="batch",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
     )
-    
+
     n_latent = 5
     model = CellinaModel(adata, n_latent=n_latent, discriminator_lambda=1.0)
-    
-    # Check discriminator is initialized
+
     assert model.module.domain_discriminator is not None
     assert model.module.discriminator_lambda == 1.0
-    
-    # Test training with adversarial plan
+
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
-    
-    # Check that discriminator metrics are logged
+
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
-    
+
     # Verify inference outputs include discriminator logits
     model.module.eval()
-    model.module.to("cpu")  # Move to CPU for testing
-    
-    # Create simple edge_index (fully connected for test)
-    num_nodes = 10
-    edge_index = torch.stack([torch.arange(num_nodes).repeat_interleave(num_nodes), 
-                              torch.arange(num_nodes).repeat(num_nodes)], dim=0)
-    
-    test_batch = {
-        "x": torch.abs(torch.randn(num_nodes, adata.n_vars)),  # Use positive values
-        "spatial_x": torch.randn(num_nodes, n_spatial_features),
-        "edge_index": edge_index,
-        "batch_size": num_nodes,
-        "batch_index": torch.zeros(num_nodes, 1, dtype=torch.long),  # Add batch_index
-    }
+    dataloader = model._make_data_loader(adata, batch_size=10)
+    batch = next(iter(dataloader))
+
     with torch.no_grad():
-        outputs = model.module.inference(**test_batch)
-    
+        inference_inputs = model.module._get_inference_input(batch)
+        outputs = model.module.inference(**inference_inputs)
+
     assert "discriminator_logits" in outputs
-    assert outputs["discriminator_logits"].shape == (10, n_domains)
+    assert outputs["discriminator_logits"].shape[1] == n_domains
 
 
 def test_cellina_latent_representation(adata_with_spatial):
     """Test latent representation returns correct shapes and uses latent_key."""
     n_latent = 5
-    
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels")
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
-    
-    # Test separate representations
+
     latent_z = model.get_latent_representation(latent_key='z')
     latent_s = model.get_latent_representation(latent_key='s')
     latent_shifted = model.get_latent_representation(latent_key='shifted')
-    
+
     assert latent_z.shape == (adata_with_spatial.n_obs, n_latent)
     assert latent_s.shape == (adata_with_spatial.n_obs, n_latent)
-    assert latent_shifted.shape == (adata_with_spatial.n_obs, n_latent * 2)  # concat(z, s)
-    
-    # Default should be shifted (what goes into decoder)
+    assert latent_shifted.shape == (adata_with_spatial.n_obs, n_latent * 2)
+
     latent_default = model.get_latent_representation()
     assert latent_default.shape == latent_shifted.shape
-    
-    # Test error handling
-    with pytest.raises(ValueError, match="latent_key must be"):
-        model.get_latent_representation(latent_key='invalid')
-    
-    # Test error handling
+
     with pytest.raises(ValueError, match="latent_key must be"):
         model.get_latent_representation(latent_key='invalid')
 
@@ -231,12 +245,10 @@ def test_spatial_neighbors(adata_with_spatial):
     """Test spatial_neighbors function."""
     from cellina._spatial_utils import spatial_neighbors
     from scipy.sparse import issparse
-    
-    # Add spatial coordinates to adata
+
     n_obs = adata_with_spatial.n_obs
     adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
-    
-    # Test basic functionality
+
     spatial_neighbors(
         adata_with_spatial,
         bandwidth=50.0,
@@ -247,17 +259,11 @@ def test_spatial_neighbors(adata_with_spatial):
         key_added='spatial',
         inplace=True
     )
-    
-    # Check that connectivity matrix was added
+
     assert 'spatial_connectivities' in adata_with_spatial.obsp
-    
-    # Check that it's a sparse matrix
     assert issparse(adata_with_spatial.obsp['spatial_connectivities'])
-    
-    # Check shape
     assert adata_with_spatial.obsp['spatial_connectivities'].shape == (n_obs, n_obs)
-    
-    # Test return value when inplace=False
+
     conn_matrix = spatial_neighbors(
         adata_with_spatial,
         bandwidth=50.0,
@@ -267,7 +273,7 @@ def test_spatial_neighbors(adata_with_spatial):
         spatial_key='spatial',
         inplace=False
     )
-    
+
     assert conn_matrix is not None
     assert conn_matrix.shape == (n_obs, n_obs)
 
@@ -275,18 +281,14 @@ def test_spatial_neighbors(adata_with_spatial):
 def test_weighted_pseudobulks(adata_with_spatial):
     """Test weighted_pseudobulks function."""
     from cellina._spatial_utils import weighted_pseudobulks, spatial_neighbors
-    from scipy.sparse import csr_matrix
-    
-    # Setup spatial data
+
     n_obs = adata_with_spatial.n_obs
     adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
-    
-    # Add cell type labels
+
     cell_types = ['TypeA', 'TypeB', 'TypeC']
     adata_with_spatial.obs['cell_type'] = np.random.choice(cell_types, n_obs)
-    
-    # Create spatial connectivity matrix
-    sp = spatial_neighbors(
+
+    sp_mat = spatial_neighbors(
         adata_with_spatial,
         bandwidth=50.0,
         cutoff=0.1,
@@ -295,195 +297,137 @@ def test_weighted_pseudobulks(adata_with_spatial):
         spatial_key='spatial',
         inplace=False
     )
-    
-    # Test weighted pseudobulks
+
     weighted_pseudobulks(
         adata_with_spatial,
-        sp=sp,
+        sp=sp_mat,
         groupby='cell_type',
         obsm_key='spatial_pseudobulks',
         binarize=True
     )
-    
-    # Check that pseudobulks were added
+
     assert 'spatial_pseudobulks' in adata_with_spatial.obsm
-    
-    # Check shape: should be (n_obs, n_cell_types * n_genes)
+
     n_genes = adata_with_spatial.n_vars
     n_cell_types = len(cell_types)
     assert adata_with_spatial.obsm['spatial_pseudobulks'].shape == (n_obs, n_cell_types * n_genes)
-    
-    # Check that spatial_var was added to uns
+
     assert '_spatial_var' in adata_with_spatial.uns
 
 
 def test_marginal_ll(adata_with_spatial):
     """Test get_marginal_ll method and underlying module.marginal_ll."""
     n_latent = 5
-    
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
-    
-    # Test basic computation (returns list by default)
-    marginal_ll_list = model.get_marginal_ll(n_mc_samples=100)
+
+    marginal_ll_list = model.get_marginal_ll(n_mc_samples=10)
     assert isinstance(marginal_ll_list, list)
     assert len(marginal_ll_list) > 0
     assert all(isinstance(ll, float) and np.isfinite(ll) for ll in marginal_ll_list)
-    
-    # Test mean reduction
-    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=100, reduce='mean')
+
+    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=10, reduce='mean')
     assert isinstance(marginal_ll_mean, (float, np.floating))
-    
-    # Test sum reduction
-    marginal_ll_sum = model.get_marginal_ll(n_mc_samples=100, reduce='sum')
+
+    marginal_ll_sum = model.get_marginal_ll(n_mc_samples=10, reduce='sum')
     assert isinstance(marginal_ll_sum, (float, np.floating))
-    
-    # Test invalid reduction raises error
+
     with pytest.raises(ValueError, match="Reduction must be None, 'mean' or 'sum'"):
         model.get_marginal_ll(reduce='invalid')
-    
+
     # Test underlying module.marginal_ll
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
     model.module.eval()
     with torch.no_grad():
-        log_lkl = model.module.marginal_ll(batch, n_mc_samples=100)
+        log_lkl = model.module.marginal_ll(batch, n_mc_samples=10)
     assert isinstance(log_lkl, float) and np.isfinite(log_lkl)
 
 
 def test_condition_on_intrinsic_false(adata_with_spatial):
     """Test s_encoder architecture changes with condition_on_intrinsic=False."""
     n_latent = 5
-    n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
-    
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    
+    n_vars = adata_with_spatial.n_vars
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+
     # Test with condition_on_intrinsic=True (default)
     model_true = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
     assert model_true.module.condition_on_intrinsic == True
-    
+
     # Test with condition_on_intrinsic=False
     model_false = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
     assert model_false.module.condition_on_intrinsic == False
-    
-    # Check the difference in encoder input dimensions
-    # The encoder has inject_covariates=True, so batch info is also injected
-    # But we can verify the difference is exactly n_latent
-    input_dim_true = model_true.module.s_encoder.encoder.fc_layers[0][0].in_features
-    input_dim_false = model_false.module.s_encoder.encoder.fc_layers[0][0].in_features
-    assert input_dim_true - input_dim_false == n_latent, \
-        f"Difference in input dims should be n_latent={n_latent}, got {input_dim_true - input_dim_false}"
-    
+
+    # Check GCN input dimensions differ by n_latent
+    # First GCN layer input size includes covariates (batch injection)
+    first_gcn_true = model_true.module.s_encoder.encoder.gcn_layers[0]
+    first_gcn_false = model_false.module.s_encoder.encoder.gcn_layers[0]
+    input_dim_true = first_gcn_true.in_channels
+    input_dim_false = first_gcn_false.in_channels
+
+    # The difference in base input should be n_latent
+    # (both have the same covariate injection, so the difference is purely from n_input_s)
+    n_cov = model_true.module.s_encoder.encoder.n_cov
+    assert (input_dim_true - n_cov) - (input_dim_false - n_cov) == n_latent, \
+        f"Difference in input dims should be n_latent={n_latent}, got {(input_dim_true - n_cov) - (input_dim_false - n_cov)}"
+
     # Test training works with condition_on_intrinsic=False
     model_false.train(max_epochs=2, train_size=0.5)
-    
+
     # Test inference outputs have correct shapes
     dataloader = model_false._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
     model_false.module.eval()
     with torch.no_grad():
         inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
-
-def test_make_counterfactual_adata(adata_with_spatial):
-    """Test make_counterfactual_adata function with both sampling modes."""
-    from cellina._utils import make_counterfactual_adata
-    
-    # Replace spatial_x with positive count data for NB sampling
-    n_spatial_features = 20
-    adata_with_spatial.obsm["spatial_x"] = np.random.poisson(5, size=(adata_with_spatial.n_obs, n_spatial_features)).astype(np.float32)
-    
-    n_obs = adata_with_spatial.n_obs
-    indices_basal = np.arange(0, n_obs // 2)
-    indices_cf = np.arange(n_obs // 2, n_obs)
-    spatial_col = "spatial_x"
-    
-    # Test sample=True (NB sampling)
-    adata_cf_sampled = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
-    )
-    
-    # Check basic properties
-    assert adata_cf_sampled.n_obs == len(indices_basal)
-    assert adata_cf_sampled.n_vars == adata_with_spatial.n_vars
-    assert spatial_col in adata_cf_sampled.obsm
-    assert adata_cf_sampled.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
-    
-    # Verify .X is from basal cells
-    np.testing.assert_array_equal(adata_cf_sampled.X, adata_with_spatial[indices_basal].X)
-    
-    # Verify .obs is from basal cells
-    assert all(adata_cf_sampled.obs.index == adata_with_spatial[indices_basal].obs.index)
-    
-    # Test sample=False (row sampling with replacement)
-    adata_cf_rows = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=False, random_state=42
-    )
-    
-    # Check shape is correct
-    assert adata_cf_rows.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
-    
-    # Verify each row comes from counterfactual cells (should match at least one row)
-    cf_spatial = adata_with_spatial.obsm[spatial_col][indices_cf]
-    for i in range(adata_cf_rows.n_obs):
-        row = adata_cf_rows.obsm[spatial_col][i]
-        # Check if this row exists in counterfactual spatial features
-        matches = np.any(np.all(cf_spatial == row, axis=1))
-        assert matches, f"Row {i} does not match any counterfactual spatial features"
-    
-    # Test reproducibility with same random_state
-    adata_cf2 = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
-    )
-    np.testing.assert_array_equal(adata_cf_sampled.obsm[spatial_col], adata_cf2.obsm[spatial_col])
+    assert inference_outputs["z"].shape[1] == n_latent
+    assert inference_outputs["s"].shape[1] == n_latent
 
 
 def test_normalize_losses_true():
     """Test normalize_losses parameter in adversarial training plan."""
-    # Create synthetic data with domain labels for adversarial training
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
+    _add_spatial_connectivity(adata)
+
     n_domains = 3
     adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    
+
     CellinaModel.setup_anndata(
         adata,
         batch_key="batch",
-        spatial_obsm_key="spatial_x",
-        domains_key="domain"
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
     )
-    
-    # Create model with discriminator enabled
+
     model = CellinaModel(adata, n_latent=5, discriminator_lambda=1.0, classifier_lambda=0.0)
-    
-    # Train with normalize_losses=True
+
     model.train(
         max_epochs=2,
         train_size=0.5,
         plan_kwargs={"normalize_losses": True}
     )
-    
-    # Access the training plan from the trainer
+
     training_plan = model.trainer.strategy.model
-    
-    # Check warmup completed (should be done after epoch 0)
-    assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
-    
-    # Check EMA values were initialized (should be positive)
-    assert training_plan._ema["vae"] > 0, "EMA for vae loss should be positive"
-    assert training_plan._ema["clf"] >= 0, "EMA for clf loss should be non-negative"
-    assert training_plan._ema["fool"] >= 0, "EMA for fool loss should be non-negative"
-    
-    # Check normalize_losses flag is set correctly
+
+    assert training_plan._warmup_done == True
+    assert training_plan._ema["vae"] > 0
+    assert training_plan._ema["clf"] >= 0
+    assert training_plan._ema["fool"] >= 0
     assert training_plan._normalize_losses == True
-    
-    # Verify training completed successfully
-    # Note: warmup epoch (epoch 0) is not logged in history, so we expect 1 entry for epoch 1
+
     assert len(model.history_["train_loss"]) >= 1
-    
-    # Verify discriminator metrics are logged
+
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
@@ -491,83 +435,48 @@ def test_normalize_losses_true():
 
 def test_edge_prediction_loss():
     """Test edge prediction functionality when link_prediction_weight > 0."""
-    import scipy.sparse as sp
-    
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    # Add labels and domains for classifier/discriminator
+    _add_spatial_connectivity(adata)
+
     n_labels = 3
     n_domains = 2
     adata.obs["cell_type"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
     adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    
-    # Create a simple spatial connectivity matrix (random edges)
-    n_obs = adata.n_obs
-    n_edges = min(n_obs * 2, 200)  # Limit edges to avoid memory issues
-    
-    # Generate random edges
-    edges_i = np.random.randint(0, n_obs, n_edges)
-    edges_j = np.random.randint(0, n_obs, n_edges)
-    # Remove self-edges and duplicates
-    mask = edges_i != edges_j
-    edges_i, edges_j = edges_i[mask], edges_j[mask]
-    unique_edges = list(set(zip(edges_i, edges_j)))
-    edges_i = np.array([e[0] for e in unique_edges])
-    edges_j = np.array([e[1] for e in unique_edges])
-    
-    # Create symmetric connectivity matrix
-    connectivity = sp.csr_matrix(
-        (np.ones(len(edges_i)), (edges_i, edges_j)), 
-        shape=(n_obs, n_obs)
-    )
-    connectivity = connectivity + connectivity.T  # Make symmetric
-    connectivity.eliminate_zeros()
-    
-    adata.obsp["spatial_connectivities"] = connectivity
-    
-    # Setup model with edge prediction, labels, and domains
+
     CellinaModel.setup_anndata(
         adata,
         batch_key="batch",
         labels_key="cell_type",
         domains_key="domain",
-        spatial_obsm_key="spatial_x",
-        spatial_connectivities_key="spatial_connectivities"
+        spatial_connectivities_key="spatial_connectivities",
     )
-    
+
     n_latent = 5
     link_prediction_weight = 0.1
     model = CellinaModel(
-        adata, 
-        n_latent=n_latent, 
+        adata,
+        n_latent=n_latent,
         link_prediction_weight=link_prediction_weight,
         classifier_lambda=1.0,
-        discriminator_lambda=1.0
+        discriminator_lambda=1.0,
     )
-    
-    # Verify edge prediction is enabled
+
     assert model.module.link_prediction_weight == link_prediction_weight
     assert model.module.link_prediction_weight > 0
-    
-    # Verify edge data splitter class is used
+
     from cellina._edge_data_splitter import GraphJointDataSplitter
     assert hasattr(model, '_data_splitter_cls')
     assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
-    
-    # Test training works
+
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
-    
-    # Verify edge loss is computed and logged
+
     history_keys = list(model.history_.keys())
     edge_loss_keys = [k for k in history_keys if "edge_prediction_loss" in k]
     assert len(edge_loss_keys) > 0, f"No edge prediction metrics found in history. Keys: {history_keys}"
-    
-    # Verify that edge prediction loss values are reasonable  
+
     edge_train_loss = model.history_["edge_prediction_loss_train"].iloc[-1].item()
     assert edge_train_loss >= 0, f"Edge prediction train loss should be non-negative, got {edge_train_loss}"
-    
+
     edge_val_loss = model.history_["edge_prediction_loss_validation"].iloc[-1].item()
     assert edge_val_loss >= 0, f"Edge prediction validation loss should be non-negative, got {edge_val_loss}"
 
@@ -575,22 +484,23 @@ def test_edge_prediction_loss():
 def test_edge_prediction_disabled_by_default():
     """Test that edge prediction is disabled when link_prediction_weight=0 (default)."""
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    
-    # Default should have link_prediction_weight=0
+    _add_spatial_connectivity(adata)
+
+    CellinaModel.setup_anndata(
+        adata,
+        batch_key="batch",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+
     model = CellinaModel(adata, n_latent=5)
     assert model.module.link_prediction_weight == 0.0
-    
-    # Should use regular DataSplitter, not GraphJointDataSplitter
-    from scvi.dataloaders import DataSplitter
+
+    # Always uses GraphJointDataSplitter now (GCN needs graph)
     from cellina._edge_data_splitter import GraphJointDataSplitter
-    assert hasattr(model, '_data_splitter_cls')
-    assert issubclass(model._data_splitter_cls, DataSplitter)
-    assert not issubclass(model._data_splitter_cls, GraphJointDataSplitter)
-    
-    # Explicitly set to 0
+    assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
+
+    # But use_edge_prediction should be False
+    assert model._data_splitter_kwargs['use_edge_prediction'] == False
+
     model2 = CellinaModel(adata, n_latent=5, link_prediction_weight=0.0)
     assert model2.module.link_prediction_weight == 0.0

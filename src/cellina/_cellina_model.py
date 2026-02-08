@@ -11,25 +11,25 @@ from scvi.data.fields import (
     CategoricalObsField,
     LayerField,
     NumericalJointObsField,
-    ObsmField,
 )
 from scvi.model._utils import _init_library_size
 from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
 from scvi.utils import setup_anndata_dsp
 
 from ._cellina_module import CellinaModule
-from ._constants import DOMAINS_KEY, SPATIAL_X_KEY
+from ._constants import DOMAINS_KEY, SPATIAL_CONNECTIVITIES_KEY
+from ._edge_data_splitter import GraphJointDataSplitter
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
 
 class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
-    Cellina model with dual encoders for counts and spatial data.
+    Cellina model with dual encoders for counts (MLP) and spatial context (GCN).
 
-    This model extends scVI with a spatial encoder that processes spatial features
-    alongside the standard count encoder. The two latent representations (z from counts,
-    s from spatial+z) are summed element-wise (shifted = z + s) and decoded together 
+    This model extends scVI with a GCN spatial encoder that learns spatial aggregation
+    via message passing over the spatial connectivity graph. The two latent representations
+    (z from counts, s from GCN) are concatenated (shifted = concat(z, s)) and decoded
     to reconstruct the count data.
 
     Parameters
@@ -44,17 +44,19 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Number of hidden layers (shared by both encoders).
     discriminator_lambda
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
+    num_neighbors
+        Number of neighbors to sample per node per GCN layer. Default: [-1] (all neighbors).
     **model_kwargs
         Keyword args for :class:`~cellina.CellinaModule`
 
     Examples
     --------
     >>> adata = anndata.read_h5ad(path_to_anndata)
-    >>> # adata.obsm["spatial_x"] should contain spatial features
-    >>> CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
+    >>> CellinaModel.setup_anndata(adata, batch_key="batch",
+    ...     spatial_connectivities_key="spatial_connectivities")
     >>> model = CellinaModel(adata, n_latent=10)
     >>> model.train()
-    >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = z + s
+    >>> adata.obsm["X_cellina"] = model.get_latent_representation()
     >>> adata.obsm["X_cellina_z"] = model.get_latent_representation(latent_key='z')
     >>> adata.obsm["X_cellina_s"] = model.get_latent_representation(latent_key='s')
     """
@@ -73,31 +75,21 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     ):
         super().__init__(adata)
 
-        # Check if spatial components should be used
-        self.use_spatial = link_prediction_weight > 0
-        
-        if self.use_spatial:
-            # Use PyG-based data splitter for edge prediction
-            from ._edge_data_splitter import GraphJointDataSplitter
-            self._data_splitter_cls = GraphJointDataSplitter
-            # Store edge prediction parameters
-            self._num_neighbors = num_neighbors or [-1]
-            self._data_splitter_kwargs = {
-                'num_neighbors': self._num_neighbors,
-                'neg_sampling_ratio': 1.0,  # 1:1 positive to negative edges
-            }
-        # else: use default data splitter from parent class
+        # Always use graph-aware data splitter (GCN needs neighbors)
+        self._data_splitter_cls = GraphJointDataSplitter
+        self._num_neighbors = num_neighbors or [-1]
+        self._data_splitter_kwargs = {
+            'num_neighbors': self._num_neighbors,
+            'neg_sampling_ratio': 1.0,
+            'use_edge_prediction': link_prediction_weight > 0,
+        }
 
         library_log_means, library_log_vars = _init_library_size(
             self.adata_manager, self.summary_stats["n_batch"]
         )
 
-        # Get spatial input dimensions from registry
-        n_spatial_input = self.summary_stats["n_spatial_x"]
-
         self.module = CellinaModule(
             n_input=self.summary_stats["n_vars"],
-            n_spatial_input=n_spatial_input,
             n_batch=self.summary_stats["n_batch"],
             n_hidden=n_hidden,
             n_latent=n_latent,
@@ -111,40 +103,51 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             link_prediction_weight=link_prediction_weight,
             **model_kwargs,
         )
-        
+
         # Update summary string
         adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
         edge_str = " with edge prediction" if link_prediction_weight > 0 else ""
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}{edge_str}"
+            f"Cellina Model with {n_latent}-dim latent space (z MLP + s GCN encoders){adv_str}{edge_str}"
         )
         self.init_params_ = self._get_init_params(locals())
 
         logger.info(f"The Cellina model has been initialized{adv_str}{edge_str}")
 
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False, data_splitter_kwargs=None):
-        """Create data loader - PyG-aware if spatial is enabled, standard otherwise."""
-        if not self.use_spatial:
-            # Use parent class's standard data loader
-            return super()._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, shuffle=shuffle)
-        
-        # For inference with spatial mode, fall back to parent class
-        # The EdgeDataSplitter is only used during training 
-        return super()._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, shuffle=shuffle)
+        """Create graph-aware data loader using NeighborLoader."""
+        adata = self._validate_anndata(adata) if adata is not None else self.adata
+
+        if batch_size is None:
+            batch_size = 128
+        if indices is None:
+            indices = np.arange(adata.n_obs)
+
+        # Build a lightweight splitter for inference (no edge splits)
+        splitter = GraphJointDataSplitter(
+            self.adata_manager,
+            num_neighbors=self._num_neighbors,
+            use_edge_prediction=False,
+            batch_size=batch_size,
+        )
+        return splitter.create_inference_loader(
+            indices=indices,
+            batch_size=batch_size,
+            shuffle=shuffle,
+        )
 
     @classmethod
     @setup_anndata_dsp.dedent
     def setup_anndata(
         cls,
         adata: AnnData,
-        spatial_obsm_key: str = "spatial_x",
         batch_key: Optional[str] = None,
         labels_key: Optional[str] = None,
         domains_key: Optional[str] = None,
         layer: Optional[str] = None,
         categorical_covariate_keys: Optional[List[str]] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
-        spatial_connectivities_key: Optional[str] = None,
+        spatial_connectivities_key: str = "spatial_connectivities",
         **kwargs,
     ) -> Optional[AnnData]:
         """
@@ -153,8 +156,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Parameters
         ----------
         %(param_adata)s
-        spatial_obsm_key
-            Key in `adata.obsm` containing spatial features matrix.
         %(param_batch_key)s
         %(param_labels_key)s
         domains_key
@@ -163,7 +164,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
         spatial_connectivities_key
-            Key in `adata.obsp` containing spatial connectivity matrix. Required if link_prediction_weight > 0.
+            Key in `adata.obsp` containing spatial connectivity matrix. Required for GCN message passing.
 
         Returns
         -------
@@ -172,7 +173,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
-            ObsmField(SPATIAL_X_KEY, spatial_obsm_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             CategoricalObsField(DOMAINS_KEY, domains_key),
@@ -181,12 +181,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
-        
-        # Store spatial connectivities key in adata.uns for EdgeDataSplitter
-        if spatial_connectivities_key is not None:
-            from ._constants import SPATIAL_CONNECTIVITIES_KEY
-            adata.uns[SPATIAL_CONNECTIVITIES_KEY] = spatial_connectivities_key
-            
+
+        # Store spatial connectivities key for the graph data splitter
+        adata.uns[SPATIAL_CONNECTIVITIES_KEY] = spatial_connectivities_key
+
         cls.register_manager(adata_manager)
 
     def train(
@@ -204,51 +202,46 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     ):
         """
         Train the model.
-        
+
         Parameters
         ----------
         max_epochs
             Number of passes through the dataset.
         accelerator
-            Supports passing different accelerator types ("cpu", "gpu", "tpu", "ipu", "hpu", "mps", "auto")
-            as well as custom accelerator instances.
+            Supports passing different accelerator types.
         devices
-            The devices to use. Can be set to a positive number (int or str), a sequence of device indices
-            (list or str), the value ``-1`` to indicate all available devices should be used, or ``"auto"`` for
-            automatic selection based on the chosen accelerator.
+            The devices to use.
         train_size
             Size of training set in the range [0.0, 1.0].
         validation_size
-            Size of the validation set. If `None`, defaults to 1 - `train_size`. If
-            `train_size + validation_size < 1`, the remaining cells belong to a test set.
+            Size of the validation set.
         shuffle_set_split
-            Whether to shuffle indices before splitting. If `False`, the val, train, and test set are split in
-            the sequential order of the data according to `validation_size` and `train_size` percentages.
+            Whether to shuffle indices before splitting.
         batch_size
             Minibatch size to use during training.
         datasplitter_kwargs
-            Additional keyword arguments passed into :class:`~scvi.dataloaders.DataSplitter`.
+            Additional keyword arguments passed into the data splitter.
         plan_kwargs
-            Keyword args for :class:`~cellina.CellinaAdversarialTrainingPlan` or :class:`~scvi.train.TrainingPlan`.
-            Keyword arguments passed to `train()` will overwrite values present in `plan_kwargs`, when appropriate.
+            Keyword args for training plan.
         **kwargs
-            Other keyword args for :class:`~scvi.train.Trainer`.
+            Other keyword args for Trainer.
         """
-        # Ensure plan_kwargs is a dict we can mutate
         if plan_kwargs is None:
             plan_kwargs = {}
-        
-        # If adversarial training is disabled, remove plan-only keys that would be
-        # handled by the adversarial plan (avoid forwarding them to module.loss)
+
         if self.module.discriminator_lambda == 0:
             plan_kwargs.pop("normalize_losses", None)
             plan_kwargs.pop("scale_adversarial_loss", None)
-        
-        # Set training plan class
+
         if self.module.discriminator_lambda > 0:
-            # Use adversarial training plan when discriminator is enabled
             self._training_plan_cls = CellinaAdversarialTrainingPlan
-        
+
+        # Merge stored data splitter kwargs with user-provided ones
+        if datasplitter_kwargs is None:
+            datasplitter_kwargs = {}
+        merged_kwargs = {**self._data_splitter_kwargs, **datasplitter_kwargs}
+        datasplitter_kwargs = merged_kwargs
+
         super().train(
             max_epochs=max_epochs,
             accelerator=accelerator,
@@ -286,14 +279,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Minibatch size for data loading into model.
         latent_key
             Which latent representation to return. Options: 'shifted', 'z', 's'.
-            Default: 'shifted' (returns z + s, which is what the decoder uses).
 
         Returns
         -------
         Latent representation for each cell as numpy array.
-        - If latent_key is 'shifted': z + s (what goes into the decoder)
-        - If latent_key is 'z': only z encoder output
-        - If latent_key is 's': only s encoder output
         """
         if latent_key not in ['shifted', 'z', 's']:
             raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
@@ -314,9 +303,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             elif latent_key == 's':
                 lat = outputs["qsm"] if give_mean else outputs["s"]
             else:  # shifted
-                if give_mean: # TODO: this should not work like this, potentially inconsistent
-                    # For mean, sum the means
-                    lat = outputs["qzm"] + outputs["qsm"]
+                if give_mean:
+                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
                 else:
                     lat = outputs["shifted"]
 
@@ -324,7 +312,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         latent = torch.cat(latent).numpy()
         return latent
-    
+
     def get_marginal_ll(
         self,
         adata: Optional[AnnData] = None,
@@ -334,6 +322,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         reduce: str | None = None
     ):
         """Get marginal log-likelihood of the data.
+
         Parameters
         ----------
         adata
@@ -345,13 +334,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_mc_samples
             Number of Monte Carlo samples for approximation.
         reduce
-            Reduction method to apply to the marginal log-likelihoods. Options are:
-            - None: return list of marginal log-likelihoods per batch
-            - 'mean': return mean marginal log-likelihood across all batches
-            - 'sum': return sum of marginal log-likelihoods across all batches
-        Returns
-        -------
-        Marginal log-likelihood of the data.
+            Reduction method: None, 'mean', or 'sum'.
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
@@ -370,7 +353,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             )
             marginal_ll.append(outputs)
 
-        # Apply reduction if specified
         if reduce == 'mean':
             marginal_ll = np.mean(marginal_ll)
         elif reduce == 'sum':

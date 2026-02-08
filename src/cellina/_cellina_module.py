@@ -12,25 +12,24 @@ from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
 
 from ._constants import DOMAINS_KEY
+from ._spatial_encoder import GraphEncoder
 
 TensorDict = Dict[str, torch.Tensor]
 
 
 class CellinaModule(BaseModuleClass):
     """
-    Cellina module with dual encoders (z from counts, s from spatial+z).
+    Cellina module with dual encoders (z from counts, s from spatial GCN).
 
     This module implements a dual-encoder variational autoencoder where:
-    - z_encoder processes count data to produce latent representation z
-    - s_encoder processes spatial features concatenated with z to produce latent representation s
+    - z_encoder (MLP) processes count data to produce latent representation z
+    - s_encoder (GCN) processes node features via spatial graph message passing to produce s
     - decoder reconstructs counts from shifted = concat(z, s)
 
     Parameters
     ----------
     n_input
         Number of input genes.
-    n_spatial_input
-        Number of spatial features.
     library_log_means
         1 x n_batch array of means of the log library sizes.
     library_log_vars
@@ -49,28 +48,25 @@ class CellinaModule(BaseModuleClass):
         One of "zinb" or "nb".
     classifier_lambda
         Weight for the supervised classifier loss. Set to 0 (default) to disable classifier.
-        When > 0, requires labels_key to be provided in setup_anndata().
     classifier_kwargs
         Extra keyword args forwarded to :class:`~scvi.module._classifier.Classifier`.
     n_labels
-        Number of labels for the optional classifier head. Automatically set from adata
-        when labels_key is provided in setup_anndata().
+        Number of labels for the optional classifier head.
     discriminator_lambda
         Weight for the adversarial domain discriminator loss. Set to 0 (default) to disable.
-        When > 0, requires domains_key to be provided in setup_anndata().
     discriminator_kwargs
         Extra keyword args forwarded to domain discriminator Classifier.
     n_domains
-        Number of domain labels. Automatically set from adata when domains_key is provided.
+        Number of domain labels.
+    condition_on_intrinsic
+        Whether to concatenate z to the GCN input features.
     link_prediction_weight
         Weight for the edge prediction loss. Set to 0 (default) to disable link prediction.
-        When > 0, requires spatial_connectivities_key to be provided in setup_anndata().
     """
 
     def __init__(
         self,
         n_input: int,
-        n_spatial_input: int,
         library_log_means: torch.Tensor,
         library_log_vars: torch.Tensor,
         n_batch: int = 0,
@@ -89,25 +85,24 @@ class CellinaModule(BaseModuleClass):
         link_prediction_weight: float = 0.0,
     ):
         super().__init__()
+        self.n_input = n_input
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
         self.link_prediction_weight = link_prediction_weight
-        # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
 
         self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
         self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
-        # setup the parameters of the generative model
         self.px_r = torch.nn.Parameter(torch.randn(n_input))
 
         # Batch injection setup
         cat_list = [n_batch] if n_batch > 0 else None
 
-        # Z encoder: counts -> z
+        # Z encoder: counts -> z (MLP)
         self.z_encoder = Encoder(
             n_input,
             n_latent,
@@ -120,20 +115,16 @@ class CellinaModule(BaseModuleClass):
             use_layer_norm=False,
         )
 
-        # S encoder: [spatial_x, z] -> s
-        # Set whether to condition spatial encoder on intrinsic latent
+        # S encoder: node features -> s (GCN with spatial message passing)
         self.condition_on_intrinsic = condition_on_intrinsic
-        n_input_s = n_spatial_input + n_latent if condition_on_intrinsic else n_spatial_input
-        self.s_encoder = Encoder(
-            n_input_s,  # spatial features + z OR spatial features only
-            n_latent,
+        n_input_s = n_input + n_latent if condition_on_intrinsic else n_input
+        self.s_encoder = GraphEncoder(
+            n_input=n_input_s,
+            n_output=n_latent,
             n_cat_list=cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
-            inject_covariates=True,
-            use_batch_norm=True,
-            use_layer_norm=False,
         )
 
         # Library encoder
@@ -151,7 +142,7 @@ class CellinaModule(BaseModuleClass):
 
         # Decoder: shifted (z concat s) -> counts
         self.decoder = DecoderSCVI(
-            n_latent * 2,  # shifted = concat(z, s)
+            n_latent * 2,
             n_input,
             n_cat_list=cat_list,
             n_layers=n_layers,
@@ -166,9 +157,9 @@ class CellinaModule(BaseModuleClass):
         if classifier_lambda > 0:
             classifier_kwargs = dict(classifier_kwargs or {})
             self.classifier = Classifier(
-                n_input=n_latent, 
-                n_labels=n_labels, 
-                logits=True, 
+                n_input=n_latent,
+                n_labels=n_labels,
+                logits=True,
                 **classifier_kwargs
             )
 
@@ -190,52 +181,6 @@ class CellinaModule(BaseModuleClass):
                 **discriminator_kwargs
             )
 
-    def _compute_edge_scores(
-        self,
-        s: torch.Tensor,
-        pos_edge_index: torch.Tensor | None,
-        neg_edge_index: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """
-        Compute edge scores as cosine similarity between s embeddings.
-        
-        Parameters
-        ----------
-        s
-            Spatial latent embeddings for all nodes [n_nodes, n_latent]
-        pos_edge_index
-            Positive edge indices [2, n_pos_edges]
-        neg_edge_index
-            Negative edge indices [2, n_neg_edges]
-            
-        Returns
-        -------
-        Edge scores [n_pos_edges + n_neg_edges]
-        """
-        # Normalize embeddings for cosine similarity
-        s_norm = F.normalize(s, p=2, dim=1)
-        
-        scores = []
-        
-        # Positive edges
-        if pos_edge_index is not None and pos_edge_index.size(1) > 0:
-            s_pos_src = s_norm[pos_edge_index[0]]
-            s_pos_tgt = s_norm[pos_edge_index[1]]
-            pos_scores = (s_pos_src * s_pos_tgt).sum(dim=1)
-            scores.append(pos_scores)
-        
-        # Negative edges
-        if neg_edge_index is not None and neg_edge_index.size(1) > 0:
-            s_neg_src = s_norm[neg_edge_index[0]]
-            s_neg_tgt = s_norm[neg_edge_index[1]]
-            neg_scores = (s_neg_src * s_neg_tgt).sum(dim=1)
-            scores.append(neg_scores)
-        
-        if scores:
-            return torch.cat(scores, dim=0)
-        else:
-            return torch.tensor([], device=s.device)
-
     def _compute_edge_scores_from_embeddings(
         self,
         s_emb: torch.Tensor,
@@ -244,7 +189,7 @@ class CellinaModule(BaseModuleClass):
     ) -> torch.Tensor:
         """
         Compute edge prediction scores from node embeddings.
-        
+
         Parameters
         ----------
         s_emb
@@ -253,79 +198,54 @@ class CellinaModule(BaseModuleClass):
             Edge indices [2, num_edges] with source and target nodes
         edge_mask
             Optional mask to filter edges within same batch
-            
+
         Returns
         -------
         Edge scores (logits) for binary classification
         """
         if edge_label_index is None or edge_label_index.size(1) == 0:
             return torch.tensor([], device=s_emb.device)
-        
-        # Normalize embeddings for cosine similarity
+
         s_norm = F.normalize(s_emb, p=2, dim=1)
-        
-        # Get source and target node embeddings
-        src_emb = s_norm[edge_label_index[0]]  # [num_edges, latent_dim]
-        tgt_emb = s_norm[edge_label_index[1]]  # [num_edges, latent_dim]
-        
-        # Compute similarity scores (cosine similarity as dot product of normalized vectors)
-        scores = (src_emb * tgt_emb).sum(dim=-1)  # [num_edges]
-        
-        # Apply mask if provided
+        src_emb = s_norm[edge_label_index[0]]
+        tgt_emb = s_norm[edge_label_index[1]]
+        scores = (src_emb * tgt_emb).sum(dim=-1)
+
         if edge_mask is not None:
             scores = scores[edge_mask]
-        
+
         return scores
 
     def _get_inference_input(self, tensors):
-        """Parse the dictionary to get appropriate args"""
-        # Handle both graph-aware (dict with 'node_batch') and standard (flat dict) formats
-        if 'node_batch' in tensors:
-            # Graph-aware format from GraphJointDataSplitter
-            node_batch = tensors['node_batch']
-            edge_batch = tensors.get('edge_batch')
-            
-            input_dict = dict(
-                # Node batch inputs
-                x=node_batch['X'],
-                spatial_x=node_batch['spatial_x'],
-                batch_index=node_batch['batch_label'],
-                edge_index=node_batch['edge_index'],
-                batch_size=node_batch['batch_size'],
+        """Parse the dictionary to get appropriate args."""
+        if 'node_batch' not in tensors:
+            raise ValueError(
+                "CellinaModule requires graph-aware batches with 'node_batch' key. "
+                "Use a NeighborLoader-based data loader."
             )
-            
-            # Add edge batch inputs if available
-            if edge_batch is not None:
-                input_dict.update(
-                    x_link=edge_batch['X'],
-                    spatial_x_link=edge_batch['spatial_x'],
-                    batch_index_link=edge_batch['batch_label'],
-                    edge_index_link=edge_batch['edge_index'],
-                    edge_label_index=edge_batch['edge_label_index'],
-                    edge_label=edge_batch['edge_label'],
-                    edge_mask=edge_batch['edge_mask'],
-                )
-            else:
-                input_dict.update(
-                    x_link=None,
-                    spatial_x_link=None,
-                    batch_index_link=None,
-                    edge_index_link=None,
-                    edge_label_index=None,
-                    edge_label=None,
-                    edge_mask=None,
-                )
+
+        node_batch = tensors['node_batch']
+        edge_batch = tensors.get('edge_batch')
+
+        input_dict = dict(
+            x=node_batch['X'],
+            batch_index=node_batch['batch_label'],
+            edge_index=node_batch['edge_index'],
+            batch_size=node_batch['batch_size'],
+        )
+
+        if edge_batch is not None:
+            input_dict.update(
+                x_link=edge_batch['X'],
+                batch_index_link=edge_batch['batch_label'],
+                edge_index_link=edge_batch['edge_index'],
+                edge_label_index=edge_batch['edge_label_index'],
+                edge_label=edge_batch['edge_label'],
+                edge_mask=edge_batch['edge_mask'],
+            )
         else:
-            # Standard format - no graph data
-            from ._constants import SPATIAL_X_KEY
-            input_dict = dict(
-                x=tensors[REGISTRY_KEYS.X_KEY],
-                spatial_x=tensors[SPATIAL_X_KEY],
-                batch_index=tensors[REGISTRY_KEYS.BATCH_KEY],
-                edge_index=None,
-                batch_size=tensors[REGISTRY_KEYS.X_KEY].shape[0],
+            input_dict.update(
                 x_link=None,
-                spatial_x_link=None,
                 batch_index_link=None,
                 edge_index_link=None,
                 edge_label_index=None,
@@ -338,34 +258,25 @@ class CellinaModule(BaseModuleClass):
     def _get_generative_input(self, tensors, inference_outputs):
         shifted = inference_outputs["shifted"]
         library = inference_outputs["library"]
-        
-        # Handle both formats
-        if 'node_batch' in tensors:
-            batch_index = tensors['node_batch']['batch_label']
-            # Slice batch_index to match shifted (which is sliced to batch_size in inference)
-            batch_size = tensors['node_batch']['batch_size']
-            batch_index = batch_index[:batch_size]
-        else:
-            batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        
-        input_dict = {
+
+        batch_index = tensors['node_batch']['batch_label']
+        batch_size = tensors['node_batch']['batch_size']
+        batch_index = batch_index[:batch_size]
+
+        return {
             "shifted": shifted,
             "library": library,
             "batch_index": batch_index,
         }
-            
-        return input_dict
 
     @auto_move_data
     def inference(
         self,
         x,
-        spatial_x,
         batch_index,
         edge_index,
         batch_size,
         x_link=None,
-        spatial_x_link=None,
         batch_index_link=None,
         edge_index_link=None,
         edge_label_index=None,
@@ -377,24 +288,25 @@ class CellinaModule(BaseModuleClass):
         High level inference method.
 
         Runs the inference (encoder) model for both node reconstruction and edge prediction.
-        
+
         Two separate forward passes through s_encoder:
         1. Node forward: uses node batch for reconstruction
         2. Edge forward: uses edge batch for link prediction
         """
         # ======= NODE RECONSTRUCTION =======
-        # Log transform input
         x_ = torch.log(1 + x)
 
-        # Encode counts -> z
+        # Encode counts -> z (MLP)
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        # (Optionally) Concatenate spatial_x and z, then encode -> s
+        # Prepare GCN input features
         if self.condition_on_intrinsic:
-            spatial_input = torch.cat([spatial_x, z.detach()], dim=-1)
+            spatial_input = torch.cat([x_, z.detach()], dim=-1)
         else:
-            spatial_input = spatial_x
-        qsm, qsv, s = self.s_encoder(spatial_input, batch_index)
+            spatial_input = x_
+
+        # Encode spatial -> s (GCN with message passing)
+        qsm, qsv, s = self.s_encoder(spatial_input, edge_index, batch_index)
 
         # Compute shifted = concat(z, s) for reconstruction
         shifted = torch.cat([z, s], dim=-1)
@@ -437,18 +349,16 @@ class CellinaModule(BaseModuleClass):
 
         # ======= EDGE PREDICTION - separate forward on edge subgraph =======
         if self.link_prediction_weight > 0 and x_link is not None and edge_label_index is not None:
-            # Encode edge subgraph counts -> z_link
             x_link_ = torch.log(1 + x_link)
             _, _, z_link = self.z_encoder(x_link_, batch_index_link)
-            
-            # Encode edge subgraph spatial features -> s_link
+
             if self.condition_on_intrinsic:
-                spatial_input_link = torch.cat([spatial_x_link, z_link.detach()], dim=-1)
+                spatial_input_link = torch.cat([x_link_, z_link.detach()], dim=-1)
             else:
-                spatial_input_link = spatial_x_link
-            _, _, s_link = self.s_encoder(spatial_input_link, batch_index_link)
-            
-            # Compute edge scores using s_link embeddings
+                spatial_input_link = x_link_
+
+            _, _, s_link = self.s_encoder(spatial_input_link, edge_index_link, batch_index_link)
+
             edge_scores = self._compute_edge_scores_from_embeddings(
                 s_link, edge_label_index, edge_mask
             )
@@ -461,7 +371,6 @@ class CellinaModule(BaseModuleClass):
     @auto_move_data
     def generative(self, shifted, library, batch_index):
         """Runs the generative model."""
-        # Decode using shifted = concat(z, s)
         px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library, batch_index)
         px_r = torch.exp(self.px_r)
 
@@ -478,44 +387,21 @@ class CellinaModule(BaseModuleClass):
     ) -> tuple[torch.Tensor, float]:
         """
         Compute loss and accuracy for a classifier (cell type classifier or domain discriminator).
-        
-        Parameters
-        ----------
-        classifier
-            The classifier network (or None if disabled)
-        weight
-            Weight for the classifier loss (e.g., classifier_lambda or discriminator_weight)
-        inference_outputs
-            Outputs from inference containing z and optionally pre-computed logits
-        labels
-            True labels for classification
-        reconst_loss_shape
-            Shape reference for zero loss tensor
-        metric_name
-            Base name for metrics (e.g., 'classifier' or 'discriminator')
-        
-        Returns
-        -------
-        Tuple of (loss_tensor, accuracy_scalar)
         """
         if weight != 0.0 and classifier is not None:
-            # Get or compute logits
             logits_key = f"{metric_name}_logits"
             logits = inference_outputs.get(logits_key)
             if logits is None:
                 logits = classifier(inference_outputs["z"])
-            
-            # Compute cross-entropy loss
+
             loss = F.cross_entropy(logits, labels, reduction="none")
             loss = weight * loss
-            
-            # Compute accuracy
+
             predictions = torch.argmax(logits, dim=1)
             accuracy = (predictions == labels).float().mean().item()
-            
+
             return loss, accuracy
         else:
-            # Return zeros when classifier is disabled
             return torch.zeros_like(reconst_loss_shape), 0.0
 
     def loss(
@@ -528,48 +414,22 @@ class CellinaModule(BaseModuleClass):
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
     ):
-        """
-        Loss function.
-        
-        Parameters
-        ----------
-        tensors
-            Input tensors from data loader
-        inference_outputs
-            Outputs from inference method
-        generative_outputs
-            Outputs from generative method
-        kl_weight
-            Weight for KL divergence terms (warmup)
-        discriminator_lambda
-            Weight multiplier for discriminator loss. Used to scale discriminator contribution.
-            Set to 0 to exclude discriminator from loss computation.
-        classifier_scale
-            EMA-based normalization scale for classifier loss (default 1.0)
-        discriminator_scale
-            EMA-based normalization scale for discriminator/fool loss (default 1.0)
-        """
-        # Handle joint batch format
-        if "node_batch" in tensors:
-            x = tensors["node_batch"]['X']
-            batch_index = tensors["node_batch"]['batch_label']
-            batch_size = tensors["node_batch"]['batch_size']
-            # Slice to actual batch size (exclude sampled neighbors)
-            x = x[:batch_size, :]
-            batch_index = batch_index[:batch_size]
-            labels = tensors["node_batch"].get(REGISTRY_KEYS.LABELS_KEY, torch.zeros(batch_size, dtype=torch.long, device=x.device)).reshape(-1).long()
-            domain_labels = tensors["node_batch"].get(DOMAINS_KEY, torch.zeros(batch_size, dtype=torch.long, device=x.device)).reshape(-1).long()
-            # Slice labels/domain_labels if they exist and have full subgraph size
-            if REGISTRY_KEYS.LABELS_KEY in tensors["node_batch"]:
-                labels = labels[:batch_size]
-            if DOMAINS_KEY in tensors["node_batch"]:
-                domain_labels = domain_labels[:batch_size]
-        else:
-            x = tensors[REGISTRY_KEYS.X_KEY]
-            batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-            labels = tensors.get(REGISTRY_KEYS.LABELS_KEY, torch.zeros(x.shape[0], dtype=torch.long, device=x.device)).reshape(-1).long()
-            domain_labels = tensors.get(DOMAINS_KEY, torch.zeros(x.shape[0], dtype=torch.long, device=x.device)).reshape(-1).long()
-            
+        """Loss function."""
+        # Graph-aware batch format
+        x = tensors["node_batch"]['X']
+        batch_index = tensors["node_batch"]['batch_label']
+        batch_size = tensors["node_batch"]['batch_size']
+        x = x[:batch_size, :]
+        batch_index = batch_index[:batch_size]
+        labels = tensors["node_batch"].get(
+            REGISTRY_KEYS.LABELS_KEY,
+            torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        ).reshape(-1).long()[:batch_size]
+        domain_labels = tensors["node_batch"].get(
+            DOMAINS_KEY,
+            torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        ).reshape(-1).long()[:batch_size]
+
         qzm = inference_outputs["qzm"]
         qzv = inference_outputs["qzv"]
         qsm = inference_outputs["qsm"]
@@ -614,7 +474,6 @@ class CellinaModule(BaseModuleClass):
             Normal(local_library_log_means, torch.sqrt(local_library_log_vars)),
         ).sum(dim=1)
 
-        # Total KL for warmup (z and s)
         kl_local_for_warmup = kl_divergence_z + kl_divergence_s
         kl_local_no_warmup = kl_divergence_l
 
@@ -631,7 +490,7 @@ class CellinaModule(BaseModuleClass):
         )
         classifier_loss_scaled = classifier_loss * classifier_scale
 
-        # Domain discriminator (fool loss - always negative for adversarial training)
+        # Domain discriminator (fool loss)
         fool_loss, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
             weight=discriminator_lambda,
@@ -648,15 +507,13 @@ class CellinaModule(BaseModuleClass):
             edge_scores = inference_outputs["edge_scores"]
             edge_label = inference_outputs.get("edge_label")
             edge_mask = inference_outputs.get("edge_mask")
-            
+
             if edge_label is not None and len(edge_scores) > 0:
-                # Apply mask to labels if needed
                 if edge_mask is not None:
                     edge_label_filtered = edge_label[edge_mask]
                 else:
                     edge_label_filtered = edge_label
-                
-                # Binary cross-entropy loss for edge prediction
+
                 edge_loss = F.binary_cross_entropy_with_logits(
                     edge_scores,
                     edge_label_filtered.float(),
@@ -673,7 +530,7 @@ class CellinaModule(BaseModuleClass):
             kl_divergence_z=kl_divergence_z,
             kl_divergence_s=kl_divergence_s,
         )
-        
+
         extra_metrics = {
             'vae_loss': vae_loss,
             'classifier_loss_raw': classifier_loss.mean(),
@@ -743,24 +600,29 @@ class CellinaModule(BaseModuleClass):
 
     @torch.no_grad()
     @auto_move_data
-    def marginal_ll(self, tensors: TensorDict, n_mc_samples: int):
+    def marginal_ll(self, tensors: dict, n_mc_samples: int):
         """
         Marginal ll approximation via Monte Carlo Importance Sampling.
-        Used for model evaluation.
+
         Parameters
         ----------
         tensors
-            Input tensors from data loader
+            Input tensors from data loader (graph-aware format)
         n_mc_samples
             Number of Monte Carlo samples for approximation
         """
-        sample_batch = tensors[REGISTRY_KEYS.X_KEY]
-        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        node_batch = tensors['node_batch']
+        sample_batch = node_batch['X']
+        batch_index = node_batch['batch_label']
+        batch_size = node_batch['batch_size']
+
+        # Slice to seed nodes
+        sample_batch = sample_batch[:batch_size]
+        batch_index = batch_index[:batch_size]
 
         to_sum = torch.zeros(sample_batch.size()[0], n_mc_samples)
 
         for i in range(n_mc_samples):
-            # Distribution parameters and sampled variables
             inference_outputs, generative_outputs = self.forward(tensors, compute_loss=False)
 
             # Intrinsic latent
