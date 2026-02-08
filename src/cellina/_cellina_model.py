@@ -16,9 +16,12 @@ from scvi.model._utils import _init_library_size
 from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
 from scvi.utils import setup_anndata_dsp
 
+from torch_geometric.data import Data
+from torch_geometric.loader import NeighborLoader
+
 from ._cellina_module import CellinaModule
 from ._constants import DOMAINS_KEY, SPATIAL_CONNECTIVITIES_KEY
-from ._edge_data_splitter import GraphJointDataSplitter
+from ._edge_data_splitter import GraphBatchLoader, GraphJointDataSplitter
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,224 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size=batch_size,
             shuffle=shuffle,
         )
+
+    def _make_counterfactual_loader(
+        self,
+        indices: np.ndarray,
+        neighbour_indices: np.ndarray,
+        n_neighbors_per_seed: Optional[int] = None,
+        batch_size: int = 128,
+        seed: int = 0,
+    ):
+        """
+        Create a graph-aware data loader with rewired edges for counterfactual inference.
+
+        Removes all edges involving seed nodes and replaces them with edges
+        connecting each seed to nodes in ``neighbour_indices``.
+
+        Parameters
+        ----------
+        indices
+            Seed node indices (cells to query).
+        neighbour_indices
+            Indices of the counterfactual neighbourhood donor pool.
+        n_neighbors_per_seed
+            If None, connect each seed to ALL nodes in ``neighbour_indices``.
+            Otherwise, randomly sample this many neighbours per seed.
+        batch_size
+            Minibatch size for the NeighborLoader.
+        seed
+            Random seed for neighbour sampling.
+        """
+        # Build PyG data from the registered AnnData (reuses splitter logic)
+        splitter = GraphJointDataSplitter(
+            self.adata_manager,
+            num_neighbors=self._num_neighbors,
+            use_edge_prediction=False,
+            batch_size=batch_size,
+        )
+        pyg_data = splitter.pyg_data
+        edge_index = pyg_data.edge_index.numpy()  # [2, E]
+
+        # Remove all edges involving any seed node (both directions)
+        src, dst = edge_index[0], edge_index[1]
+        keep_mask = ~(np.isin(src, indices) | np.isin(dst, indices))
+        filtered_edges = edge_index[:, keep_mask]
+
+        # Build counterfactual edges: seed <-> neighbour_indices
+        rng = np.random.default_rng(seed)
+        n_seeds = len(indices)
+        neighbour_indices = np.asarray(neighbour_indices)
+
+        if n_neighbors_per_seed is None or n_neighbors_per_seed >= len(neighbour_indices):
+            # Connect each seed to ALL donor nodes
+            cf_src = np.repeat(indices, len(neighbour_indices))
+            cf_dst = np.tile(neighbour_indices, n_seeds)
+        else:
+            # Sample k neighbours per seed
+            cf_src_parts, cf_dst_parts = [], []
+            for s in indices:
+                chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
+                cf_src_parts.append(np.full(n_neighbors_per_seed, s))
+                cf_dst_parts.append(chosen)
+            cf_src = np.concatenate(cf_src_parts)
+            cf_dst = np.concatenate(cf_dst_parts)
+
+        # Make bidirectional
+        cf_edges = np.stack([
+            np.concatenate([cf_src, cf_dst]),
+            np.concatenate([cf_dst, cf_src]),
+        ], axis=0)
+
+        # Combine with filtered original edges
+        new_edge_index = np.concatenate([filtered_edges, cf_edges], axis=1)
+        new_edge_index = torch.tensor(new_edge_index, dtype=torch.long)
+
+        # Create new Data object sharing feature tensors with the original
+        cf_data = Data(
+            x=pyg_data.x,
+            edge_index=new_edge_index,
+            batch_labels=pyg_data.batch_labels,
+            labels=pyg_data.labels,
+            domains=pyg_data.domains,
+            num_nodes=pyg_data.num_nodes,
+        )
+
+        node_loader = NeighborLoader(
+            cf_data,
+            num_neighbors=self._num_neighbors,
+            input_nodes=torch.tensor(indices, dtype=torch.long),
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            directed=False,
+        )
+        return GraphBatchLoader(node_loader)
+
+    @torch.inference_mode()
+    def get_counterfactual_latents(
+        self,
+        indices: np.ndarray,
+        neighbour_indices: np.ndarray,
+        n_neighbors_per_seed: Optional[int] = None,
+        give_mean: bool = False,
+        batch_size: Optional[int] = None,
+        latent_key: str = "shifted",
+        seed: int = 0,
+    ) -> np.ndarray:
+        """
+        Return latent representations under a counterfactual spatial neighbourhood.
+
+        Intrinsic ``z`` is computed from each cell's own counts (unchanged).
+        Spatial ``s`` is computed via GCN message passing over the rewired graph
+        where seed nodes receive messages from ``neighbour_indices`` instead of
+        their real spatial neighbours.
+
+        Parameters
+        ----------
+        indices
+            Cell indices to compute counterfactual latents for.
+        neighbour_indices
+            Indices of the donor neighbourhood pool.
+        n_neighbors_per_seed
+            Number of donors to wire per seed. None = use all.
+        give_mean
+            If True, return the mean of the latent distribution.
+        batch_size
+            Minibatch size for the loader.
+        latent_key
+            Which latent to return: ``'shifted'``, ``'z'``, or ``'s'``.
+        seed
+            Random seed for neighbour sampling.
+
+        Returns
+        -------
+        np.ndarray of shape ``(len(indices), n_latent)`` (or ``2*n_latent`` for shifted).
+        """
+        if latent_key not in ['shifted', 'z', 's']:
+            raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
+
+        self._check_if_trained(warn=False)
+        indices = np.asarray(indices)
+        neighbour_indices = np.asarray(neighbour_indices)
+        if batch_size is None:
+            batch_size = 128
+
+        scdl = self._make_counterfactual_loader(
+            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed
+        )
+
+        latent = []
+        for tensors in scdl:
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+
+            if latent_key == 'z':
+                lat = outputs["qzm"] if give_mean else outputs["z"]
+            elif latent_key == 's':
+                lat = outputs["qsm"] if give_mean else outputs["s"]
+            else:  # shifted
+                if give_mean:
+                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
+                else:
+                    lat = outputs["shifted"]
+
+            latent.append(lat.cpu())
+
+        return torch.cat(latent).numpy()
+
+    @torch.inference_mode()
+    def get_counterfactual_expression(
+        self,
+        indices: np.ndarray,
+        neighbour_indices: np.ndarray,
+        n_neighbors_per_seed: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        seed: int = 0,
+    ) -> np.ndarray:
+        """
+        Predict gene expression under a counterfactual spatial neighbourhood.
+
+        Runs the full inference + generative pipeline with rewired graph edges,
+        returning the mean of the negative binomial distribution (``px_rate``).
+
+        Parameters
+        ----------
+        indices
+            Cell indices to predict counterfactual expression for.
+        neighbour_indices
+            Indices of the donor neighbourhood pool.
+        n_neighbors_per_seed
+            Number of donors to wire per seed. None = use all.
+        batch_size
+            Minibatch size for the loader.
+        seed
+            Random seed for neighbour sampling.
+
+        Returns
+        -------
+        np.ndarray of shape ``(len(indices), n_genes)``.
+        """
+        self._check_if_trained(warn=False)
+        indices = np.asarray(indices)
+        neighbour_indices = np.asarray(neighbour_indices)
+        if batch_size is None:
+            batch_size = 128
+
+        scdl = self._make_counterfactual_loader(
+            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed
+        )
+
+        expressions = []
+        for tensors in scdl:
+            inference_inputs = self.module._get_inference_input(tensors)
+            inference_outputs = self.module.inference(**inference_inputs)
+            generative_inputs = self.module._get_generative_input(tensors, inference_outputs)
+            generative_outputs = self.module.generative(**generative_inputs)
+
+            expressions.append(generative_outputs["px_rate"].cpu())
+
+        return torch.cat(expressions).numpy()
 
     @classmethod
     @setup_anndata_dsp.dedent

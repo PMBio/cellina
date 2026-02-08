@@ -50,12 +50,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.automatic_optimization = False
 
         # Warmup collection: collect first-epoch losses to initialize EMA
-        self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
+        self._warmup_stats = {"scvi": [], "fool": [], "clf": [], "edge": []}
         self._warmup_done = False
         self._normalize_losses = normalize_losses
 
         # EMA tracking for loss normalization
-        self._ema = {"vae": 1.0, "clf": 1.0, "fool": 1.0}
+        self._ema = {"vae": 1.0, "clf": 1.0, "fool": 1.0, "edge": 1.0}
         self._ema_alpha = 0.01
 
     def _ema_update(self, old, new):
@@ -82,10 +82,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 scvi_val = float(scvi_loss.loss.detach().cpu().item())
                 fool_val = abs(float(scvi_loss.extra_metrics.get("fool_loss", 0.0)))
                 clf_val = abs(float(scvi_loss.extra_metrics.get("classifier_loss", 0.0)))
+                edge_val = abs(float(scvi_loss.extra_metrics.get("edge_prediction_loss", 0.0)))
 
                 self._warmup_stats["scvi"].append(scvi_val)
                 self._warmup_stats["fool"].append(fool_val)
                 self._warmup_stats["clf"].append(clf_val)
+                self._warmup_stats["edge"].append(edge_val)
 
                 return {"loss": scvi_loss.loss}
 
@@ -94,7 +96,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self._ema["vae"] = np.mean(self._warmup_stats["scvi"])
             self._ema["clf"] = np.mean(self._warmup_stats["clf"])
             self._ema["fool"] = np.mean(self._warmup_stats["fool"])
-            # TODO: add scale for edge_loss 
+            self._ema["edge"] = np.mean(self._warmup_stats["edge"])
             self._warmup_done = True
             self._warmup_stats.clear()  # Free memory
 
@@ -138,9 +140,11 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             target = self._ema["vae"]
             scale_clf = target / (self._ema["clf"] + 1e-8)
             scale_fool = target / (self._ema["fool"] + 1e-8)
+            scale_edge = target / (self._ema["edge"] + 1e-8)
         else:
             scale_clf = 1.0
             scale_fool = 1.0
+            scale_edge = 1.0
 
         # Single forward pass with scales
         inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -154,12 +158,13 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         )
 
         # Extract losses (tensors for gradient flow)
-        vae_loss = scvi_loss.loss
+        vae_loss = scvi_loss.extra_metrics["vae_loss"]
         clf_loss_raw = scvi_loss.extra_metrics["classifier_loss_raw"]
         clf_loss = scvi_loss.extra_metrics["classifier_loss"]  # scaled is default
         fool_loss_raw = scvi_loss.extra_metrics["fool_loss_raw"]
         fool_loss = scvi_loss.extra_metrics["fool_loss"]  # scaled is default
-        edge_loss = scvi_loss.extra_metrics.get("edge_prediction_loss", torch.tensor(0.0))
+        edge_loss_raw = scvi_loss.extra_metrics.get("edge_prediction_loss", torch.tensor(0.0))
+        edge_loss = edge_loss_raw * scale_edge
 
         # Total training loss (with gradients)
         total_train_loss = vae_loss + clf_loss + fool_loss + edge_loss
@@ -177,6 +182,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
         self._ema["clf"] = self._ema_update(self._ema["clf"], abs(float(clf_loss_raw.item())))
         self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss_raw.item())))
+        self._ema["edge"] = self._ema_update(self._ema["edge"], abs(float(edge_loss_raw.item())))
 
         # ------------------ LOGGING ------------------
         # Log total loss (sum of vae + scaled classifier + scaled fool)
@@ -186,6 +192,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         if self._normalize_losses:
             self.log("scale_classifier_train", scale_clf, on_step=False, on_epoch=True)
             self.log("scale_fool_train", scale_fool, on_step=False, on_epoch=True)
+            self.log("scale_edge_train", scale_edge, on_step=False, on_epoch=True)
         
         # Log all metrics from extra_metrics (raw/scaled losses, accuracies, reconstruction, KL)
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
@@ -307,3 +314,4 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self.log("ema_vae_init", self._ema["vae"], on_step=False, on_epoch=True)
             self.log("ema_clf_init", self._ema["clf"], on_step=False, on_epoch=True)
             self.log("ema_fool_init", self._ema["fool"], on_step=False, on_epoch=True)
+            self.log("ema_edge_init", self._ema["edge"], on_step=False, on_epoch=True)

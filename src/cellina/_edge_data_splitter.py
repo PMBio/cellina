@@ -6,7 +6,7 @@ import scipy.sparse as sp
 from scvi.dataloaders import DataSplitter
 from scvi import REGISTRY_KEYS
 from torch_geometric.data import Data
-from torch_geometric.loader import NeighborLoader, LinkNeighborLoader, CachedLoader
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from torch_geometric.utils import remove_self_loops
 from torch_geometric.transforms import RandomLinkSplit
 
@@ -18,12 +18,12 @@ class GraphBatchLoader:
     Iterator for graph-aware batches with optional edge prediction.
 
     Wraps a NeighborLoader and yields dicts in the format CellinaModule expects.
-    When an edge_loader is provided, edge batches are included (cycling via CachedLoader).
+    When an edge_loader is provided, edge batches are included (cycling as needed).
     """
 
     def __init__(self, node_loader, edge_loader=None):
         self.node_loader = node_loader
-        self.edge_loader = CachedLoader(edge_loader) if edge_loader is not None else None
+        self.edge_loader = edge_loader
 
     @staticmethod
     def _node_batch_to_dict(node_batch):
