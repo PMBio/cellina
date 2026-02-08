@@ -278,43 +278,6 @@ def test_spatial_neighbors(adata_with_spatial):
     assert conn_matrix.shape == (n_obs, n_obs)
 
 
-def test_weighted_pseudobulks(adata_with_spatial):
-    """Test weighted_pseudobulks function."""
-    from cellina._spatial_utils import weighted_pseudobulks, spatial_neighbors
-
-    n_obs = adata_with_spatial.n_obs
-    adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
-
-    cell_types = ['TypeA', 'TypeB', 'TypeC']
-    adata_with_spatial.obs['cell_type'] = np.random.choice(cell_types, n_obs)
-
-    sp_mat = spatial_neighbors(
-        adata_with_spatial,
-        bandwidth=50.0,
-        cutoff=0.1,
-        max_neighbours=10,
-        kernel='gaussian',
-        spatial_key='spatial',
-        inplace=False
-    )
-
-    weighted_pseudobulks(
-        adata_with_spatial,
-        sp=sp_mat,
-        groupby='cell_type',
-        obsm_key='spatial_pseudobulks',
-        binarize=True
-    )
-
-    assert 'spatial_pseudobulks' in adata_with_spatial.obsm
-
-    n_genes = adata_with_spatial.n_vars
-    n_cell_types = len(cell_types)
-    assert adata_with_spatial.obsm['spatial_pseudobulks'].shape == (n_obs, n_cell_types * n_genes)
-
-    assert '_spatial_var' in adata_with_spatial.uns
-
-
 def test_marginal_ll(adata_with_spatial):
     """Test get_marginal_ll method and underlying module.marginal_ll."""
     n_latent = 5

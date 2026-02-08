@@ -13,16 +13,17 @@ from torch_geometric.transforms import RandomLinkSplit
 from ._constants import SPATIAL_CONNECTIVITIES_KEY, DOMAINS_KEY
 
 
-class InferenceBatchLoader:
+class GraphBatchLoader:
     """
-    Iterator for node batches with graph structure (no edge prediction).
+    Iterator for graph-aware batches with optional edge prediction.
 
     Wraps a NeighborLoader and yields dicts in the format CellinaModule expects.
-    No edge_label_index, no negative sampling overhead.
+    When an edge_loader is provided, edge batches are included (cycling via CachedLoader).
     """
 
-    def __init__(self, node_loader):
+    def __init__(self, node_loader, edge_loader=None):
         self.node_loader = node_loader
+        self.edge_loader = CachedLoader(edge_loader) if edge_loader is not None else None
 
     @staticmethod
     def _node_batch_to_dict(node_batch):
@@ -38,33 +39,11 @@ class InferenceBatchLoader:
         }
 
     def __iter__(self):
-        for node_batch in self.node_loader:
-            yield {'node_batch': self._node_batch_to_dict(node_batch)}
-
-    def __len__(self):
-        return len(self.node_loader)
-
-
-class JointBatchLoader(InferenceBatchLoader):
-    """
-    Iterator that yields combined node and edge batches.
-
-    Extends InferenceBatchLoader with edge batch handling for link prediction.
-    Node loader drives iteration; edge loader cycles via CachedLoader.
-
-    CachedLoader (PyG built-in) caches edge mini-batches after the first pass
-    and replays from cache on subsequent iterations, avoiding expensive
-    re-sampling while keeping memory bounded.
-    """
-
-    def __init__(self, node_loader, edge_loader):
-        super().__init__(node_loader)
-        self.edge_loader = CachedLoader(edge_loader) if edge_loader is not None else None
-
-    def __iter__(self):
         edge_iter = iter(self.edge_loader) if self.edge_loader is not None else None
 
-        for batch_dict in super().__iter__():
+        for node_batch in self.node_loader:
+            batch_dict = {'node_batch': self._node_batch_to_dict(node_batch)}
+
             if edge_iter is not None:
                 try:
                     edge_batch = next(edge_iter)
@@ -89,6 +68,9 @@ class JointBatchLoader(InferenceBatchLoader):
                 }
 
             yield batch_dict
+
+    def __len__(self):
+        return len(self.node_loader)
 
 
 class GraphJointDataSplitter(DataSplitter):
@@ -204,17 +186,21 @@ class GraphJointDataSplitter(DataSplitter):
             split_data.labels = self.train_data.labels
             split_data.domains = self.train_data.domains
 
-    def _create_joint_loader(self, node_indices, edge_data, shuffle=False):
-        """Create combined node and edge loaders."""
-        node_loader = NeighborLoader(
+    def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last):
+        """Create a NeighborLoader for the given node indices."""
+        return NeighborLoader(
             self.pyg_data,
             num_neighbors=self.num_neighbors,
             input_nodes=torch.tensor(node_indices, dtype=torch.long),
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             shuffle=shuffle,
-            drop_last=self.drop_last,
+            drop_last=drop_last,
             directed=False,
         )
+
+    def _create_loader(self, node_indices, edge_data=None, shuffle=False):
+        """Create a GraphBatchLoader with optional edge prediction."""
+        node_loader = self._make_neighbor_loader(node_indices, self.batch_size, shuffle, self.drop_last)
 
         edge_loader = None
         if edge_data is not None and edge_data.edge_label_index.size(1) > 0:
@@ -229,41 +215,25 @@ class GraphJointDataSplitter(DataSplitter):
                 drop_last=self.drop_last,
             )
 
-        return JointBatchLoader(node_loader, edge_loader)
-
-    def _create_node_loader(self, node_indices, shuffle=False):
-        """Create a node-only loader (no edge prediction)."""
-        node_loader = NeighborLoader(
-            self.pyg_data,
-            num_neighbors=self.num_neighbors,
-            input_nodes=torch.tensor(node_indices, dtype=torch.long),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            drop_last=self.drop_last,
-            directed=False,
-        )
-        return InferenceBatchLoader(node_loader)
+        return GraphBatchLoader(node_loader, edge_loader)
 
     def train_dataloader(self):
         """Create training dataloader."""
-        if self.use_edge_prediction:
-            return self._create_joint_loader(self.train_idx, self.train_data, shuffle=True)
-        return self._create_node_loader(self.train_idx, shuffle=True)
+        edge_data = self.train_data if self.use_edge_prediction else None
+        return self._create_loader(self.train_idx, edge_data, shuffle=True)
 
     def val_dataloader(self):
         """Create validation dataloader."""
         if len(self.val_idx) > 0:
-            if self.use_edge_prediction:
-                return self._create_joint_loader(self.val_idx, self.val_data, shuffle=False)
-            return self._create_node_loader(self.val_idx, shuffle=False)
+            edge_data = self.val_data if self.use_edge_prediction else None
+            return self._create_loader(self.val_idx, edge_data, shuffle=False)
         return None
 
     def test_dataloader(self):
         """Create test dataloader."""
         if len(self.test_idx) > 0:
-            if self.use_edge_prediction:
-                return self._create_joint_loader(self.test_idx, self.test_data, shuffle=False)
-            return self._create_node_loader(self.test_idx, shuffle=False)
+            edge_data = self.test_data if self.use_edge_prediction else None
+            return self._create_loader(self.test_idx, edge_data, shuffle=False)
         return None
 
     def create_inference_loader(self, indices, batch_size=None, shuffle=False):
@@ -280,13 +250,5 @@ class GraphJointDataSplitter(DataSplitter):
             Whether to shuffle
         """
         batch_size = batch_size or self.batch_size
-        node_loader = NeighborLoader(
-            self.pyg_data,
-            num_neighbors=self.num_neighbors,
-            input_nodes=torch.tensor(indices, dtype=torch.long),
-            batch_size=batch_size,
-            shuffle=shuffle,
-            drop_last=False,
-            directed=False,
-        )
-        return InferenceBatchLoader(node_loader)
+        node_loader = self._make_neighbor_loader(indices, batch_size, shuffle, drop_last=False)
+        return GraphBatchLoader(node_loader)

@@ -503,6 +503,7 @@ class CellinaModule(BaseModuleClass):
 
         # Edge prediction loss
         edge_loss = torch.tensor(0.0, device=reconst_loss.device)
+        edge_accuracy = torch.tensor(0.0, device=reconst_loss.device)
         if self.link_prediction_weight > 0 and "edge_scores" in inference_outputs:
             edge_scores = inference_outputs["edge_scores"]
             edge_label = inference_outputs.get("edge_label")
@@ -519,6 +520,9 @@ class CellinaModule(BaseModuleClass):
                     edge_label_filtered.float(),
                     reduction="mean"
                 ) * self.link_prediction_weight
+
+                edge_preds = (edge_scores > 0).float()
+                edge_accuracy = (edge_preds == edge_label_filtered.float()).float().mean()
 
         # Total loss
         vae_loss_tensor = reconst_loss + weighted_kl_local
@@ -540,6 +544,7 @@ class CellinaModule(BaseModuleClass):
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
             'edge_prediction_loss': edge_loss,
+            'edge_prediction_accuracy': edge_accuracy,
         }
 
         return LossOutput(

@@ -1,10 +1,7 @@
 from anndata import AnnData
 import numpy as np
-from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
-SPATIAL_X_KEY = "spatial_x"  # Default obsm key for weighted pseudobulks
-
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):
     return np.exp(-(distance_mtx ** 2.0) / (2.0 * bandwidth ** 2.0))
@@ -182,59 +179,4 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def weighted_pseudobulks(adata, sp, groupby, obsm_key=SPATIAL_X_KEY, binarize=True):
-    # Ensure `sp` is a sparse matrix
-    if not isinstance(sp, csr_matrix):
-        sp = csr_matrix(sp)
-
-    # Get unique cell types and their indices
-    cell_types = adata.obs[groupby].unique()
-    n_cells, n_genes = adata.shape
-    n_cell_types = len(cell_types)
-
-    # Initialize an array to store results
-    weighted_pseudobulks = np.zeros((n_cells, n_cell_types, n_genes))
-
-    # Precompute gene expression matrix as dense
-    X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
-    
-    if binarize:
-        X = np.where(X > 0, 1., 0.)
-
-    # Precompute masks for cell types
-    cell_type_masks = {cell_type: np.where(adata.obs[groupby] == cell_type)[0] for cell_type in cell_types}
-
-    # Loop through each cell type and compute weighted averages
-    for idx, cell_type in enumerate(cell_types):
-        # Get the indices for cells of this type
-        cell_indices = cell_type_masks[cell_type]
-
-        # Subset adjacency matrix for neighbors of this cell type
-        sp_subset = sp[:, cell_indices]  # Shape: (n_cells, n_cells_of_type)
-
-        # Extract gene expression for cells of this type
-        cell_type_expr = X[cell_indices, :]  # Shape: (n_cells_of_type, n_genes)
-
-        # Compute the weighted sum of gene expressions
-        weighted_sums = sp_subset.dot(cell_type_expr)  # Shape: (n_cells, n_genes)
-
-        # Compute the sum of weights for neighbors of this type
-        neighbor_weights = sp_subset.sum(axis=1)  # Shape: (n_cells, 1)
-
-        # Normalize to get the weighted average
-        with np.errstate(divide='ignore', invalid='ignore'):
-            weighted_avg = np.nan_to_num(weighted_sums / neighbor_weights)
-
-        # Store the result in the corresponding slice
-        weighted_pseudobulks[:, idx, :] = weighted_avg
-
-    # Set names for celltype-gene features
-    cell_ids = np.unique(adata.obs[groupby].values)
-    gene_ids = adata.var.index.values
-    spatial_var = [a + "_" + b for a in cell_ids for b in gene_ids]
-
-    weighted_pseudobulks = weighted_pseudobulks.reshape(weighted_pseudobulks.shape[0], -1)
-
-    adata.obsm[obsm_key] = weighted_pseudobulks
-    adata.uns["_spatial_var"] = spatial_var
 
