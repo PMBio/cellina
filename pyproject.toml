@@ -4,7 +4,7 @@ requires = ["hatchling"]
 
 
 [project]
-name = "cellina"
+name = "cellina-graph"
 version = "0.0.2"
 description = "Cellina: Dual-encoder VAE for spatial transcriptomics with adversarial domain forgetting"
 readme = "README.md"
@@ -52,7 +52,7 @@ test = [
 ]
 
 [tool.coverage.run]
-source = ["cellina"]
+source = ["cellina_graph"]
 omit = [
     "**/test_*.py",
 ]
@@ -108,12 +108,12 @@ skip = [
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "src/cellina"
+    "src/cellina_graph"
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/cellina",
+    "src/cellina_graph",
     "pyproject.toml",
     "README.md",
     "LICENSE",
