@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -335,44 +335,50 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         return_numpy: bool = True,
-        key: Optional[str] = 'px_scale',
+        library_size: Union[float, str] = 1.,
     ):
         """
-        Return the model's normalized expression (expected counts) for each cell.
+        Return normalized expression like scvi-tools.
+
         Parameters
         ----------
-        adata
-            AnnData object with equivalent structure to initial AnnData.
-        indices
-            Indices of cells in adata to use.
-        batch_size
-            Minibatch size for data loading into model.
-        return_numpy
-            If True (default) return a numpy array, otherwise return a torch.Tensor on CPU.
-        Returns
-        -------
-        Expected or normalized expression matrix (n_cells, n_genes) as numpy array (or torch.Tensor if return_numpy=False).
+        library_size
+            - float (e.g. 1e4): multiplies px_scale by this constant
+            - 1: returns px_scale (pure proportions)
+            - "latent": uses inferred latent library size (returns px_rate)
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
 
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size
+        )
 
         exprs = []
         with torch.no_grad():
             for tensors in scdl:
                 inference_inputs = self.module._get_inference_input(tensors)
                 inference_outputs = self.module.inference(**inference_inputs)
+
                 generative_inputs = self.module._get_generative_input(
                     tensors, inference_outputs
                 )
                 generative_outputs = self.module.generative(**generative_inputs)
 
-                # Expected expression (mean) or normalized expression (scale) per cell/gene
-                px = generative_outputs[key]
+                px_scale = generative_outputs["px_scale"]
+
+                if library_size == "latent":
+                    # inferred library size per cell
+                    lib = torch.exp(inference_outputs["library"])
+                    px = px_scale * lib
+                else:
+                    px = px_scale * library_size
+                
                 exprs.append(px.cpu())
 
         exprs = torch.cat(exprs, dim=0)
+
         if return_numpy:
             return exprs.numpy()
+
         return exprs
