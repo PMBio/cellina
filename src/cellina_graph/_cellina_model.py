@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -74,6 +74,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
         num_neighbors: List[int] = None,
+        use_observed_lib_size: bool = True,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -104,6 +105,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
+            use_observed_lib_size=use_observed_lib_size,
             **model_kwargs,
         )
 
@@ -540,43 +542,90 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         n_mc_samples: int = 1000,
-        reduce: str | None = None
+        return_mean: bool = True,
     ):
         """Get marginal log-likelihood of the data.
-
-        Parameters
-        ----------
-        adata
-            AnnData object with equivalent structure to initial AnnData.
-        indices
-            Indices of cells in adata to use.
-        batch_size
-            Minibatch size for data loading into model.
-        n_mc_samples
-            Number of Monte Carlo samples for approximation.
-        reduce
-            Reduction method: None, 'mean', or 'sum'.
+        ...
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
 
-        if reduce not in [None, 'mean', 'sum']:
-            raise ValueError(f"Reduction must be None, 'mean' or 'sum', got {reduce}")
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size
+        )
+        per_batch_mlls = []
+
+        for tensors in scdl:
+            # returns a 1D tensor per batch (per-cell log-likelihoods)
+            batch_mll = self.module.marginal_ll(tensors, n_mc_samples)
+            # ensure tensor on CPU
+            if not torch.is_tensor(batch_mll):
+                batch_mll = torch.as_tensor(batch_mll)
+            per_batch_mlls.append(batch_mll.cpu())
+
+        if len(per_batch_mlls) == 0:
+            return np.array([])
+
+        # concatenate per-cell log-likelihoods across batches
+        all_mll = torch.cat(per_batch_mlls, dim=0).numpy()
+
+        if return_mean:
+            return float(np.mean(all_mll))
+        else:
+            # return per-cell array
+            return all_mll
+
+
+    def get_normalized_expression(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: Optional[int] = None,
+        return_numpy: bool = True,
+        library_size: Union[float, str] = 1.,
+    ):
+        """
+        Return normalized expression like scvi-tools.
+
+        Parameters
+        ----------
+        library_size
+            - float (e.g. 1e4): multiplies px_scale by this constant
+            - 1: returns px_scale (pure proportions)
+            - "latent": uses inferred latent library size (returns px_rate)
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
 
         scdl = self._make_data_loader(
             adata=adata, indices=indices, batch_size=batch_size
         )
-        marginal_ll = []
 
-        for tensors in scdl:
-            outputs = self.module.marginal_ll(
-                tensors, n_mc_samples
-            )
-            marginal_ll.append(outputs)
+        exprs = []
+        with torch.no_grad():
+            for tensors in scdl:
+                inference_inputs = self.module._get_inference_input(tensors)
+                inference_outputs = self.module.inference(**inference_inputs)
 
-        if reduce == 'mean':
-            marginal_ll = np.mean(marginal_ll)
-        elif reduce == 'sum':
-            marginal_ll = np.sum(marginal_ll)
+                generative_inputs = self.module._get_generative_input(
+                    tensors, inference_outputs
+                )
+                generative_outputs = self.module.generative(**generative_inputs)
 
-        return marginal_ll
+                px_scale = generative_outputs["px_scale"]
+
+                if library_size == "latent":
+                    # inferred library size per cell
+                    lib = torch.exp(inference_outputs["library"])
+                    px = px_scale * lib
+                else:
+                    px = px_scale * library_size
+                
+                exprs.append(px.cpu())
+
+        exprs = torch.cat(exprs, dim=0)
+
+        if return_numpy:
+            return exprs.numpy()
+
+        return exprs
