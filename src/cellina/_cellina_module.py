@@ -84,13 +84,23 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
+        supervised: bool = True,
+        mmd_lambda: float = 0.0,
     ):
         super().__init__()
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
+        # If the module is constructed in unsupervised mode, force classifier/discriminator weights to 0
+        self.supervised = supervised
+        if self.supervised:
+            mmd_lambda = 0.0
+        else:
+            classifier_lambda = 0.0
+            discriminator_lambda = 0.0
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
+        self.mmd_lambda = mmd_lambda
         self.use_observed_lib_size = use_observed_lib_size
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
@@ -160,32 +170,30 @@ class CellinaModule(BaseModuleClass):
 
         # Cell type classifier
         self.classifier: Optional[Classifier] = None
-        if classifier_lambda > 0:
-            classifier_kwargs = dict(classifier_kwargs or {})
-            self.classifier = Classifier(
-                n_input=n_latent, 
-                n_labels=n_labels, 
-                logits=True, 
-                **classifier_kwargs
-            )
+        classifier_kwargs = dict(classifier_kwargs or {})
+        self.classifier = Classifier(
+            n_input=n_latent, 
+            n_labels=n_labels, 
+            logits=True, 
+            **classifier_kwargs
+        )
 
         # Domain discriminator
         self.domain_discriminator: Optional[Classifier] = None
-        if discriminator_lambda > 0:
-            if n_domains is None or n_domains < 2:
-                raise ValueError(
-                    "discriminator_lambda > 0 requires n_domains >= 2. "
-                    "Please provide domains_key in setup_anndata()."
-                )
-            discriminator_kwargs = dict(discriminator_kwargs or {})
-            self.domain_discriminator = Classifier(
-                n_input=n_latent,
-                n_labels=n_domains,
-                n_hidden=discriminator_kwargs.pop("n_hidden", 32),
-                n_layers=discriminator_kwargs.pop("n_layers", 2),
-                logits=True,
-                **discriminator_kwargs
+        if n_domains is None or n_domains < 2:
+            raise ValueError(
+                "discriminator_lambda > 0 requires n_domains >= 2. "
+                "Please provide domains_key in setup_anndata()."
             )
+        discriminator_kwargs = dict(discriminator_kwargs or {})
+        self.domain_discriminator = Classifier(
+            n_input=n_latent,
+            n_labels=n_domains,
+            n_hidden=discriminator_kwargs.pop("n_hidden", 32),
+            n_layers=discriminator_kwargs.pop("n_layers", 2),
+            logits=True,
+            **discriminator_kwargs
+        )
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
@@ -343,6 +351,43 @@ class CellinaModule(BaseModuleClass):
             # Return zeros when classifier is disabled
             return torch.zeros_like(reconst_loss_shape), 0.0
 
+    def _compute_mmd(self, z: torch.Tensor, s: torch.Tensor, sigma: float | None = None) -> torch.Tensor:
+        """
+        Compute an RBF MMD statistic between two samples z and s. Returns a scalar tensor.
+        """
+        # Ensure shapes (B, D)
+        if z.ndim > 2:
+            z = z.view(z.shape[0], -1)
+        if s.ndim > 2:
+            s = s.view(s.shape[0], -1)
+
+        # Pairwise squared distances
+        def pdist_sq(x):
+            xx = (x * x).sum(dim=1, keepdim=True)
+            return xx + xx.t() - 2.0 * (x @ x.t())
+
+        zz = pdist_sq(z)
+        ss = pdist_sq(s)
+        zs = torch.cdist(z, s, p=2) ** 2
+
+        if sigma is None:
+            # median heuristic on combined distances
+            with torch.no_grad():
+                median = torch.cat([zz.flatten(), ss.flatten(), zs.flatten()]).median()
+                sigma = float(torch.sqrt(median + 1e-8)) if median > 0 else 1.0
+
+        def rbf_from_sqdist(d2, sigma):
+            return torch.exp(-d2 / (2 * (sigma ** 2)))
+
+        Kzz = rbf_from_sqdist(zz, sigma)
+        Kss = rbf_from_sqdist(ss, sigma)
+        Kzs = rbf_from_sqdist(zs, sigma)
+
+        m = z.shape[0]
+        # unbiased estimate
+        mmd = Kzz.sum() / (m * m) + Kss.sum() / (m * m) - 2.0 * Kzs.sum() / (m * m)
+        return mmd
+
     def loss(
         self,
         tensors,
@@ -352,6 +397,7 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
+        mmd_scale: float = 1.0,
     ):
         """
         Loss function.
@@ -381,6 +427,8 @@ class CellinaModule(BaseModuleClass):
         qsv = inference_outputs["qsv"]
         qlm = inference_outputs["qlm"]
         qlv = inference_outputs["qlv"]
+        z = inference_outputs["z"]
+        s = inference_outputs["s"]
         px_rate = generative_outputs["px_rate"]
         px_r = generative_outputs["px_r"]
         px_dropout = generative_outputs["px_dropout"]
@@ -447,6 +495,10 @@ class CellinaModule(BaseModuleClass):
         )
         fool_loss_scaled = fool_loss * discriminator_scale
 
+        # Add MMD regularization if requested
+        mmd_loss_raw = -self._compute_mmd(z, s)
+        mmd_loss_scaled = mmd_loss_raw * (self.mmd_lambda * mmd_scale)
+
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
@@ -466,6 +518,8 @@ class CellinaModule(BaseModuleClass):
             'fool_loss_raw': fool_loss.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
+            'mmd_loss_raw': mmd_loss_raw.mean(),
+            'mmd_loss': mmd_loss_scaled.mean(),
         }
 
         return LossOutput(
