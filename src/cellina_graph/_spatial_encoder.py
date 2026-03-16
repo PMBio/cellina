@@ -123,18 +123,16 @@ class GCNLayers(nn.Module):
 
         self.gcn_layers = nn.ModuleList()
         for i, (dim_in, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:])):
-            layer_n_in = dim_in + self.n_cov * self._inject_into_layer(i)
             self.gcn_layers.append(
-                _make_conv_layer(convolution_type, layer_n_in, dim_out, use_batch_norm)
+                _make_conv_layer(convolution_type, dim_in, dim_out, use_batch_norm)
             )
 
-        self.bn_layers = nn.ModuleList(
-            [
-                nn.BatchNorm1d(n_hidden if i < n_layers - 1 else n_out, momentum=0.01, eps=0.001)
-                if use_batch_norm else None
-                for i in range(n_layers)
-            ]
-        )
+        self.cov_layers = nn.ModuleList([
+            nn.Linear(self.n_cov, dim_out, bias=False)
+            if (self.n_cov > 0 and self._inject_into_layer(i))
+            else None
+            for i, (_, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:]))
+        ])
 
     def _inject_into_layer(self, layer_num: int) -> int:
         """Helper to determine if covariates should be injected into a layer."""
@@ -144,25 +142,7 @@ class GCNLayers(nn.Module):
     def set_online_update_hooks(self, hook_first_layer=True):
         """Set online update hooks."""
         self.hooks = []
-
-        def _hook_fn_weight(grad):
-            categorical_dims = sum(self.n_cat_list)
-            new_grad = torch.zeros_like(grad)
-            if categorical_dims > 0:
-                new_grad[:, -categorical_dims:] = grad[:, -categorical_dims:]
-            return new_grad
-
-        def _hook_fn_zero_out(grad):
-            return grad * 0
-
-        if hook_first_layer and len(self.gcn_layers) > 0:
-            gcn_first = self.gcn_layers[0]
-            if hasattr(gcn_first, 'lin'):
-                w = gcn_first.lin.weight.register_hook(_hook_fn_weight)
-                self.hooks.append(w)
-                if hasattr(gcn_first, 'bias') and gcn_first.bias is not None:
-                    b = gcn_first.bias.register_hook(_hook_fn_zero_out)
-                    self.hooks.append(b)
+        # Covariate correction is now handled by dedicated cov_layers; no gradient surgery needed.
 
     def forward(
         self,
@@ -219,12 +199,10 @@ class GCNLayers(nn.Module):
             adj = edge_index  # GINConv uses standard COO edge_index
 
         for i, gcn_layer in enumerate(self.gcn_layers):
-            if self._inject_into_layer(i) and cov_list:
-                x = torch.cat((x, *cov_list), dim=-1)
-
             x = gcn_layer(x, adj)
-            if self.bn_layers[i] is not None:
-                x = self.bn_layers[i](x)
+            if self.cov_layers[i] is not None and cov_list:
+                cov = torch.cat(cov_list, dim=-1)
+                x = x + self.cov_layers[i](cov)
             x = self.activation_fn(x)
             if self.dropout is not None:
                 x = self.dropout(x)
@@ -301,6 +279,7 @@ class GraphEncoder(nn.Module):
             convolution_type=convolution_type,
             **kwargs,
         )
+        self.bn = nn.BatchNorm1d(n_hidden, momentum=0.01, eps=0.001) if use_batch_norm else None
         self.mean_encoder = nn.Linear(n_hidden, n_output)
         self.var_encoder = nn.Linear(n_hidden, n_output)
         self.return_dist = return_dist
@@ -316,8 +295,13 @@ class GraphEncoder(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         *cat_list: int,
+        batch_size: int | None = None,
     ):
-        q = self.encoder(x, edge_index, *cat_list)
+        q = self.encoder(x, edge_index, *cat_list)   # (seed + neighbors, n_hidden)
+        if batch_size is not None:
+            q = q[:batch_size]                        # seed nodes only
+            if self.bn is not None:
+                q = self.bn(q)                        # BN on correct population
         q_m = self.mean_encoder(q)
         q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
         dist = Normal(q_m, q_v.sqrt())

@@ -314,11 +314,8 @@ class CellinaModule(BaseModuleClass):
         else:
             spatial_input = x_
 
-        # Encode spatial -> s (GCN with message passing)
-        qsm, qsv, s = self.s_encoder(spatial_input, edge_index, batch_index)
-
-        # Compute shifted = concat(z, s) for reconstruction
-        shifted = torch.cat([z, s], dim=-1)
+        # Encode spatial -> s (GCN with message passing); slices to seed nodes internally
+        qsm, qsv, s = self.s_encoder(spatial_input, edge_index, batch_index, batch_size=batch_size)
 
         # Library size
         if self.use_observed_lib_size:
@@ -327,14 +324,12 @@ class CellinaModule(BaseModuleClass):
         else:
             qlm, qlv, library = self.l_encoder(x_, batch_index)
 
-        # Slice outputs to actual batch size (not including sampled neighbors)
+        # Slice z outputs to actual batch size (not including sampled neighbors)
+        # qsm, qsv, s are already sliced inside s_encoder
         qzm = qzm[:batch_size, :]
         qzv = qzv[:batch_size, :]
         z_sliced = z[:batch_size, :]
-        qsm = qsm[:batch_size, :]
-        qsv = qsv[:batch_size, :]
-        s_sliced = s[:batch_size, :]
-        shifted = shifted[:batch_size, :]
+        shifted = torch.cat([z_sliced, s], dim=-1)
         qlm = qlm[:batch_size, :] if qlm is not None else None
         qlv = qlv[:batch_size, :] if qlv is not None else None
         library = library[:batch_size, :]
@@ -343,7 +338,7 @@ class CellinaModule(BaseModuleClass):
             z=z_sliced,
             qzm=qzm,
             qzv=qzv,
-            s=s_sliced,
+            s=s,
             qsm=qsm,
             qsv=qsv,
             shifted=shifted,

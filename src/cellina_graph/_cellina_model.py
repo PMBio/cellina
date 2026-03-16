@@ -249,7 +249,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_neighbors_per_seed: Optional[int] = None,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
-        latent_key: str = "shifted",
+        latent_key: str = "s",
         seed: int = 0,
     ) -> np.ndarray:
         """
