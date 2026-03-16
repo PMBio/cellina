@@ -49,6 +49,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
     num_neighbors
         Number of neighbors to sample per node per GCN layer. Default: [-1] (all neighbors).
+    use_observed_lib_size
+        Use observed library size for normalization. If True, use observed library size.
+    convolution_type
+        Graph convolution type for the spatial encoder. One of ``"gcn"``, ``"gat"``,
+        ``"gin"``, ``"sg"``. Defaults to ``"gcn"``.
     **model_kwargs
         Keyword args for :class:`~cellina.CellinaModule`
 
@@ -69,12 +74,13 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata: AnnData,
         n_hidden: int = 128,
         n_latent: int = 10,
-        n_layers: int = 1,
+        n_layers: int = 2,
         discriminator_lambda: float = 0.0,
-        condition_on_intrinsic: bool = True,
+        condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 0.0,
         num_neighbors: List[int] = None,
         use_observed_lib_size: bool = True,
+        convolution_type: str = "gcn",
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -106,6 +112,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
             use_observed_lib_size=use_observed_lib_size,
+            convolution_type=convolution_type,
             **model_kwargs,
         )
 
@@ -542,11 +549,14 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         n_mc_samples: int = 1000,
-        return_mean: bool = True,
+        reduce: Optional[str] = None,
     ):
         """Get marginal log-likelihood of the data.
         ...
         """
+        if reduce not in (None, 'mean', 'sum'):
+            raise ValueError("Reduction must be None, 'mean' or 'sum'")
+
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
 
@@ -556,24 +566,14 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         per_batch_mlls = []
 
         for tensors in scdl:
-            # returns a 1D tensor per batch (per-cell log-likelihoods)
-            batch_mll = self.module.marginal_ll(tensors, n_mc_samples)
-            # ensure tensor on CPU
-            if not torch.is_tensor(batch_mll):
-                batch_mll = torch.as_tensor(batch_mll)
-            per_batch_mlls.append(batch_mll.cpu())
+            per_batch_mlls.append(self.module.marginal_ll(tensors, n_mc_samples))
 
-        if len(per_batch_mlls) == 0:
-            return np.array([])
-
-        # concatenate per-cell log-likelihoods across batches
-        all_mll = torch.cat(per_batch_mlls, dim=0).numpy()
-
-        if return_mean:
-            return float(np.mean(all_mll))
-        else:
-            # return per-cell array
-            return all_mll
+        if reduce is None:
+            return per_batch_mlls
+        elif reduce == 'mean':
+            return float(np.mean(per_batch_mlls))
+        else:  # 'sum'
+            return float(np.sum(per_batch_mlls))
 
 
     def get_normalized_expression(

@@ -5,7 +5,7 @@ import torch
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
-from cellina import CellinaModel
+from cellina_graph import CellinaModel
 
 
 def _add_spatial_connectivity(adata, max_neighbors=5):
@@ -72,7 +72,7 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
 
     # s_encoder should be a GraphEncoder with GCN layers
-    from cellina._spatial_encoder import GraphEncoder
+    from cellina_graph._spatial_encoder import GraphEncoder
     assert isinstance(model.module.s_encoder, GraphEncoder)
     assert hasattr(model.module.s_encoder.encoder, 'gcn_layers')
 
@@ -243,7 +243,7 @@ def test_cellina_latent_representation(adata_with_spatial):
 
 def test_spatial_neighbors(adata_with_spatial):
     """Test spatial_neighbors function."""
-    from cellina._spatial_utils import spatial_neighbors
+    from cellina_graph._spatial_utils import spatial_neighbors
     from scipy.sparse import issparse
 
     n_obs = adata_with_spatial.n_obs
@@ -427,7 +427,7 @@ def test_edge_prediction_loss():
     assert model.module.link_prediction_weight == link_prediction_weight
     assert model.module.link_prediction_weight > 0
 
-    from cellina._edge_data_splitter import GraphJointDataSplitter
+    from cellina_graph._edge_data_splitter import GraphJointDataSplitter
     assert hasattr(model, '_data_splitter_cls')
     assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
 
@@ -459,7 +459,7 @@ def test_edge_prediction_disabled_by_default():
     assert model.module.link_prediction_weight == 0.0
 
     # Always uses GraphJointDataSplitter now (GCN needs graph)
-    from cellina._edge_data_splitter import GraphJointDataSplitter
+    from cellina_graph._edge_data_splitter import GraphJointDataSplitter
     assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
 
     # But use_edge_prediction should be False

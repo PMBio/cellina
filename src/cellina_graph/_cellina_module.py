@@ -62,6 +62,9 @@ class CellinaModule(BaseModuleClass):
         Whether to concatenate z to the GCN input features.
     link_prediction_weight
         Weight for the edge prediction loss. Set to 0 (default) to disable link prediction.
+    convolution_type
+        Which graph convolution to use in the spatial encoder. One of ``"gcn"``, ``"gat"``,
+        ``"gin"``, ``"sg"``. Defaults to ``"gat"``.
     """
 
     def __init__(
@@ -72,7 +75,7 @@ class CellinaModule(BaseModuleClass):
         n_batch: int = 0,
         n_hidden: int = 128,
         n_latent: int = 10,
-        n_layers: int = 1,
+        n_layers: int = 2,
         dropout_rate: float = 0.1,
         gene_likelihood: str = "zinb",
         classifier_lambda: float = 0.0,
@@ -84,6 +87,8 @@ class CellinaModule(BaseModuleClass):
         condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
         use_observed_lib_size: bool = True,
+        use_batch_norm: bool = True,
+        convolution_type: str = "gcn",
     ):
         super().__init__()
         self.n_input = n_input
@@ -127,6 +132,8 @@ class CellinaModule(BaseModuleClass):
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            use_batch_norm=use_batch_norm,
+            convolution_type=convolution_type,
         )
 
         # Library encoder
@@ -353,7 +360,6 @@ class CellinaModule(BaseModuleClass):
         if self.domain_discriminator is not None:
             outputs["discriminator_logits"] = self.domain_discriminator(z_sliced)
 
-        # ======= EDGE PREDICTION - separate forward on edge subgraph =======
         if self.link_prediction_weight > 0 and x_link is not None and edge_label_index is not None:
             x_link_ = torch.log(1 + x_link)
             _, _, z_link = self.z_encoder(x_link_, batch_index_link)
@@ -665,13 +671,6 @@ class CellinaModule(BaseModuleClass):
                 reconst_loss = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(sample_batch).sum(dim=-1)
 
             # Log-probabilities
-            n_batch = self.library_log_means.shape[1]
-            local_library_log_means = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
-            )
-            local_library_log_vars = F.linear(
-                F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
-            )
             p_z = Normal(torch.zeros_like(qz_m), torch.ones_like(qz_v)).log_prob(z).sum(dim=-1)
             p_s = Normal(torch.zeros_like(qs_m), torch.ones_like(qs_v)).log_prob(s).sum(dim=-1)
             p_x_zsl = -reconst_loss
@@ -680,7 +679,13 @@ class CellinaModule(BaseModuleClass):
 
             # Library size terms (only when using latent library)
             if not self.use_observed_lib_size:
-                local_library_log_means, local_library_log_vars = self._get_local_library_params(batch_index)
+                n_batch = self.library_log_means.shape[1]
+                local_library_log_means = F.linear(
+                    F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_means
+                )
+                local_library_log_vars = F.linear(
+                    F.one_hot(batch_index.squeeze(-1), n_batch).float(), self.library_log_vars
+                )
                 p_l = Normal(local_library_log_means, local_library_log_vars.sqrt()).log_prob(library).sum(dim=-1)
                 q_l_x = Normal(ql_m, ql_v.sqrt()).log_prob(library).sum(dim=-1)
                 to_sum[:, i] = p_z + p_s + p_l + p_x_zsl - q_z_x - q_s_x - q_l_x
@@ -690,5 +695,4 @@ class CellinaModule(BaseModuleClass):
         # per-cell marginal log-likelihood (numerically stable log-sum-exp estimator)
         batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
 
-        # RETURN per-cell log-likelihoods (1D tensor) instead of a summed scalar
-        return batch_log_lkl.cpu()
+        return float(batch_log_lkl.mean().item())

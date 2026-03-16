@@ -3,12 +3,56 @@ from collections.abc import Callable, Iterable
 import torch
 from torch import nn
 from torch.distributions import Normal
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATv2Conv, GINConv, SGConv, SimpleConv
 from torch_sparse import SparseTensor
 
 
 def _identity(x):
     return x
+
+
+_SPARSE_COMPAT_TYPES = frozenset({"gcn", "gat", "sg", "sum", "mean"})   # support SparseTensor input
+
+
+def _make_conv_layer(
+    conv_type: str,
+    in_channels: int,
+    out_channels: int,
+    use_batch_norm: bool,
+) -> nn.Module:
+    """Create one graph-conv layer of the requested type."""
+    bias = not use_batch_norm
+    if conv_type == "gcn":
+        return GCNConv(in_channels, out_channels, bias=bias, add_self_loops=False)
+    elif conv_type == "gat":
+        # concat=False keeps output dim == out_channels regardless of heads
+        return GATv2Conv(in_channels, out_channels, bias=bias, add_self_loops=False, concat=False)
+    elif conv_type == "gin":
+        # GINConv takes an MLP; bias follows use_batch_norm like other types
+        mlp = nn.Sequential(
+            nn.Linear(in_channels, out_channels, bias=bias),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels, bias=bias),
+        )
+        return GINConv(mlp)
+    elif conv_type == "sg":
+        return SGConv(in_channels, out_channels, bias=bias, add_self_loops=False)
+    elif conv_type in ("sum", "mean"):
+        aggr = "add" if conv_type == "sum" else "mean"
+
+        class _LinearAggConv(nn.Module):
+            def __init__(self, in_ch, out_ch, bias, aggr):
+                super().__init__()
+                self.linear = nn.Linear(in_ch, out_ch, bias=bias)
+                self.conv = SimpleConv(aggr=aggr, combine_root=None)
+            def forward(self, x, edge_index):
+                return self.conv(self.linear(x), edge_index)
+
+        return _LinearAggConv(in_channels, out_channels, bias, aggr)
+    else:
+        raise ValueError(
+            f"Unknown convolution_type '{conv_type}'. Choose from: gcn, gat, gin, sg, sum, mean."
+        )
 
 
 class GCNLayers(nn.Module):
@@ -36,6 +80,11 @@ class GCNLayers(nn.Module):
         Whether to learn bias in GCN layers or not
     inject_covariates
         Whether to inject covariates in each layer, or just the first (default).
+    use_batch_norm
+        Whether to use batch normalization after each GCN layer.
+    convolution_type
+        Which graph convolution to use. One of ``"gcn"``, ``"gat"``, ``"gin"``, ``"sg"``.
+        Defaults to ``"gat"`` (preserves original behaviour).
     activation_fn
         Which activation function to use
     """
@@ -51,12 +100,15 @@ class GCNLayers(nn.Module):
         dropout_rate: float = 0.1,
         bias: bool = True,
         inject_covariates: bool = True,
+        use_batch_norm: bool = True,
+        convolution_type: str = "gat",
         activation_fn: nn.Module = nn.ReLU,
         **kwargs,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
         self.n_layers = n_layers
+        self.convolution_type = convolution_type
         self.activation_fn = activation_fn()
         self.dropout = nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None
 
@@ -72,7 +124,17 @@ class GCNLayers(nn.Module):
         self.gcn_layers = nn.ModuleList()
         for i, (dim_in, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:])):
             layer_n_in = dim_in + self.n_cov * self._inject_into_layer(i)
-            self.gcn_layers.append(GCNConv(layer_n_in, dim_out, bias=bias, add_self_loops=False))
+            self.gcn_layers.append(
+                _make_conv_layer(convolution_type, layer_n_in, dim_out, use_batch_norm)
+            )
+
+        self.bn_layers = nn.ModuleList(
+            [
+                nn.BatchNorm1d(n_hidden if i < n_layers - 1 else n_out, momentum=0.01, eps=0.001)
+                if use_batch_norm else None
+                for i in range(n_layers)
+            ]
+        )
 
     def _inject_into_layer(self, layer_num: int) -> int:
         """Helper to determine if covariates should be injected into a layer."""
@@ -95,11 +157,12 @@ class GCNLayers(nn.Module):
 
         if hook_first_layer and len(self.gcn_layers) > 0:
             gcn_first = self.gcn_layers[0]
-            w = gcn_first.lin.weight.register_hook(_hook_fn_weight)
-            self.hooks.append(w)
-            if hasattr(gcn_first, 'bias') and gcn_first.bias is not None:
-                b = gcn_first.bias.register_hook(_hook_fn_zero_out)
-                self.hooks.append(b)
+            if hasattr(gcn_first, 'lin'):
+                w = gcn_first.lin.weight.register_hook(_hook_fn_weight)
+                self.hooks.append(w)
+                if hasattr(gcn_first, 'bias') and gcn_first.bias is not None:
+                    b = gcn_first.bias.register_hook(_hook_fn_zero_out)
+                    self.hooks.append(b)
 
     def forward(
         self,
@@ -145,18 +208,23 @@ class GCNLayers(nn.Module):
 
         cov_list = cont_list + one_hot_cat_list
 
-        # Convert edge_index to SparseTensor for memory-efficient message passing
-        num_nodes = x.size(0)
-        adj_t = SparseTensor(
-            row=edge_index[1], col=edge_index[0],
-            sparse_sizes=(num_nodes, num_nodes),
-        )
+        # Convert edge_index to SparseTensor for sparse-compatible conv types
+        if self.convolution_type in _SPARSE_COMPAT_TYPES:
+            num_nodes = x.size(0)
+            adj = SparseTensor(
+                row=edge_index[1], col=edge_index[0],
+                sparse_sizes=(num_nodes, num_nodes),
+            )
+        else:
+            adj = edge_index  # GINConv uses standard COO edge_index
 
         for i, gcn_layer in enumerate(self.gcn_layers):
             if self._inject_into_layer(i) and cov_list:
                 x = torch.cat((x, *cov_list), dim=-1)
 
-            x = gcn_layer(x, adj_t)
+            x = gcn_layer(x, adj)
+            if self.bn_layers[i] is not None:
+                x = self.bn_layers[i](x)
             x = self.activation_fn(x)
             if self.dropout is not None:
                 x = self.dropout(x)
@@ -195,6 +263,9 @@ class GraphEncoder(nn.Module):
         Defaults to :meth:`torch.exp`.
     return_dist
         Return directly the distribution of z instead of its parameters.
+    convolution_type
+        Which graph convolution to use. One of ``"gcn"``, ``"gat"``, ``"gin"``, ``"sg"``.
+        Defaults to ``"gat"``.
     **kwargs
         Keyword args for :class:`~GCNLayers`
     """
@@ -211,6 +282,8 @@ class GraphEncoder(nn.Module):
         var_eps: float = 1e-4,
         var_activation: Callable | None = None,
         return_dist: bool = False,
+        use_batch_norm: bool = True,
+        convolution_type: str = "gat",
         **kwargs,
     ):
         super().__init__()
@@ -224,6 +297,8 @@ class GraphEncoder(nn.Module):
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            use_batch_norm=use_batch_norm,
+            convolution_type=convolution_type,
             **kwargs,
         )
         self.mean_encoder = nn.Linear(n_hidden, n_output)
