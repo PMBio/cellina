@@ -91,7 +91,7 @@ model = CellinaModel(
 model.train(max_epochs=200)
 
 # Get latent representations
-adata.obsm['X_cellina'] = model.get_latent_representation()  # z + s
+adata.obsm['X_cellina'] = model.get_latent_representation()  # concat(z, s)
 adata.obsm['X_cellina_z'] = model.get_latent_representation(latent_key='z')
 adata.obsm['X_cellina_s'] = model.get_latent_representation(latent_key='s')
 ```
