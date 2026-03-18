@@ -149,8 +149,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             # Build a temporary AnnData with replaced spatial obsm
             adata_cf = make_counterfactual_adata(
                 self.adata, 
-                indices_control=indices, 
-                indices_target=neighbour_indices, 
+                indices, 
+                neighbour_indices, 
                 spatial_column=SPATIAL_X_KEY, 
                 sample=False, 
                 random_state=seed
@@ -165,7 +165,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         neighbour_indices: np.ndarray,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
-        latent_key: str = "s",
+        latent_key: str = "shifted",
         seed: int = 0,
     ) -> np.ndarray:
         """
