@@ -121,6 +121,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             neighbour_indices: np.ndarray,
             batch_size: int = 128,
             seed: int = 0,
+            adata: Optional[AnnData] = None,
         ):
             """
             Create a data loader that yields tensors for counterfactual evaluation.
@@ -141,14 +142,15 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 Batch size for the returned dataloader.
             seed
                 Random seed forwarded to the sampling routine.
+            adata
+                Optional AnnData to use instead of self.adata for generating the counterfactual loader.
 
             Returns
             -------
             An iterable dataloader yielding the same tensor dicts as ``_make_data_loader``.
             """
-            # Build a temporary AnnData with replaced spatial obsm
             adata_cf = make_counterfactual_adata(
-                self.adata, 
+                self.adata if adata is None else adata,  # use provided adata or default to self.adata
                 indices, 
                 neighbour_indices, 
                 spatial_column=SPATIAL_X_KEY, 
@@ -163,6 +165,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
+        adata: Optional[AnnData] = None,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "shifted",
@@ -181,6 +184,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Cell indices to compute counterfactual latents for.
         neighbour_indices
             Indices of donor cells to sample spatial information from.
+        adata
+            Optional AnnData to use instead of self.adata for generating the counterfactual loader.
         give_mean
             If True, return the mean of the latent distribution.
         batch_size
@@ -204,7 +209,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 128
 
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed
+            indices, neighbour_indices, batch_size, seed, adata
         )
 
         latent = []
@@ -232,6 +237,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
+        adata: Optional[AnnData] = None,
         batch_size: Optional[int] = None,
         seed: int = 0,
     ) -> np.ndarray:
@@ -247,6 +253,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Cell indices to predict counterfactual expression for.
         neighbour_indices
             Indices of donor cells to sample spatial information from.
+        adata
+            Optional AnnData to use instead of self.adata for generating the counterfactual loader.
         batch_size
             Minibatch size for the loader.
         seed
@@ -263,7 +271,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 128
 
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed
+            indices, neighbour_indices, batch_size, seed, adata
         )
 
         expressions = []

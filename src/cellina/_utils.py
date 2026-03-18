@@ -6,7 +6,7 @@ def make_counterfactual_adata(
     indices_basal,
     indices_counterfactual,
     spatial_column,
-    sample: bool = True,
+    sample: bool = False,
     random_state: int = 0,
 ):
     """
