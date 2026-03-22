@@ -191,14 +191,6 @@ def spatial_neighbors(adata: AnnData,
 # Private aggregation helpers
 # ---------------------------------------------------------------------------
 
-def _aggregate_simple(X_sub: np.ndarray, C: csr_matrix) -> np.ndarray:
-    """Degree-normalised mean of neighbour expression."""
-    degree = np.array(C.sum(axis=1))  # (n_cells, 1)
-    result = C @ X_sub  # (n_cells, n_genes_sub)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        result = np.nan_to_num(result / degree)
-    return result
-
 
 def _aggregate_pseudobulk(
     X: np.ndarray,
@@ -241,7 +233,7 @@ def _aggregate_pseudobulk(
 
 def compute_spatial_features(
     adata: AnnData,
-    sp,
+    connectivity_key: str = "spatial_connectivities",
     groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
     binarize: bool = False,
@@ -254,8 +246,8 @@ def compute_spatial_features(
     ----------
     adata
         AnnData object.
-    sp
-        Sparse spatial connectivity matrix (n_cells × n_cells).
+    connectivity_key
+        Key in ``adata.obsp`` for the spatial connectivity matrix.
     groupby
         Column in ``adata.obs`` to use for per-cell-type pseudobulk aggregation.
         When ``None`` (default), a simple degree-normalised mean over all
@@ -275,23 +267,25 @@ def compute_spatial_features(
     ``X_cf[j, g] = X[j, g] * 2^logFC``, which propagates correctly through
     the linear aggregation step.
     """
-    if not isinstance(sp, csr_matrix):
-        sp = csr_matrix(sp)
-
-    X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
+    C = csr_matrix(adata.obsp[connectivity_key])
 
     if groupby is None:
-        # Simple mean path
-        genes = list(adata.var_names) if neighbor_genes is None else list(neighbor_genes)
-        gene_idx = [list(adata.var_names).index(g) for g in genes]
-        X_sub = X[:, gene_idx]
-        result = _aggregate_simple(X_sub, sp)
+        # Simple mean path — keep sparse throughout
+        X = adata.X
+        if neighbor_genes is not None:
+            gene_idx = [list(adata.var_names).index(g) for g in neighbor_genes]
+            X = X[:, gene_idx]
+        result = C @ X  # sparse result
+        degree = np.asarray(C.sum(axis=1))  # (n_cells, 1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
+        adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
     else:
-        # Per-cell-type pseudobulk path
+        # Per-cell-type pseudobulk path — densify for complex indexing
+        X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
         labels = adata.obs[groupby].values
-        result = _aggregate_pseudobulk(X, sp, labels, binarize)
-
-    adata.obsm[obsm_key] = result
+        result = _aggregate_pseudobulk(X, C, labels, binarize)
+        adata.obsm[obsm_key] = result
 
 
 def make_neighbor_perturbation(
@@ -378,10 +372,12 @@ def make_neighbor_perturbation(
         genes = list(adata.var_names) if neighbor_genes is None else list(neighbor_genes)
         gene_idx = [var_names.index(g) for g in genes]
         X_sub = X_cf[:, gene_idx]
-        result = _aggregate_simple(X_sub, C)
+        result = C @ X_sub  # dense result (sparse @ dense = dense)
+        degree = np.asarray(C.sum(axis=1))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = np.nan_to_num(result / np.where(degree == 0, 1.0, degree))
+        adata.obsm[obsm_key_out] = result.astype(np.float32)
     else:
-        result = _aggregate_pseudobulk(X_cf, C, adata.obs[groupby].values, binarize)
-
-    adata.obsm[obsm_key_out] = result
+        adata.obsm[obsm_key_out] = _aggregate_pseudobulk(X_cf, C, adata.obs[groupby].values, binarize)
 
 

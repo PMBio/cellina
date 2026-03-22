@@ -267,7 +267,6 @@ def test_spatial_neighbors(adata_with_spatial):
 def test_weighted_pseudobulks(adata_with_spatial):
     """Test compute_spatial_features function (pseudobulk mode)."""
     from cellina._spatial_utils import compute_spatial_features, spatial_neighbors
-    from scipy.sparse import csr_matrix
 
     # Setup spatial data
     n_obs = adata_with_spatial.n_obs
@@ -278,20 +277,20 @@ def test_weighted_pseudobulks(adata_with_spatial):
     adata_with_spatial.obs['cell_type'] = np.random.choice(cell_types, n_obs)
 
     # Create spatial connectivity matrix
-    sp = spatial_neighbors(
+    spatial_neighbors(
         adata_with_spatial,
         bandwidth=50.0,
         cutoff=0.1,
         max_neighbours=10,
         kernel='gaussian',
         spatial_key='spatial',
-        inplace=False
+        inplace=True
     )
 
     # Test pseudobulk aggregation
     compute_spatial_features(
         adata_with_spatial,
-        sp=sp,
+        connectivity_key='spatial_connectivities',
         groupby='cell_type',
         obsm_key='spatial_pseudobulks',
         binarize=True
