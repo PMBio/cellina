@@ -1,10 +1,9 @@
 import logging
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
-import pandas as pd
 from anndata import AnnData
-from scipy.sparse import csr_matrix, hstack, issparse
+from scipy.sparse import csr_matrix, issparse
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 
@@ -191,54 +190,6 @@ def spatial_neighbors(adata: AnnData,
 
 
 # ---------------------------------------------------------------------------
-# Private aggregation helpers
-# ---------------------------------------------------------------------------
-
-
-def _aggregate_pseudobulk(
-    X,
-    C: csr_matrix,
-    labels: np.ndarray,
-    binarize: bool,
-    perturbations: Optional[Dict[str, pd.Series]] = None,
-    var_idx: Optional[Dict[str, int]] = None,
-    base: float = np.e,
-) -> csr_matrix:
-    """Per-cell-type pseudobulk aggregation of neighbour expression.
-
-    Returns
-    -------
-    result : csr_matrix, shape (n_cells, n_cell_types * n_genes)
-    """
-    X = csr_matrix(X)  # single coercion — no conditionals below
-    if binarize:
-        X = X.sign()
-
-    cell_types = np.unique(labels)
-    blocks = []
-
-    for ct in cell_types:
-        ct_idx = np.where(labels == ct)[0]
-        sp_sub = C[:, ct_idx]          # (n_cells, n_ct_cells) sparse
-        ct_expr = X[ct_idx, :]         # (n_ct_cells, n_genes) sparse
-
-        if perturbations and ct in perturbations and var_idx is not None:
-            scale = np.ones(X.shape[1])
-            for gene, logfc in perturbations[ct].items():
-                if gene in var_idx and logfc != 0.0:
-                    scale[var_idx[gene]] = base ** logfc
-            ct_expr = ct_expr.multiply(scale)
-
-        weighted_sums = sp_sub.dot(ct_expr)              # (n_cells, n_genes) sparse
-
-        inv_weights = np.asarray(sp_sub.sum(axis=1))     # (n_cells, 1)
-        inv_weights = np.where(inv_weights == 0, 0.0, 1.0 / inv_weights)
-        blocks.append(weighted_sums.multiply(inv_weights))  # sparse element-wise
-
-    return hstack(blocks, format="csr").astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -247,7 +198,6 @@ def compute_spatial_features(
     connectivity_key: str = "spatial_connectivities",
     groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
-    binarize: bool = False,
     obsm_key: str = SPATIAL_X_KEY,
     perturbations: Optional[dict] = None,
     base: float = np.e,
@@ -262,14 +212,12 @@ def compute_spatial_features(
     connectivity_key
         Key in ``adata.obsp`` for the spatial connectivity matrix.
     groupby
-        Column in ``adata.obs`` to use for per-cell-type pseudobulk aggregation.
-        When ``None`` (default), a simple degree-normalised mean over all
-        neighbours is computed (faster, less memory).
+        Column in ``adata.obs`` used to apply cell-type-specific perturbations.
+        Each cell is scaled by the logFC vector for its cell type before the
+        standard degree-normalised mean aggregation.  When ``None``, perturbations
+        are applied globally to all cells.
     neighbor_genes
         Subset of genes to aggregate.  ``None`` means all genes.
-        Only used when ``groupby=None``.
-    binarize
-        Binarise counts before aggregation (pseudobulk mode only).
     obsm_key
         Key in ``adata.obsm`` where the result is stored.
 
@@ -277,7 +225,7 @@ def compute_spatial_features(
     -----
     The ``spatial_x`` features are a **linear aggregation of raw counts**.
     Perturbations expressed as logFC are applied directly to counts:
-    ``X_cf[j, g] = X[j, g] * 2^logFC``, which propagates correctly through
+    ``X_cf[j, g] = X[j, g] * base^logFC``, which propagates correctly through
     the linear aggregation step.
     """
     C = csr_matrix(adata.obsp[connectivity_key])
@@ -303,23 +251,25 @@ def compute_spatial_features(
                 if gene in var_idx:
                     scale[var_idx[gene]] = base ** logfc
             X = X.multiply(scale) if issparse(X) else X * scale
-        if neighbor_genes is not None:
-            gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
-            X = X[:, gene_idx]
-        result = C @ X
-        degree = np.asarray(C.sum(axis=1))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
-        adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
     else:
-        labels = adata.obs[groupby].values
-        result = _aggregate_pseudobulk(
-            X, C, labels, binarize,
-            perturbations=perturbations,
-            var_idx=var_idx,
-            base=base,
-        )
-        adata.obsm[obsm_key] = result
+        if perturbations:
+            labels = adata.obs[groupby].values
+            scale = np.ones((adata.n_obs, len(var_names)), dtype=np.float32)
+            for ct, logfc_series in perturbations.items():
+                ct_mask = labels == ct
+                for gene, logfc in logfc_series.items():
+                    if gene in var_idx:
+                        scale[ct_mask, var_idx[gene]] = base ** logfc
+            X = X.multiply(scale) if issparse(X) else X * scale
+
+    if neighbor_genes is not None:
+        gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
+        X = X[:, gene_idx]
+    result = C @ X
+    degree = np.asarray(C.sum(axis=1))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
+    adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
 
 
 def make_neighbor_perturbation(
@@ -328,9 +278,8 @@ def make_neighbor_perturbation(
     perturbations: Optional[dict] = None,
     groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
-    binarize: bool = False,
     obsm_key_out: str = "spatial_x_cf",
-    base: float = 2.0,
+    base: float = np.e,
 ) -> None:
     """
     Apply logFC perturbations to neighbour expression and re-aggregate.
@@ -345,18 +294,16 @@ def make_neighbor_perturbation(
     connectivity_key
         Key in ``adata.obsp`` for the spatial connectivity matrix.
     perturbations
-        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC (base-2),
+        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC,
         applied globally to all cells.
         When ``groupby`` is set: ``Dict[str, pd.Series]`` mapping cell-type label →
-        gene-indexed logFC Series, applied per cell type.
+        gene-indexed logFC Series; each cell is scaled by its cell type's vector
+        before standard degree-normalised aggregation.
     groupby
-        Column in ``adata.obs`` used for per-cell-type pseudobulk aggregation.
+        Column in ``adata.obs`` used to apply cell-type-specific perturbations.
         When ``None``, a simple degree-normalised mean is computed.
     neighbor_genes
         Subset of genes to aggregate.  ``None`` means all genes.
-        Only used when ``groupby=None``.
-    binarize
-        Binarise counts before aggregation (pseudobulk mode only).
     obsm_key_out
         Key in ``adata.obsm`` for the counterfactual spatial features.
 
@@ -379,7 +326,6 @@ def make_neighbor_perturbation(
         connectivity_key=connectivity_key,
         groupby=groupby,
         neighbor_genes=neighbor_genes,
-        binarize=binarize,
         obsm_key=obsm_key_out,
         perturbations=perturbations,
         base=base,
