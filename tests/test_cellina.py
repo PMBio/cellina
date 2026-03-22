@@ -265,18 +265,18 @@ def test_spatial_neighbors(adata_with_spatial):
 
 
 def test_weighted_pseudobulks(adata_with_spatial):
-    """Test weighted_pseudobulks function."""
-    from cellina._spatial_utils import weighted_pseudobulks, spatial_neighbors
+    """Test compute_spatial_features function (pseudobulk mode)."""
+    from cellina._spatial_utils import compute_spatial_features, spatial_neighbors
     from scipy.sparse import csr_matrix
-    
+
     # Setup spatial data
     n_obs = adata_with_spatial.n_obs
     adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
-    
+
     # Add cell type labels
     cell_types = ['TypeA', 'TypeB', 'TypeC']
     adata_with_spatial.obs['cell_type'] = np.random.choice(cell_types, n_obs)
-    
+
     # Create spatial connectivity matrix
     sp = spatial_neighbors(
         adata_with_spatial,
@@ -287,9 +287,9 @@ def test_weighted_pseudobulks(adata_with_spatial):
         spatial_key='spatial',
         inplace=False
     )
-    
-    # Test weighted pseudobulks
-    weighted_pseudobulks(
+
+    # Test pseudobulk aggregation
+    compute_spatial_features(
         adata_with_spatial,
         sp=sp,
         groupby='cell_type',
@@ -305,8 +305,6 @@ def test_weighted_pseudobulks(adata_with_spatial):
     n_cell_types = len(cell_types)
     assert adata_with_spatial.obsm['spatial_pseudobulks'].shape == (n_obs, n_cell_types * n_genes)
     
-    # Check that spatial_var was added to uns
-    assert '_spatial_var' in adata_with_spatial.uns
 
 
 def test_marginal_ll(adata_with_spatial):

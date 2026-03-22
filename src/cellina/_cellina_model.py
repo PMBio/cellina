@@ -105,6 +105,15 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         logger.info(f"The Cellina model has been initialized{adv_str}")
 
+        # TODO: should this be here?
+        # Store the obsm key that was registered for spatial features so that
+        # perturbation methods can temporarily swap it.
+        self._spatial_obsm_key = next(
+            f._attr_key
+            for f in self.adata_manager.fields
+            if getattr(f, '_registry_key', None) == SPATIAL_X_KEY
+        )
+
     @classmethod
     @setup_anndata_dsp.dedent
     def setup_anndata(
@@ -289,6 +298,96 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         latent = torch.cat(latent).numpy()
         return latent
     
+    @torch.inference_mode()
+    def get_perturbed_latents(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        give_mean: bool = False,
+        batch_size: Optional[int] = None,
+        latent_key: Optional[str] = "s",
+        spatial_obsm_key: str = "spatial_x_cf",
+    ) -> np.ndarray:
+        """
+        Return latent representation using counterfactual spatial features.
+
+        Temporarily swaps ``adata.obsm[registered_spatial_key]`` with
+        ``adata.obsm[spatial_obsm_key]``, runs inference, then restores the
+        original data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        give_mean
+            Return the mean of the posterior rather than a sample.
+        batch_size
+            Mini-batch size for inference.
+        latent_key
+            Which latent to return: ``'shifted'``, ``'z'``, or ``'s'``.
+            Default is ``'s'`` (the spatially-informed latent).
+        spatial_obsm_key
+            Key in ``adata.obsm`` that holds the counterfactual spatial features
+            (written by :func:`~cellina.make_neighbor_perturbation`).
+        """
+        adata = self._validate_anndata(adata)
+        orig = adata.obsm[self._spatial_obsm_key].copy()
+        adata.obsm[self._spatial_obsm_key] = adata.obsm[spatial_obsm_key]
+        try:
+            return self.get_latent_representation(
+                adata=adata,
+                indices=indices,
+                give_mean=give_mean,
+                batch_size=batch_size,
+                latent_key=latent_key,
+            )
+        finally:
+            adata.obsm[self._spatial_obsm_key] = orig
+
+    @torch.inference_mode()
+    def get_perturbed_expression(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: Optional[int] = None,
+        spatial_obsm_key: str = "spatial_x_cf",
+        library_size: Union[float, str] = 1.0,
+    ) -> np.ndarray:
+        """
+        Return normalised expression using counterfactual spatial features.
+
+        Temporarily swaps ``adata.obsm[registered_spatial_key]`` with
+        ``adata.obsm[spatial_obsm_key]``, runs inference and decoding, then
+        restores the original data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        batch_size
+            Mini-batch size for inference.
+        spatial_obsm_key
+            Key in ``adata.obsm`` that holds the counterfactual spatial features.
+        library_size
+            Passed directly to :meth:`get_normalized_expression`.
+        """
+        adata = self._validate_anndata(adata)
+        orig = adata.obsm[self._spatial_obsm_key].copy()
+        adata.obsm[self._spatial_obsm_key] = adata.obsm[spatial_obsm_key]
+        try:
+            return self.get_normalized_expression(
+                adata=adata,
+                indices=indices,
+                batch_size=batch_size,
+                library_size=library_size,
+            )
+        finally:
+            adata.obsm[self._spatial_obsm_key] = orig
+
     def get_marginal_ll(
         self,
         adata: Optional[AnnData] = None,

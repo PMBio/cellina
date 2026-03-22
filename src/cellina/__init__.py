@@ -7,6 +7,10 @@ from rich.logging import RichHandler
 from ._cellina_model import CellinaModel
 from ._cellina_module import CellinaModule
 from ._training_plan import CellinaAdversarialTrainingPlan
+from ._spatial_utils import (
+    compute_spatial_features,
+    make_neighbor_perturbation,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -24,6 +28,12 @@ logger.addHandler(ch)
 # Prevent double outputs
 logger.propagate = False
 
-__all__ = ["CellinaModel", "CellinaModule", "CellinaAdversarialTrainingPlan"]
+__all__ = [
+    "CellinaModel",
+    "CellinaModule",
+    "CellinaAdversarialTrainingPlan",
+    "compute_spatial_features",
+    "make_neighbor_perturbation",
+]
 
 __version__ = version("cellina")
