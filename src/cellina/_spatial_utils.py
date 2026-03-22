@@ -1,13 +1,16 @@
+import logging
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 
 from ._constants import SPATIAL_X_KEY
+
+logger = logging.getLogger(__name__)
 
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):
@@ -193,38 +196,49 @@ def spatial_neighbors(adata: AnnData,
 
 
 def _aggregate_pseudobulk(
-    X: np.ndarray,
+    X,
     C: csr_matrix,
     labels: np.ndarray,
     binarize: bool,
-) -> tuple[np.ndarray, list[str]]:
+    perturbations: Optional[Dict[str, pd.Series]] = None,
+    var_idx: Optional[Dict[str, int]] = None,
+) -> np.ndarray:
     """Per-cell-type pseudobulk aggregation of neighbour expression.
-    
+
     Returns
     -------
     result : np.ndarray, shape (n_cells, n_cell_types * n_genes)
-    spatial_var : list of str, feature names ``<cell_type>_<gene>``
     """
     if binarize:
-        X = np.where(X > 0, 1.0, 0.0)
+        X = X.sign() if issparse(X) else np.where(X > 0, 1.0, 0.0)
 
     cell_types = np.unique(labels)
     n_cells, n_genes = X.shape
-    n_cell_types = len(cell_types)
-
-    out = np.zeros((n_cells, n_cell_types, n_genes))
+    out = np.zeros((n_cells, len(cell_types), n_genes))
 
     for idx, ct in enumerate(cell_types):
         ct_idx = np.where(labels == ct)[0]
         sp_sub = C[:, ct_idx]
-        ct_expr = X[ct_idx, :]
-        weighted_sums = sp_sub.dot(ct_expr)
-        neighbor_weights = sp_sub.sum(axis=1)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            out[:, idx, :] = np.nan_to_num(weighted_sums / neighbor_weights)
+        ct_expr = X[ct_idx, :]  # sparse slice — no densification
 
-    out = out.reshape(n_cells, -1)
-    return out
+        if perturbations and ct in perturbations and var_idx is not None:
+            scale = np.ones(n_genes)
+            for gene, logfc in perturbations[ct].items():
+                if gene in var_idx and logfc != 0.0:
+                    scale[var_idx[gene]] = 2.0 ** logfc
+            ct_expr = ct_expr.multiply(scale) if issparse(ct_expr) else ct_expr * scale
+
+        weighted_sums = sp_sub.dot(ct_expr)
+        if issparse(weighted_sums):
+            weighted_sums = weighted_sums.toarray()  # dense only at result stage
+
+        neighbor_weights = np.asarray(sp_sub.sum(axis=1))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out[:, idx, :] = np.nan_to_num(
+                weighted_sums / np.where(neighbor_weights == 0, 1.0, neighbor_weights)
+            )
+
+    return out.reshape(n_cells, -1)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +252,7 @@ def compute_spatial_features(
     neighbor_genes: Optional[List[str]] = None,
     binarize: bool = False,
     obsm_key: str = SPATIAL_X_KEY,
+    perturbations: Optional[dict] = None,
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
@@ -268,31 +283,50 @@ def compute_spatial_features(
     the linear aggregation step.
     """
     C = csr_matrix(adata.obsp[connectivity_key])
+    var_names = list(adata.var_names)
+    var_idx = {g: i for i, g in enumerate(var_names)}
+    X = adata.X  # always sparse, no .toarray()
+
+    if perturbations:
+        var_names_set = set(var_idx)
+        if groupby is None:
+            skipped = [g for g in perturbations if g not in var_names_set]
+        else:
+            skipped = [g for ct_s in perturbations.values() for g in ct_s.index
+                       if g not in var_names_set]
+        if skipped:
+            logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
+                           len(skipped), skipped)
 
     if groupby is None:
-        # Simple mean path — keep sparse throughout
-        X = adata.X
+        if perturbations:
+            scale = np.ones(len(var_names))
+            for gene, logfc in perturbations.items():
+                if gene in var_idx:
+                    scale[var_idx[gene]] = 2.0 ** logfc
+            X = X.multiply(scale) if issparse(X) else X * scale
         if neighbor_genes is not None:
-            gene_idx = [list(adata.var_names).index(g) for g in neighbor_genes]
+            gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
             X = X[:, gene_idx]
-        result = C @ X  # sparse result
-        degree = np.asarray(C.sum(axis=1))  # (n_cells, 1)
+        result = C @ X
+        degree = np.asarray(C.sum(axis=1))
         with np.errstate(divide='ignore', invalid='ignore'):
             result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
         adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
     else:
-        # Per-cell-type pseudobulk path — densify for complex indexing
-        X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
         labels = adata.obs[groupby].values
-        result = _aggregate_pseudobulk(X, C, labels, binarize)
+        result = _aggregate_pseudobulk(
+            X, C, labels, binarize,
+            perturbations=perturbations,
+            var_idx=var_idx,
+        )
         adata.obsm[obsm_key] = result
 
 
 def make_neighbor_perturbation(
     adata: AnnData,
     connectivity_key: str = "spatial_connectivities",
-    perturbations: Optional[Dict[str, float]] = None,
-    cell_type_perturbations: Optional[pd.DataFrame] = None,
+    perturbations: Optional[dict] = None,
     groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
     binarize: bool = False,
@@ -311,12 +345,10 @@ def make_neighbor_perturbation(
     connectivity_key
         Key in ``adata.obsp`` for the spatial connectivity matrix.
     perturbations
-        Dict mapping gene name → logFC (base-2).  Applied to **all** cells.
-        ``X_cf[j, g] = X[j, g] * 2^logFC``.
-    cell_type_perturbations
-        DataFrame of shape ``(genes × cell_types)`` with logFC values.
-        Rows are gene names, columns are cell-type labels matching ``groupby``.
-        Requires ``groupby`` to be set.
+        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC (base-2),
+        applied globally to all cells.
+        When ``groupby`` is set: ``Dict[str, pd.Series]`` mapping cell-type label →
+        gene-indexed logFC Series, applied per cell type.
     groupby
         Column in ``adata.obs`` used for per-cell-type pseudobulk aggregation.
         When ``None``, a simple degree-normalised mean is computed.
@@ -331,53 +363,25 @@ def make_neighbor_perturbation(
     Raises
     ------
     ValueError
-        If ``cell_type_perturbations`` is passed without ``groupby``.
+        If ``perturbations`` keys don't match cell types in ``adata.obs[groupby]``.
     """
-    if cell_type_perturbations is not None and groupby is None:
-        raise ValueError(
-            "cell_type_perturbations requires groupby to be set "
-            "(pseudobulk aggregation mode)."
-        )
+    if perturbations is not None and groupby is not None:
+        obs_cts = set(adata.obs[groupby].unique())
+        unknown = set(perturbations) - obs_cts
+        if unknown:
+            raise ValueError(
+                f"perturbations contains cell types not found in "
+                f"adata.obs['{groupby}']: {unknown}"
+            )
 
-    var_names = list(adata.var_names)
-    X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
-    X_cf = X.copy().astype(float)
-
-    # Apply global perturbations
-    if perturbations:
-        for gene, logfc in perturbations.items():
-            if gene not in var_names:
-                raise ValueError(f"Gene '{gene}' not found in adata.var_names.")
-            g_idx = var_names.index(gene)
-            X_cf[:, g_idx] *= 2.0 ** logfc
-
-    # Apply per-cell-type perturbations
-    if cell_type_perturbations is not None:
-        labels = adata.obs[groupby].values
-        for gene in cell_type_perturbations.index:
-            if gene not in var_names:
-                raise ValueError(f"Gene '{gene}' not found in adata.var_names.")
-            g_idx = var_names.index(gene)
-            for ct in cell_type_perturbations.columns:
-                logfc = cell_type_perturbations.loc[gene, ct]
-                if logfc == 0.0:
-                    continue
-                ct_mask = labels == ct
-                X_cf[ct_mask, g_idx] *= 2.0 ** logfc
-
-    # Re-aggregate with perturbed counts
-    C = csr_matrix(adata.obsp[connectivity_key])
-
-    if groupby is None:
-        genes = list(adata.var_names) if neighbor_genes is None else list(neighbor_genes)
-        gene_idx = [var_names.index(g) for g in genes]
-        X_sub = X_cf[:, gene_idx]
-        result = C @ X_sub  # dense result (sparse @ dense = dense)
-        degree = np.asarray(C.sum(axis=1))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            result = np.nan_to_num(result / np.where(degree == 0, 1.0, degree))
-        adata.obsm[obsm_key_out] = result.astype(np.float32)
-    else:
-        adata.obsm[obsm_key_out] = _aggregate_pseudobulk(X_cf, C, adata.obs[groupby].values, binarize)
+    compute_spatial_features(
+        adata,
+        connectivity_key=connectivity_key,
+        groupby=groupby,
+        neighbor_genes=neighbor_genes,
+        binarize=binarize,
+        obsm_key=obsm_key_out,
+        perturbations=perturbations,
+    )
 
 
