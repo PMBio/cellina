@@ -250,7 +250,7 @@ def compute_spatial_features(
     binarize: bool = False,
     obsm_key: str = SPATIAL_X_KEY,
     perturbations: Optional[dict] = None,
-    base: float = 2.0,
+    base: float = np.e,
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
