@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from scipy.sparse import csr_matrix, issparse
+from scipy.sparse import csr_matrix, hstack, issparse
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 
@@ -202,43 +202,40 @@ def _aggregate_pseudobulk(
     binarize: bool,
     perturbations: Optional[Dict[str, pd.Series]] = None,
     var_idx: Optional[Dict[str, int]] = None,
-) -> np.ndarray:
+    base: float = np.e,
+) -> csr_matrix:
     """Per-cell-type pseudobulk aggregation of neighbour expression.
 
     Returns
     -------
-    result : np.ndarray, shape (n_cells, n_cell_types * n_genes)
+    result : csr_matrix, shape (n_cells, n_cell_types * n_genes)
     """
+    X = csr_matrix(X)  # single coercion — no conditionals below
     if binarize:
-        X = X.sign() if issparse(X) else np.where(X > 0, 1.0, 0.0)
+        X = X.sign()
 
     cell_types = np.unique(labels)
-    n_cells, n_genes = X.shape
-    out = np.zeros((n_cells, len(cell_types), n_genes))
+    blocks = []
 
-    for idx, ct in enumerate(cell_types):
+    for ct in cell_types:
         ct_idx = np.where(labels == ct)[0]
-        sp_sub = C[:, ct_idx]
-        ct_expr = X[ct_idx, :]  # sparse slice — no densification
+        sp_sub = C[:, ct_idx]          # (n_cells, n_ct_cells) sparse
+        ct_expr = X[ct_idx, :]         # (n_ct_cells, n_genes) sparse
 
         if perturbations and ct in perturbations and var_idx is not None:
-            scale = np.ones(n_genes)
+            scale = np.ones(X.shape[1])
             for gene, logfc in perturbations[ct].items():
                 if gene in var_idx and logfc != 0.0:
-                    scale[var_idx[gene]] = 2.0 ** logfc
-            ct_expr = ct_expr.multiply(scale) if issparse(ct_expr) else ct_expr * scale
+                    scale[var_idx[gene]] = base ** logfc
+            ct_expr = ct_expr.multiply(scale)
 
-        weighted_sums = sp_sub.dot(ct_expr)
-        if issparse(weighted_sums):
-            weighted_sums = weighted_sums.toarray()  # dense only at result stage
+        weighted_sums = sp_sub.dot(ct_expr)              # (n_cells, n_genes) sparse
 
-        neighbor_weights = np.asarray(sp_sub.sum(axis=1))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            out[:, idx, :] = np.nan_to_num(
-                weighted_sums / np.where(neighbor_weights == 0, 1.0, neighbor_weights)
-            )
+        inv_weights = np.asarray(sp_sub.sum(axis=1))     # (n_cells, 1)
+        inv_weights = np.where(inv_weights == 0, 0.0, 1.0 / inv_weights)
+        blocks.append(weighted_sums.multiply(inv_weights))  # sparse element-wise
 
-    return out.reshape(n_cells, -1)
+    return hstack(blocks, format="csr").astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +250,7 @@ def compute_spatial_features(
     binarize: bool = False,
     obsm_key: str = SPATIAL_X_KEY,
     perturbations: Optional[dict] = None,
+    base: float = 2.0,
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
@@ -303,7 +301,7 @@ def compute_spatial_features(
             scale = np.ones(len(var_names))
             for gene, logfc in perturbations.items():
                 if gene in var_idx:
-                    scale[var_idx[gene]] = 2.0 ** logfc
+                    scale[var_idx[gene]] = base ** logfc
             X = X.multiply(scale) if issparse(X) else X * scale
         if neighbor_genes is not None:
             gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
@@ -319,6 +317,7 @@ def compute_spatial_features(
             X, C, labels, binarize,
             perturbations=perturbations,
             var_idx=var_idx,
+            base=base,
         )
         adata.obsm[obsm_key] = result
 
@@ -331,6 +330,7 @@ def make_neighbor_perturbation(
     neighbor_genes: Optional[List[str]] = None,
     binarize: bool = False,
     obsm_key_out: str = "spatial_x_cf",
+    base: float = 2.0,
 ) -> None:
     """
     Apply logFC perturbations to neighbour expression and re-aggregate.
@@ -382,6 +382,7 @@ def make_neighbor_perturbation(
         binarize=binarize,
         obsm_key=obsm_key_out,
         perturbations=perturbations,
+        base=base,
     )
 
 
