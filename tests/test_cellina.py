@@ -9,12 +9,16 @@ from cellina import CellinaModel
 
 @pytest.fixture
 def adata_with_spatial():
-    """Create synthetic AnnData with spatial features."""
+    """Create synthetic AnnData with spatial features and connectivity."""
+    from cellina._spatial_utils import spatial_neighbors
     adata = synthetic_iid()
     n_spatial_features = 20
     adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
     n_labels = 3
     adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
+    adata.obsm["spatial"] = np.random.randn(adata.n_obs, 2) * 100
+    spatial_neighbors(adata, bandwidth=50.0, cutoff=0.1, max_neighbours=10, kernel="gaussian",
+                      spatial_key="spatial", inplace=True)
     return adata
 
 
@@ -264,7 +268,7 @@ def test_spatial_neighbors(adata_with_spatial):
     assert conn_matrix.shape == (n_obs, n_obs)
 
 
-def test_weighted_pseudobulks(adata_with_spatial):
+def test_compute_spatial_features(adata_with_spatial):
     """Test compute_spatial_features function (pseudobulk mode)."""
     from cellina._spatial_utils import compute_spatial_features, spatial_neighbors
 
@@ -293,18 +297,15 @@ def test_weighted_pseudobulks(adata_with_spatial):
         connectivity_key='spatial_connectivities',
         groupby='cell_type',
         obsm_key='spatial_pseudobulks',
-        binarize=True
     )
-    
+
     # Check that pseudobulks were added
     assert 'spatial_pseudobulks' in adata_with_spatial.obsm
-    
-    # Check shape: should be (n_obs, n_cell_types * n_genes)
-    n_genes = adata_with_spatial.n_vars
-    n_cell_types = len(cell_types)
-    assert adata_with_spatial.obsm['spatial_pseudobulks'].shape == (n_obs, n_cell_types * n_genes)
-    
 
+    # Check shape: should be (n_obs, n_genes)
+    n_genes = adata_with_spatial.n_vars
+    assert adata_with_spatial.obsm['spatial_pseudobulks'].shape == (n_obs, n_genes)
+    
 
 def test_marginal_ll(adata_with_spatial):
     """Test get_marginal_ll method and underlying module.marginal_ll."""
@@ -487,3 +488,102 @@ def test_get_normalized_expression(adata_with_spatial):
     normalized_expr_tensor = model.get_normalized_expression(return_numpy=False)
     assert isinstance(normalized_expr_tensor, torch.Tensor)
     assert normalized_expr_tensor.shape == (adata_with_spatial.n_obs, adata_with_spatial.n_vars)
+
+
+def test_get_counterfactual_latents(adata_with_spatial):
+    """get_counterfactual_latents returns correct shape for all latent_key options."""
+    n_latent = 5
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.5)
+
+    n_obs = adata_with_spatial.n_obs
+    indices = np.arange(n_obs // 2)
+    neighbour_indices = np.arange(n_obs // 2, n_obs)
+
+    for key, expected_dim in (("s", n_latent), ("z", n_latent), ("shifted", 2 * n_latent)):
+        result = model.get_counterfactual_latents(indices, neighbour_indices, latent_key=key)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (len(indices), expected_dim), f"latent_key={key!r}"
+
+
+def test_get_counterfactual_expression(adata_with_spatial):
+    """get_counterfactual_expression returns (n_indices, n_vars) of non-negative values."""
+    n_latent = 5
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.5)
+
+    n_obs = adata_with_spatial.n_obs
+    indices = np.arange(n_obs // 2)
+    neighbour_indices = np.arange(n_obs // 2, n_obs)
+
+    result = model.get_counterfactual_expression(indices, neighbour_indices)
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (len(indices), adata_with_spatial.n_vars)
+    assert np.all(result >= 0)
+
+
+def test_get_perturbed_latents(adata_with_spatial):
+    """get_perturbed_latents returns (n_obs, n_latent) when given a counterfactual obsm key."""
+    n_latent = 5
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.5)
+
+    adata_with_spatial.obsm["spatial_x_cf"] = adata_with_spatial.obsm["spatial_x"].copy()
+
+    result = model.get_perturbed_latents(spatial_obsm_key="spatial_x_cf")
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (adata_with_spatial.n_obs, n_latent)
+
+
+def test_get_perturbed_expression(adata_with_spatial):
+    """get_perturbed_expression returns (n_obs, n_vars) of non-negative values."""
+    n_latent = 5
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.5)
+
+    adata_with_spatial.obsm["spatial_x_cf"] = adata_with_spatial.obsm["spatial_x"].copy()
+
+    result = model.get_perturbed_expression(spatial_obsm_key="spatial_x_cf")
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (adata_with_spatial.n_obs, adata_with_spatial.n_vars)
+    assert np.all(result >= 0)
+
+
+def test_make_neighbor_perturbation(adata_with_spatial):
+    """Partial perturbations dict (only some cell types) runs without error."""
+    import pandas as pd
+    from cellina._spatial_utils import make_neighbor_perturbation
+
+    genes = list(adata_with_spatial.var_names[:3])
+    perturbations = {"0": pd.Series([1.0, -0.5, 0.5], index=genes)}  # only cell type "0"
+
+    make_neighbor_perturbation(
+        adata_with_spatial,
+        perturbations=perturbations,
+        groupby="cell_labels",
+        obsm_key_out="spatial_x_cf",
+    )
+
+    assert "spatial_x_cf" in adata_with_spatial.obsm
+    assert adata_with_spatial.obsm["spatial_x_cf"].shape == (
+        adata_with_spatial.n_obs, adata_with_spatial.n_vars
+    )
+
+
+def test_make_neighbor_perturbation_unknown(adata_with_spatial):
+    """Unknown cell-type key in perturbations raises ValueError."""
+    import pandas as pd
+    from cellina._spatial_utils import make_neighbor_perturbation
+
+    perturbations = {"nonexistent_type": pd.Series([1.0], index=[adata_with_spatial.var_names[0]])}
+
+    with pytest.raises(ValueError, match="nonexistent_type"):
+        make_neighbor_perturbation(
+            adata_with_spatial,
+            perturbations=perturbations,
+            groupby="cell_labels",
+        )

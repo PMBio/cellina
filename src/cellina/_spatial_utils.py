@@ -231,7 +231,7 @@ def compute_spatial_features(
     C = csr_matrix(adata.obsp[connectivity_key])
     var_names = list(adata.var_names)
     var_idx = {g: i for i, g in enumerate(var_names)}
-    X = adata.X  # always sparse, no .toarray()
+    X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
 
     if perturbations:
         var_names_set = set(var_idx)
@@ -310,7 +310,9 @@ def make_neighbor_perturbation(
     Raises
     ------
     ValueError
-        If ``perturbations`` keys don't match cell types in ``adata.obs[groupby]``.
+        If ``perturbations`` contains cell-type keys that are not present in
+        ``adata.obs[groupby]``.  Partial dictionaries (covering only a subset of
+        cell types) are allowed — unspecified cell types are left unmodified.
     """
     if perturbations is not None and groupby is not None:
         obs_cts = set(adata.obs[groupby].unique())
