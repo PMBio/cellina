@@ -76,7 +76,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     batch,
                     loss_kwargs={
                         "kl_weight": self.kl_weight,
-                        "discriminator_lambda": -kappa if kappa != 0.0 else 0.0,
+                        "discriminator_lambda": kappa if kappa != 0.0 else 0.0,
                     }
                 )
                 scvi_val = float(scvi_loss.loss.detach().cpu().item())
@@ -146,7 +146,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             batch,
             loss_kwargs={
                 "kl_weight": self.kl_weight,
-                "discriminator_lambda": -kappa,  # Negative for adversarial (fool) loss
+                "discriminator_lambda": kappa,
                 "classifier_scale": scale_clf,
                 "discriminator_scale": scale_fool,
                 "mmd_scale": scale_mmd,
@@ -219,7 +219,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 batch,
                 loss_kwargs={
                     "kl_weight": self.kl_weight,
-                    "discriminator_lambda": -kappa,  # Negative for adversarial
+                    "discriminator_lambda": kappa,
                     "classifier_scale": scale_clf,
                     "discriminator_scale": scale_fool,
                     "mmd_scale": scale_mmd,
@@ -309,3 +309,4 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self.log("ema_vae_init", self._ema["vae"], on_step=False, on_epoch=True)
             self.log("ema_clf_init", self._ema["clf"], on_step=False, on_epoch=True)
             self.log("ema_fool_init", self._ema["fool"], on_step=False, on_epoch=True)
+            self.log("ema_mmd_init", self._ema["mmd"], on_step=False, on_epoch=True)

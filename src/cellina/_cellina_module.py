@@ -475,29 +475,32 @@ class CellinaModule(BaseModuleClass):
         labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
         classifier_loss, classifier_accuracy = self._compute_classifier_metrics(
             classifier=self.classifier,
-            weight=self.classifier_lambda,
+            weight=1.,
             inference_outputs=inference_outputs,
             labels=labels,
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
-        classifier_loss_scaled = classifier_loss * classifier_scale
+        classifier_loss_scaled = classifier_loss * classifier_scale * np.abs(self.classifier_lambda)
 
         # Domain discriminator (fool loss - always negative for adversarial training)
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
         fool_loss, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
-            weight=discriminator_lambda,
+            weight=-1., # Negative for adversarial loss
             inference_outputs=inference_outputs,
             labels=domain_labels,
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
-        fool_loss_scaled = fool_loss * discriminator_scale
+        fool_loss_scaled = fool_loss * discriminator_scale * np.abs(discriminator_lambda)
 
         # Add MMD regularization if requested
-        mmd_loss_raw = -self._compute_mmd(z, s)
-        mmd_loss_scaled = mmd_loss_raw * (self.mmd_lambda * mmd_scale)
+        mmd_loss_raw = torch.tensor(0.0)
+        mmd_loss_scaled = torch.tensor(0.0)
+        if not self.supervised:
+            mmd_loss_raw = -self._compute_mmd(z, s)
+            mmd_loss_scaled = mmd_loss_raw * (self.mmd_lambda * mmd_scale)
 
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
