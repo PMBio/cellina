@@ -180,7 +180,7 @@ def _mixing_index(
 def compute_cf_logfc(
     ref_expr: np.ndarray,
     pert_expr: np.ndarray,
-    cf_expr: np.ndarray,
+    obs_expr: np.ndarray,
     top_n: int | None = 100,
     gene_names: list | None = None,
     mixing_n_clusters: int = 2,
@@ -195,7 +195,7 @@ def compute_cf_logfc(
         Normalized expression of reference (REF) cells, shape (n_ref, n_genes).
     pert_expr
         Model-predicted perturbed expression of REF cells, shape (n_ref, n_genes).
-    cf_expr
+    obs_expr
         Real target (CRC) expression — ground truth, shape (n_crc, n_genes).
     top_n
         Restrict correlation metrics to the top_n genes by absolute real_logfc.
@@ -216,7 +216,7 @@ def compute_cf_logfc(
         real_logfc, pred_logfc, top_n_mask, gene_names
     """
     ref_mean = np.log1p(ref_expr.mean(0))
-    crc_mean = np.log1p(cf_expr.mean(0))
+    crc_mean = np.log1p(obs_expr.mean(0))
     pred_mean = np.log1p(pert_expr.mean(0))
 
     real_logfc = crc_mean - ref_mean   # ground truth: CRC vs REF
@@ -246,7 +246,7 @@ def compute_cf_logfc(
     spearman_r, spearman_p = spearmanr(real_eval, pred_eval)
 
     mix_idx = _mixing_index(
-        pert_expr, cf_expr,
+        pert_expr, obs_expr,
         n_clusters=mixing_n_clusters,
         n_pcs=mixing_n_pcs,
         random_state=random_state,

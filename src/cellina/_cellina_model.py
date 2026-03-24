@@ -115,49 +115,22 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             if getattr(f, '_registry_key', None) == SPATIAL_X_KEY
         )
 
-    def _make_counterfactual_loader(
+    def _make_counterfactual_adata(
             self,
             indices: np.ndarray,
             neighbour_indices: np.ndarray,
-            batch_size: int = 128,
             seed: int = 0,
             adata: Optional[AnnData] = None,
         ):
-            """
-            Create a data loader that yields tensors for counterfactual evaluation.
-
-            This function constructs a temporary AnnData containing only the `indices`
-            cells with their `.obsm[SPATIAL_X_KEY]` replaced by sampled spatial counts
-            from `neighbour_indices` (using :func:`make_counterfactual_adata`). It then
-            delegates to the model's `_make_data_loader` to produce the same batch-wise
-            tensor tuples used during normal inference.
-
-            Parameters
-            ----------
-            indices
-                Indices of control cells (basal) to evaluate.
-            neighbour_indices
-                Indices of donor cells to sample spatial information from.
-            batch_size
-                Batch size for the returned dataloader.
-            seed
-                Random seed forwarded to the sampling routine.
-            adata
-                Optional AnnData to use instead of self.adata for generating the counterfactual loader.
-
-            Returns
-            -------
-            An iterable dataloader yielding the same tensor dicts as ``_make_data_loader``.
-            """
-            adata_cf = make_counterfactual_adata(
-                self.adata if adata is None else adata,  # use provided adata or default to self.adata
-                indices, 
-                neighbour_indices, 
-                spatial_column=SPATIAL_X_KEY, 
-                sample=False, 
-                random_state=seed
+            """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
+            return make_counterfactual_adata(
+                self.adata if adata is None else adata,
+                indices,
+                neighbour_indices,
+                spatial_column=SPATIAL_X_KEY,
+                sample=False,
+                random_state=seed,
             )
-            return self._make_data_loader(adata=adata_cf, batch_size=batch_size)
 
 
     @torch.inference_mode()
@@ -199,40 +172,18 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         -------
         np.ndarray of shape ``(len(indices), n_latent)`` (or ``2*n_latent`` for shifted).
         """
-        if latent_key not in ['shifted', 'z', 's']:
-            raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
-
         self._check_if_trained(warn=False)
-        indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
-
-        scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed, adata
+        adata_cf = self._make_counterfactual_adata(
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+        )
+        return self.get_latent_representation(
+            adata=adata_cf, indices=None, give_mean=give_mean,
+            batch_size=batch_size, latent_key=latent_key,
         )
 
-        latent = []
-        for tensors in scdl:
-            inference_inputs = self.module._get_inference_input(tensors)
-            outputs = self.module.inference(**inference_inputs)
 
-            if latent_key == 'z':
-                lat = outputs["qzm"] if give_mean else outputs["z"]
-            elif latent_key == 's':
-                lat = outputs["qsm"] if give_mean else outputs["s"]
-            else:  # shifted
-                if give_mean:
-                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
-                else:
-                    lat = outputs["shifted"]
-
-            latent.append(lat.cpu())
-
-        return torch.cat(latent).numpy()
-
-
-    @torch.inference_mode()
     def get_counterfactual_expression(
         self,
         indices: np.ndarray,
@@ -240,12 +191,14 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata: Optional[AnnData] = None,
         batch_size: Optional[int] = None,
         seed: int = 0,
+        library_size: Union[float, str] = "latent",
+        return_numpy: bool = True,
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
 
-        Runs the full inference + generative pipeline with rewired graph edges,
-        returning the mean of the negative binomial distribution (``px_rate``).
+        Delegates to :meth:`get_normalized_expression` after building a counterfactual
+        AnnData with rewired spatial features.
 
         Parameters
         ----------
@@ -254,36 +207,31 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         neighbour_indices
             Indices of donor cells to sample spatial information from.
         adata
-            Optional AnnData to use instead of self.adata for generating the counterfactual loader.
+            Optional AnnData to use instead of ``self.adata``.
         batch_size
             Minibatch size for the loader.
         seed
             Random seed for neighbour sampling.
+        library_size
+            Passed to :meth:`get_normalized_expression`.  Defaults to ``"latent"``
+            (uses inferred library size, returning ``px_rate``).
+        return_numpy
+            Passed to :meth:`get_normalized_expression`.
 
         Returns
         -------
         np.ndarray of shape ``(len(indices), n_genes)``.
         """
         self._check_if_trained(warn=False)
-        indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
-
-        scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed, adata
+        adata_cf = self._make_counterfactual_adata(
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
         )
-
-        expressions = []
-        for tensors in scdl:
-            inference_inputs = self.module._get_inference_input(tensors)
-            inference_outputs = self.module.inference(**inference_inputs)
-            generative_inputs = self.module._get_generative_input(tensors, inference_outputs)
-            generative_outputs = self.module.generative(**generative_inputs)
-
-            expressions.append(generative_outputs["px_rate"].cpu())
-
-        return torch.cat(expressions).numpy()
+        return self.get_normalized_expression(
+            adata=adata_cf, indices=None, batch_size=batch_size,
+            library_size=library_size, return_numpy=return_numpy,
+        )
     
 
     @classmethod
