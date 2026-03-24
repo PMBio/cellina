@@ -67,6 +67,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
+        supervised: bool = True,
+        mmd_lambda: float = 0.0,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
         **model_kwargs,
@@ -94,17 +96,23 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
+            supervised=supervised,
+            mmd_lambda=mmd_lambda,
             **model_kwargs,
         )
 
         # Update summary string
-        adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
+        train_mode = ""
+        if discriminator_lambda > 0:
+            train_mode = " with adversarial domain forgetting"
+        if not supervised:
+            train_mode = " in unsupervised mode with MMD loss"
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}"
+            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){train_mode}"
         )
         self.init_params_ = self._get_init_params(locals())
 
-        logger.info(f"The Cellina model has been initialized{adv_str}")
+        logger.info(f"The Cellina model has been initialized{train_mode}")
 
         # TODO: should this be here?
         # Store the obsm key that was registered for spatial features so that
@@ -333,13 +341,16 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         
         # If adversarial training is disabled, remove plan-only keys that would be
         # handled by the adversarial plan (avoid forwarding them to module.loss)
-        if self.module.discriminator_lambda == 0:
+        if self.module.discriminator_lambda == 0 and self.module.supervised:
             plan_kwargs.pop("normalize_losses", None)
             plan_kwargs.pop("scale_adversarial_loss", None)
         
         # Set training plan class
         if self.module.discriminator_lambda > 0:
             # Use adversarial training plan when discriminator is enabled
+            self._training_plan_cls = CellinaAdversarialTrainingPlan
+        # Also use the same training plan class when module was instantiated in unsupervised mode
+        if not self.module.supervised:
             self._training_plan_cls = CellinaAdversarialTrainingPlan
         
         super().train(
