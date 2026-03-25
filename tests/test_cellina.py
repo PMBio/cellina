@@ -472,6 +472,7 @@ def test_normalize_losses_true(adata_with_spatial):
     model.module.to("cpu")
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
+    
     with torch.no_grad():
         inf_in  = model.module._get_inference_input(batch)
         inf_out = model.module.inference(**inf_in)
@@ -493,6 +494,8 @@ def test_normalize_losses_true(adata_with_spatial):
     # make sure that disc is roughly 4x scaled compared to clf (since discriminator_lambda is 4x classifier_lambda)
     # fool_scaled is negative (adversarial weight=-1), so compare absolute magnitudes
     np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.2)
+    # assert fool is negative (since it's an adversarial loss)
+    assert fool_scaled < 0, "Fool loss should be negative (adversarial weight is -1)"
 
 
 def test_get_normalized_expression(adata_with_spatial):
