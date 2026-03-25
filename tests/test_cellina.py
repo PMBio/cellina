@@ -492,7 +492,7 @@ def test_normalize_losses_true(adata_with_spatial):
     np.testing.assert_allclose(fool_scaled, fool_raw * expected_scale_fool * discriminator_lambda, rtol=1e-4)
     # make sure that disc is roughly 4x scaled compared to clf (since discriminator_lambda is 4x classifier_lambda)
     # fool_scaled is negative (adversarial weight=-1), so compare absolute magnitudes
-    np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.5)
+    np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.2)
 
 
 def test_get_normalized_expression(adata_with_spatial):
@@ -597,41 +597,6 @@ def test_make_neighbor_perturbation(adata_with_spatial):
     assert adata_with_spatial.obsm["spatial_x_cf"].shape == (
         adata_with_spatial.n_obs, adata_with_spatial.n_vars
     )
-
-
-def test_mmd_loss_active(adata_with_spatial):
-    """MMD loss is computed and non-zero when mmd_lambda > 0."""
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model_nl = CellinaModel(adata_with_spatial, n_latent=5, mmd_lambda=1.0)
-    model_nl.train(max_epochs=5, train_size=0.5,
-                   plan_kwargs={"normalize_losses": True})
-
-    plan = model_nl.trainer.strategy.model
-    ema_vae = plan._ema["vae"]
-
-    model_nl.module.eval()
-    model_nl.module.to("cpu")
-    dataloader = model_nl._make_data_loader(adata_with_spatial, batch_size=32)
-    batch = next(iter(dataloader))
-    with torch.no_grad():
-        inf_in  = model_nl.module._get_inference_input(batch)
-        inf_out = model_nl.module.inference(**inf_in)
-        gen_in  = model_nl.module._get_generative_input(batch, inf_out)
-        gen_out = model_nl.module.generative(**gen_in)
-        loss_out = model_nl.module.loss(batch, inf_out, gen_out, mmd_scale=1.0)
-
-    mmd_raw = loss_out.extra_metrics["mmd_loss_raw"].item()
-    # Simulate per-batch scale (same formula as training plan uses)
-    scale_mmd = ema_vae / (abs(mmd_raw) + 1e-8)
-    mmd_scaled = abs(mmd_raw * scale_mmd * 1.0)
-    np.testing.assert_allclose(mmd_scaled, ema_vae, rtol=0.2)
-
-
-def test_discriminator_mmd_mutually_exclusive(adata_with_spatial):
-    """Raises ValueError when both discriminator_lambda and mmd_lambda are > 0."""
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    with pytest.raises(ValueError):
-        CellinaModel(adata_with_spatial, discriminator_lambda=1.0, mmd_lambda=1.0)
 
 
 def test_make_neighbor_perturbation_unknown(adata_with_spatial):

@@ -67,7 +67,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
-        mmd_lambda: float = 0.0,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
         **model_kwargs,
@@ -95,7 +94,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
-            mmd_lambda=mmd_lambda,
             **model_kwargs,
         )
 
@@ -103,8 +101,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         train_mode = ""
         if discriminator_lambda > 0:
             train_mode = " with adversarial domain forgetting"
-        if mmd_lambda > 0:
-            train_mode = " in unsupervised mode with MMD loss"
         self._model_summary_string = (
             f"Cellina Model with {n_latent}-dim latent space (z and s encoders){train_mode}"
         )
@@ -339,11 +335,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         
         # If adversarial training is disabled, remove plan-only keys that would be
         # handled by the adversarial plan (avoid forwarding them to module.loss)
-        if self.module.discriminator_lambda == 0 and self.module.mmd_lambda == 0:
+        if self.module.discriminator_lambda == 0:
             plan_kwargs.pop("normalize_losses", None)
 
         # Set training plan class
-        if self.module.discriminator_lambda > 0 or self.module.mmd_lambda > 0:
+        if self.module.discriminator_lambda > 0:
             self._training_plan_cls = CellinaAdversarialTrainingPlan
         
         super().train(

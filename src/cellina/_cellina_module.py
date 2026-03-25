@@ -84,21 +84,13 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
-        mmd_lambda: float = 0.0,
     ):
         super().__init__()
-        if discriminator_lambda > 0 and mmd_lambda > 0:
-            raise ValueError(
-                "discriminator_lambda and mmd_lambda cannot both be > 0. "
-                "Use discriminator_lambda for supervised adversarial domain forgetting "
-                "or mmd_lambda for unsupervised MMD alignment, not both."
-            )
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
-        self.mmd_lambda = mmd_lambda
         self.use_observed_lib_size = use_observed_lib_size
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
@@ -351,53 +343,14 @@ class CellinaModule(BaseModuleClass):
             # Return zeros when classifier is disabled
             return torch.zeros_like(reconst_loss_shape), 0.0
 
-    def _compute_mmd(self, z: torch.Tensor, s: torch.Tensor, sigma: float | None = None) -> torch.Tensor:
-        """
-        Compute an RBF MMD statistic between two samples z and s. Returns a scalar tensor.
-        """
-        # Ensure shapes (B, D)
-        if z.ndim > 2:
-            z = z.view(z.shape[0], -1)
-        if s.ndim > 2:
-            s = s.view(s.shape[0], -1)
-
-        # Pairwise squared distances
-        def pdist_sq(x):
-            xx = (x * x).sum(dim=1, keepdim=True)
-            return xx + xx.t() - 2.0 * (x @ x.t())
-
-        zz = pdist_sq(z)
-        ss = pdist_sq(s)
-        zs = torch.cdist(z, s, p=2) ** 2
-
-        if sigma is None:
-            # median heuristic on combined distances
-            with torch.no_grad():
-                median = torch.cat([zz.flatten(), ss.flatten(), zs.flatten()]).median()
-                sigma = float(torch.sqrt(median + 1e-8)) if median > 0 else 1.0
-
-        def rbf_from_sqdist(d2, sigma):
-            return torch.exp(-d2 / (2 * (sigma ** 2)))
-
-        Kzz = rbf_from_sqdist(zz, sigma)
-        Kss = rbf_from_sqdist(ss, sigma)
-        Kzs = rbf_from_sqdist(zs, sigma)
-
-        m = z.shape[0]
-        # unbiased estimate
-        mmd = Kzz.sum() / (m * m) + Kss.sum() / (m * m) - 2.0 * Kzs.sum() / (m * m)
-        return mmd
-
     def loss(
         self,
         tensors,
         inference_outputs,
         generative_outputs,
         kl_weight: float = 1.0,
-        discriminator_lambda: float = 0.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
-        mmd_scale: float = 1.0,
     ):
         """
         Loss function.
@@ -412,9 +365,6 @@ class CellinaModule(BaseModuleClass):
             Outputs from generative method
         kl_weight
             Weight for KL divergence terms (warmup)
-        discriminator_lambda
-            Weight multiplier for discriminator loss. Used to scale discriminator contribution.
-            Set to 0 to exclude discriminator from loss computation.
         classifier_scale
             EMA-based normalization scale for classifier loss (default 1.0)
         discriminator_scale
@@ -495,13 +445,6 @@ class CellinaModule(BaseModuleClass):
         )
         fool_loss_scaled = fool_loss * discriminator_scale * self.discriminator_lambda
 
-        # Add MMD regularization if requested
-        mmd_loss_raw = torch.tensor(0.0)
-        mmd_loss_scaled = torch.tensor(0.0)
-        if self.mmd_lambda > 0:
-            mmd_loss_raw = -self._compute_mmd(z, s)
-            mmd_loss_scaled = mmd_loss_raw * (self.mmd_lambda * mmd_scale)
-
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
@@ -521,8 +464,6 @@ class CellinaModule(BaseModuleClass):
             'fool_loss_raw': fool_loss.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
-            'mmd_loss_raw': mmd_loss_raw.mean(),
-            'mmd_loss': mmd_loss_scaled.mean(),
         }
 
         return LossOutput(
