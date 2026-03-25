@@ -5,7 +5,7 @@ requires = ["hatchling"]
 
 [project]
 name = "cellina"
-version = "0.5.0"
+version = "0.6.0"
 description = "Cellina: Dual-encoder VAE for spatial transcriptomics with adversarial domain forgetting"
 readme = "README.md"
 requires-python = ">=3.10"

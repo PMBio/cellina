@@ -444,10 +444,9 @@ def test_normalize_losses_true(adata_with_spatial):
     # Check warmup completed (should be done after epoch 0)
     assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
 
-    # Check EMA values were initialized (should be positive)
-    assert training_plan._ema["vae"] > 0, "EMA for vae loss should be positive"
-    assert training_plan._ema["clf"] >= 0, "EMA for clf loss should be non-negative"
-    assert training_plan._ema["fool"] >= 0, "EMA for fool loss should be non-negative"
+    # Check fixed scales were computed (should be positive after warmup)
+    assert training_plan._scale_clf  > 0, "Fixed scale for clf loss should be positive"
+    assert training_plan._scale_fool > 0, "Fixed scale for fool loss should be positive"
 
     # Check normalize_losses flag is set correctly
     assert training_plan._normalize_losses == True
@@ -461,12 +460,9 @@ def test_normalize_losses_true(adata_with_spatial):
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
 
-    # --- Scale correctness: scaled == raw * (EMA_vae / EMA_x) * lambda ---
-    ema_vae  = training_plan._ema["vae"]
-    ema_clf  = training_plan._ema["clf"]
-    ema_fool = training_plan._ema["fool"]
-    expected_scale_clf  = ema_vae / (ema_clf  + 1e-8)
-    expected_scale_fool = ema_vae / (ema_fool + 1e-8)
+    # --- Scale correctness: scaled == raw * fixed_scale * lambda ---
+    expected_scale_clf  = training_plan._scale_clf
+    expected_scale_fool = training_plan._scale_fool
 
     model.module.eval()
     model.module.to("cpu")

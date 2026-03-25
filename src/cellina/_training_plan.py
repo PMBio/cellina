@@ -41,17 +41,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Always use manual optimization for two-step training
         self.automatic_optimization = False
 
-        # Warmup collection: collect first-epoch losses to initialize EMA
+        # Warmup collection: collect first-epoch losses to compute fixed normalization scales
         self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
         self._warmup_done = False
         self._normalize_losses = normalize_losses
-
-        # EMA tracking for loss normalization
-        self._ema = {"vae": 1.0, "clf": 1.0, "fool": 1.0}
-        self._ema_alpha = 0.01
-
-    def _ema_update(self, old, new):
-        return old * (1 - self._ema_alpha) + new * self._ema_alpha
+        self._scale_clf  = 1.0
+        self._scale_fool = 1.0
 
     def training_step(self, batch, batch_idx):
         opts = self.optimizers()
@@ -78,11 +73,11 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
 
                 return {"loss": scvi_loss.loss}
 
-        # ---------- END OF WARMUP → INITIALIZE EMA ----------
+        # ---------- END OF WARMUP → COMPUTE FIXED SCALES ----------
         if self._normalize_losses and (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
-            self._ema["vae"] = np.mean(self._warmup_stats["scvi"])
-            self._ema["clf"] = np.mean(self._warmup_stats["clf"])
-            self._ema["fool"] = np.mean(self._warmup_stats["fool"])
+            vae_mean = np.mean(self._warmup_stats["scvi"])
+            self._scale_clf  = vae_mean / (np.mean(self._warmup_stats["clf"])  + 1e-8)
+            self._scale_fool = vae_mean / (np.mean(self._warmup_stats["fool"]) + 1e-8)
             self._warmup_done = True
             self._warmup_stats.clear()  # Free memory
 
@@ -116,11 +111,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         for p in self.module.domain_discriminator.parameters():
             p.requires_grad = False
 
-        # EMA-based scales for clf/fool
-        scale_clf = scale_fool = 1.0
-        if self._normalize_losses:
-            scale_clf  = self._ema["vae"] / (self._ema["clf"]  + 1e-8)
-            scale_fool = self._ema["vae"] / (self._ema["fool"] + 1e-8)
+        # Fixed normalization scales (computed once from epoch-0 warmup stats)
+        scale_clf  = self._scale_clf  if self._normalize_losses else 1.0
+        scale_fool = self._scale_fool if self._normalize_losses else 1.0
 
         # Forward pass
         inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -134,9 +127,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
 
         # Extract losses (tensors for gradient flow)
         vae_loss = scvi_loss.loss
-        clf_loss_raw = scvi_loss.extra_metrics["classifier_loss_raw"]
-        clf_loss = scvi_loss.extra_metrics["classifier_loss"]
-        fool_loss_raw = scvi_loss.extra_metrics["fool_loss_raw"]
+        clf_loss  = scvi_loss.extra_metrics["classifier_loss"]
         fool_loss = scvi_loss.extra_metrics["fool_loss"]
 
         # Total training loss (with gradients)
@@ -150,19 +141,13 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         for p in self.module.domain_discriminator.parameters():
             p.requires_grad = True
 
-        # ------------------ UPDATE EMA WITH RAW LOSSES ------------------
-        # Track raw losses to compute normalization for next iteration
-        self._ema["vae"] = self._ema_update(self._ema["vae"], float(vae_loss.item()))
-        self._ema["clf"] = self._ema_update(self._ema["clf"], abs(float(clf_loss_raw.item())))
-        self._ema["fool"] = self._ema_update(self._ema["fool"], abs(float(fool_loss_raw.item())))
-
         # ------------------ LOGGING ------------------
         # Log total loss (sum of vae + scaled classifier + scaled fool)
         self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
         
         # Log normalization scales (not in extra_metrics)
         if self._normalize_losses:
-            self.log("scale_classifier_train", scale_clf, on_step=False, on_epoch=True)
+            self.log("scale_clf_train", scale_clf, on_step=False, on_epoch=True)
             self.log("scale_fool_train", scale_fool, on_step=False, on_epoch=True)
 
         # Log all metrics from extra_metrics (raw/scaled losses, accuracies, reconstruction, KL)
@@ -175,10 +160,8 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         Validation step with discriminator metrics.
         Uses training EMA scales for consistent evaluation.
         """
-        scale_clf = scale_fool = 1.0
-        if self._normalize_losses and self._warmup_done:
-            scale_clf  = self._ema["vae"] / (self._ema["clf"]  + 1e-8)
-            scale_fool = self._ema["vae"] / (self._ema["fool"] + 1e-8)
+        scale_clf  = self._scale_clf  if self._normalize_losses else 1.0
+        scale_fool = self._scale_fool if self._normalize_losses else 1.0
 
         with torch.no_grad():
             inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -256,9 +239,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             return opts
 
     def on_train_epoch_end(self):
-        """Log EMA values at end of warmup epoch."""
-        if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
-            # Log initial EMA values for transparency
-            self.log("ema_vae_init", self._ema["vae"], on_step=False, on_epoch=True)
-            self.log("ema_clf_init", self._ema["clf"], on_step=False, on_epoch=True)
-            self.log("ema_fool_init", self._ema["fool"], on_step=False, on_epoch=True)
+        """Log fixed normalization scales at end of first training epoch."""
+        if self._warmup_done and getattr(self, "current_epoch", 0) == 1:
+            self.log("scale_clf_fixed", self._scale_clf, on_step=False, on_epoch=True)
+            self.log("scale_fool_fixed", self._scale_fool, on_step=False, on_epoch=True)
