@@ -5,10 +5,10 @@ requires = ["hatchling"]
 
 [project]
 name = "cellina"
-version = "0.2.0"
+version = "0.3.0"
 description = "Cellina: Dual-encoder VAE for spatial transcriptomics with adversarial domain forgetting"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},

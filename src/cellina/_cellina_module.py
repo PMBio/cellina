@@ -84,20 +84,18 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
-        supervised: bool = True,
         mmd_lambda: float = 0.0,
     ):
         super().__init__()
+        if discriminator_lambda > 0 and mmd_lambda > 0:
+            raise ValueError(
+                "discriminator_lambda and mmd_lambda cannot both be > 0. "
+                "Use discriminator_lambda for supervised adversarial domain forgetting "
+                "or mmd_lambda for unsupervised MMD alignment, not both."
+            )
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
-        # If the module is constructed in unsupervised mode, force classifier/discriminator weights to 0
-        self.supervised = supervised
-        if self.supervised:
-            mmd_lambda = 0.0
-        else:
-            classifier_lambda = 0.0
-            discriminator_lambda = 0.0
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
         self.mmd_lambda = mmd_lambda
@@ -170,30 +168,32 @@ class CellinaModule(BaseModuleClass):
 
         # Cell type classifier
         self.classifier: Optional[Classifier] = None
-        classifier_kwargs = dict(classifier_kwargs or {})
-        self.classifier = Classifier(
-            n_input=n_latent, 
-            n_labels=n_labels, 
-            logits=True, 
-            **classifier_kwargs
-        )
+        if classifier_lambda > 0:
+            classifier_kwargs = dict(classifier_kwargs or {})
+            self.classifier = Classifier(
+                n_input=n_latent,
+                n_labels=n_labels,
+                logits=True,
+                **classifier_kwargs
+            )
 
         # Domain discriminator
         self.domain_discriminator: Optional[Classifier] = None
-        if n_domains is None or n_domains < 2:
-            raise ValueError(
-                "discriminator_lambda > 0 requires n_domains >= 2. "
-                "Please provide domains_key in setup_anndata()."
+        if discriminator_lambda > 0:
+            if n_domains is None or n_domains < 2:
+                raise ValueError(
+                    "discriminator_lambda > 0 requires n_domains >= 2. "
+                    "Please provide domains_key in setup_anndata()."
+                )
+            discriminator_kwargs = dict(discriminator_kwargs or {})
+            self.domain_discriminator = Classifier(
+                n_input=n_latent,
+                n_labels=n_domains,
+                n_hidden=discriminator_kwargs.pop("n_hidden", 32),
+                n_layers=discriminator_kwargs.pop("n_layers", 2),
+                logits=True,
+                **discriminator_kwargs
             )
-        discriminator_kwargs = dict(discriminator_kwargs or {})
-        self.domain_discriminator = Classifier(
-            n_input=n_latent,
-            n_labels=n_domains,
-            n_hidden=discriminator_kwargs.pop("n_hidden", 32),
-            n_layers=discriminator_kwargs.pop("n_layers", 2),
-            logits=True,
-            **discriminator_kwargs
-        )
 
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args"""
@@ -498,7 +498,7 @@ class CellinaModule(BaseModuleClass):
         # Add MMD regularization if requested
         mmd_loss_raw = torch.tensor(0.0)
         mmd_loss_scaled = torch.tensor(0.0)
-        if not self.supervised:
+        if self.mmd_lambda > 0:
             mmd_loss_raw = -self._compute_mmd(z, s)
             mmd_loss_scaled = mmd_loss_raw * (self.mmd_lambda * mmd_scale)
 

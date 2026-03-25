@@ -574,6 +574,31 @@ def test_make_neighbor_perturbation(adata_with_spatial):
     )
 
 
+def test_mmd_loss_active(adata_with_spatial):
+    """MMD loss is computed and non-zero when mmd_lambda > 0."""
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    model = CellinaModel(adata_with_spatial, n_latent=5, mmd_lambda=1.0)
+
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+
+    inference_inputs = model.module._get_inference_input(batch)
+    inference_outputs = model.module.inference(**inference_inputs)
+    generative_inputs = model.module._get_generative_input(batch, inference_outputs)
+    generative_outputs = model.module.generative(**generative_inputs)
+    loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
+
+    assert loss_output.extra_metrics["mmd_loss_raw"] != 0
+    assert loss_output.extra_metrics["mmd_loss"] != 0
+
+
+def test_discriminator_mmd_mutually_exclusive(adata_with_spatial):
+    """Raises ValueError when both discriminator_lambda and mmd_lambda are > 0."""
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+    with pytest.raises(ValueError):
+        CellinaModel(adata_with_spatial, discriminator_lambda=1.0, mmd_lambda=1.0)
+
+
 def test_make_neighbor_perturbation_unknown(adata_with_spatial):
     """Unknown cell-type key in perturbations raises ValueError."""
     import pandas as pd

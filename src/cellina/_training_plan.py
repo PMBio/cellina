@@ -1,7 +1,6 @@
 """Training plan for Cellina with optional adversarial domain discrimination."""
 
 import logging
-from typing import Literal
 import numpy as np
 
 import torch
@@ -21,16 +20,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
     1. Train domain discriminator to predict domains (frozen VAE)
     2. Train VAE to fool discriminator (frozen discriminator)
     
-    This training plan should only be used when module.discriminator_lambda > 0.
-    
+    This training plan should only be used when module.discriminator_lambda > 0 or module.mmd_lambda > 0.
+
     Parameters
     ----------
     module
-        CellinaModule instance with discriminator_lambda > 0
-    scale_adversarial_loss
-        How to scale adversarial loss over training:
-        - "auto": Use inverse of KL warmup (1 - kl_weight)
-        - float: Fixed weight
+        CellinaModule instance with discriminator_lambda > 0 or mmd_lambda > 0
     **kwargs
         Other arguments passed to base TrainingPlan
     """
@@ -38,14 +33,11 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
     def __init__(
         self,
         module,
-        scale_adversarial_loss: float | Literal["auto"] = "auto",
         normalize_losses: bool = False,
         **kwargs,
     ):
         super().__init__(module=module, **kwargs)
-        
-        self.scale_adversarial_loss = scale_adversarial_loss
-        
+
         # Always use manual optimization for two-step training
         self.automatic_optimization = False
 
@@ -70,7 +62,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         kappa = self.module.discriminator_lambda
 
         # ---------------------- WARMUP COLLECTION ----------------------
-        if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
+        if self._normalize_losses and (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
             with torch.no_grad():
                 inference_outputs, generative_outputs, scvi_loss = self.forward(
                     batch,
@@ -293,14 +285,6 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             return opts, [config_vae["lr_scheduler"]]
         else:
             return opts
-
-    def _get_kappa(self) -> float:
-        """Get current adversarial weight (kappa)."""
-        if self.scale_adversarial_loss == "auto":
-            # Inverse of KL warmup: strong at end of training
-            return (1 - self.kl_weight) * self.module.discriminator_lambda
-        else:
-            return self.scale_adversarial_loss * self.module.discriminator_lambda
 
     def on_train_epoch_end(self):
         """Log EMA values at end of warmup epoch."""

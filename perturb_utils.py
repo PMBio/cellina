@@ -173,6 +173,31 @@ def _mixing_index(
     return n_correctly_mixed / n_pred
 
 
+def _standard_edistance(X: np.ndarray, Y: np.ndarray) -> float:
+    """
+    Standard energy distance between two sample sets.
+
+    E(X, Y) = 2 * E[||x - y||] - E[||x - x'||] - E[||y - y'||]
+
+    A value of 0 means the distributions are identical; larger values indicate
+    greater distributional discrepancy.
+
+    Parameters
+    ----------
+    X, Y
+        2-D arrays of shape (n_cells, n_features).
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    Xt = torch.tensor(X, dtype=torch.float32, device=device)
+    Yt = torch.tensor(Y, dtype=torch.float32, device=device)
+
+    mean_dist_xy = torch.cdist(Xt, Yt, p=2).mean()
+    mean_dist_xx = torch.cdist(Xt, Xt, p=2).mean()
+    mean_dist_yy = torch.cdist(Yt, Yt, p=2).mean()
+
+    return (2 * mean_dist_xy - mean_dist_xx - mean_dist_yy).item()
+
+
 # ---------------------------------------------------------------------------
 # Core metrics function
 # ---------------------------------------------------------------------------
@@ -213,7 +238,7 @@ def compute_cf_logfc(
     -------
     dict with keys:
         pearson_r, pearson_p, spearman_r, spearman_p, precision, mixing_index,
-        real_logfc, pred_logfc, top_n_mask, gene_names
+        edistance, real_logfc, pred_logfc, top_n_mask, gene_names
     """
     ref_mean = np.log1p(ref_expr.mean(0))
     crc_mean = np.log1p(obs_expr.mean(0))
@@ -252,6 +277,8 @@ def compute_cf_logfc(
         random_state=random_state,
     )
 
+    edist = _standard_edistance(pert_expr, obs_expr)
+
     return dict(
         pearson_r=pearson_r,
         pearson_p=pearson_p,
@@ -259,6 +286,7 @@ def compute_cf_logfc(
         spearman_p=spearman_p,
         precision=precision,
         mixing_index=mix_idx,
+        edistance=edist,
         real_logfc=real_logfc,
         pred_logfc=pred_logfc,
         top_n_mask=top_n_mask,
