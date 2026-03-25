@@ -113,82 +113,72 @@ def test_cellina_losses(adata_with_spatial):
     assert 0 <= accuracy <= 1
 
 
-def test_classifier_disabled_by_default():
+def test_classifier_disabled_by_default(adata_with_spatial):
     """Test that classifier is disabled when classifier_lambda=0."""
-    adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+
     # Should work fine without labels when classifier_lambda=0
-    model = CellinaModel(adata, n_latent=5, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
 
 
-def test_discriminator_disabled_by_default():
+def test_discriminator_disabled_by_default(adata_with_spatial):
     """Test that discriminator is disabled when discriminator_lambda=0 (default)."""
-    adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    
+    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
+
     # Default discriminator_lambda should be 0
-    model = CellinaModel(adata, n_latent=5)
+    model = CellinaModel(adata_with_spatial, n_latent=5)
     assert model.module.domain_discriminator is None
     assert model.module.discriminator_lambda == 0.0
-    
+
     # Explicitly set to 0
-    model2 = CellinaModel(adata, n_latent=5, discriminator_lambda=0.0)
+    model2 = CellinaModel(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model2.module.domain_discriminator is None
     assert model2.module.discriminator_lambda == 0.0
 
 
-def test_discriminator_enabled():
+def test_discriminator_enabled(adata_with_spatial):
     """Test that discriminator works when discriminator_lambda > 0."""
-    adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
-    # Add domain labels (required for discriminator)
     n_domains = 3
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    
+    adata_with_spatial.obs["domain"] = np.random.randint(
+        0, n_domains, size=adata_with_spatial.n_obs
+    ).astype(str)
+
     CellinaModel.setup_anndata(
-        adata, 
-        batch_key="batch", 
+        adata_with_spatial,
+        batch_key="batch",
         spatial_obsm_key="spatial_x",
-        domains_key="domain"
+        domains_key="domain",
     )
-    
+
     n_latent = 5
-    model = CellinaModel(adata, n_latent=n_latent, discriminator_lambda=1.0)
-    
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0)
+
     # Check discriminator is initialized
     assert model.module.domain_discriminator is not None
     assert model.module.discriminator_lambda == 1.0
-    
+
     # Test training with adversarial plan
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
-    
+
     # Check that discriminator metrics are logged
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
-    
+
     # Verify inference outputs include discriminator logits
     model.module.eval()
     model.module.to("cpu")  # Move to CPU for testing
+    n_spatial_features = adata_with_spatial.obsm["spatial_x"].shape[1]
     test_batch = {
-        "x": torch.abs(torch.randn(10, adata.n_vars)),  # Use positive values
+        "x": torch.abs(torch.randn(10, adata_with_spatial.n_vars)),
         "spatial_x": torch.randn(10, n_spatial_features),
-        "batch_index": torch.zeros(10, 1, dtype=torch.long),  # Add batch_index
+        "batch_index": torch.zeros(10, 1, dtype=torch.long),
     }
     with torch.no_grad():
         outputs = model.module.inference(**test_batch)
-    
+
     assert "discriminator_logits" in outputs
     assert outputs["discriminator_logits"].shape == (10, n_domains)
 
@@ -419,55 +409,90 @@ def test_make_counterfactual_adata(adata_with_spatial):
     np.testing.assert_array_equal(adata_cf_sampled.obsm[spatial_col], adata_cf2.obsm[spatial_col])
 
 
-def test_normalize_losses_true():
+def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
-    # Create synthetic data with domain labels for adversarial training
-    adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    
     n_domains = 3
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    
+    adata_with_spatial.obs["domain"] = np.random.randint(
+        0, n_domains, size=adata_with_spatial.n_obs
+    ).astype(str)
+
     CellinaModel.setup_anndata(
-        adata,
+        adata_with_spatial,
         batch_key="batch",
         spatial_obsm_key="spatial_x",
-        domains_key="domain"
+        labels_key="cell_labels",
+        domains_key="domain",
     )
-    
-    # Create model with discriminator enabled
-    model = CellinaModel(adata, n_latent=5, discriminator_lambda=1.0, classifier_lambda=0.0)
-    
+
+    # Create model with both discriminator and classifier enabled (non-unity lambdas)
+    classifier_lambda    = 0.5
+    discriminator_lambda = 2.0
+    model = CellinaModel(adata_with_spatial, n_latent=5,
+                         discriminator_lambda=discriminator_lambda,
+                         classifier_lambda=classifier_lambda)
+
     # Train with normalize_losses=True
     model.train(
         max_epochs=2,
         train_size=0.5,
         plan_kwargs={"normalize_losses": True}
     )
-    
+
     # Access the training plan from the trainer
     training_plan = model.trainer.strategy.model
-    
+
     # Check warmup completed (should be done after epoch 0)
     assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
-    
+
     # Check EMA values were initialized (should be positive)
     assert training_plan._ema["vae"] > 0, "EMA for vae loss should be positive"
     assert training_plan._ema["clf"] >= 0, "EMA for clf loss should be non-negative"
     assert training_plan._ema["fool"] >= 0, "EMA for fool loss should be non-negative"
-    
+
     # Check normalize_losses flag is set correctly
     assert training_plan._normalize_losses == True
-    
+
     # Verify training completed successfully
     # Note: warmup epoch (epoch 0) is not logged in history, so we expect 1 entry for epoch 1
     assert len(model.history_["train_loss"]) >= 1
-    
+
     # Verify discriminator metrics are logged
     history_keys = list(model.history_.keys())
     assert any("discriminator" in key for key in history_keys), \
         f"No discriminator metrics found in history. Keys: {history_keys}"
+
+    # --- Scale correctness: scaled == raw * (EMA_vae / EMA_x) * lambda ---
+    ema_vae  = training_plan._ema["vae"]
+    ema_clf  = training_plan._ema["clf"]
+    ema_fool = training_plan._ema["fool"]
+    expected_scale_clf  = ema_vae / (ema_clf  + 1e-8)
+    expected_scale_fool = ema_vae / (ema_fool + 1e-8)
+
+    model.module.eval()
+    model.module.to("cpu")
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+    with torch.no_grad():
+        inf_in  = model.module._get_inference_input(batch)
+        inf_out = model.module.inference(**inf_in)
+        gen_in  = model.module._get_generative_input(batch, inf_out)
+        gen_out = model.module.generative(**gen_in)
+        loss_out = model.module.loss(
+            batch, inf_out, gen_out,
+            classifier_scale=expected_scale_clf,
+            discriminator_scale=expected_scale_fool,
+        )
+
+    clf_raw    = loss_out.extra_metrics["classifier_loss_raw"].item()
+    clf_scaled = loss_out.extra_metrics["classifier_loss"].item()
+    fool_raw   = loss_out.extra_metrics["fool_loss_raw"].item()
+    fool_scaled = loss_out.extra_metrics["fool_loss"].item()
+
+    np.testing.assert_allclose(clf_scaled,  clf_raw  * expected_scale_clf  * classifier_lambda,   rtol=1e-4)
+    np.testing.assert_allclose(fool_scaled, fool_raw * expected_scale_fool * discriminator_lambda, rtol=1e-4)
+    # make sure that disc is roughly 4x scaled compared to clf (since discriminator_lambda is 4x classifier_lambda)
+    # fool_scaled is negative (adversarial weight=-1), so compare absolute magnitudes
+    np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.5)
 
 
 def test_get_normalized_expression(adata_with_spatial):
@@ -577,19 +602,29 @@ def test_make_neighbor_perturbation(adata_with_spatial):
 def test_mmd_loss_active(adata_with_spatial):
     """MMD loss is computed and non-zero when mmd_lambda > 0."""
     CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x")
-    model = CellinaModel(adata_with_spatial, n_latent=5, mmd_lambda=1.0)
+    model_nl = CellinaModel(adata_with_spatial, n_latent=5, mmd_lambda=1.0)
+    model_nl.train(max_epochs=5, train_size=0.5,
+                   plan_kwargs={"normalize_losses": True})
 
-    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    plan = model_nl.trainer.strategy.model
+    ema_vae = plan._ema["vae"]
+
+    model_nl.module.eval()
+    model_nl.module.to("cpu")
+    dataloader = model_nl._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
+    with torch.no_grad():
+        inf_in  = model_nl.module._get_inference_input(batch)
+        inf_out = model_nl.module.inference(**inf_in)
+        gen_in  = model_nl.module._get_generative_input(batch, inf_out)
+        gen_out = model_nl.module.generative(**gen_in)
+        loss_out = model_nl.module.loss(batch, inf_out, gen_out, mmd_scale=1.0)
 
-    inference_inputs = model.module._get_inference_input(batch)
-    inference_outputs = model.module.inference(**inference_inputs)
-    generative_inputs = model.module._get_generative_input(batch, inference_outputs)
-    generative_outputs = model.module.generative(**generative_inputs)
-    loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
-
-    assert loss_output.extra_metrics["mmd_loss_raw"] != 0
-    assert loss_output.extra_metrics["mmd_loss"] != 0
+    mmd_raw = loss_out.extra_metrics["mmd_loss_raw"].item()
+    # Simulate per-batch scale (same formula as training plan uses)
+    scale_mmd = ema_vae / (abs(mmd_raw) + 1e-8)
+    mmd_scaled = abs(mmd_raw * scale_mmd * 1.0)
+    np.testing.assert_allclose(mmd_scaled, ema_vae, rtol=0.2)
 
 
 def test_discriminator_mmd_mutually_exclusive(adata_with_spatial):

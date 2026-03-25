@@ -481,7 +481,7 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
-        classifier_loss_scaled = classifier_loss * classifier_scale * np.abs(self.classifier_lambda)
+        classifier_loss_scaled = classifier_loss * classifier_scale * self.classifier_lambda
 
         # Domain discriminator (fool loss - always negative for adversarial training)
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
@@ -493,7 +493,7 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
-        fool_loss_scaled = fool_loss * discriminator_scale * np.abs(discriminator_lambda)
+        fool_loss_scaled = fool_loss * discriminator_scale * self.discriminator_lambda
 
         # Add MMD regularization if requested
         mmd_loss_raw = torch.tensor(0.0)
