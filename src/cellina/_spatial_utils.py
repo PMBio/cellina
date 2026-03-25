@@ -54,8 +54,6 @@ def _spatial_neighbors_core(adata: AnnData,
     # NOTE: dist gets converted to a connectivity (proximity) matrix
     if kernel == 'gaussian':
         dist.data = _gaussian(dist.data, bandwidth)
-    elif kernel == 'misty_rbf':
-        dist.data = _misty_rbf(dist.data, bandwidth)
     elif kernel == 'exponential':
         dist.data = _exponential(dist.data, bandwidth)
     elif kernel == 'linear':
@@ -110,9 +108,9 @@ def spatial_neighbors(adata: AnnData,
     kernel
         Kernel function used to generate connectivity weights.
         It controls the shape of the connectivity weights.
-        The following options are available: ['gaussian', 'exponential', 'linear', 'misty_rbf']
+        The following options are available: ['gaussian', 'exponential', 'linear']
     set_diag
-        Logical, sets connectivity diagonal to 0 if `False`. Default is `True`.
+        Logical, sets connectivity diagonal to 0 if `False`. Default is `False`.
     zoi
         Zone of indifference. Values below this cutoff will be set to `np.inf`.
     standardize
@@ -146,7 +144,7 @@ def spatial_neighbors(adata: AnnData,
     if cutoff is None:
         raise ValueError("`cutoff` must be provided!")
     assert spatial_key in adata.obsm
-    families = ['gaussian', 'exponential', 'linear', 'misty_rbf']
+    families = ['gaussian', 'exponential', 'linear']
     if kernel not in families:
         raise AssertionError(f"{kernel} must be a member of {families}")
     if bandwidth is None:
@@ -204,6 +202,7 @@ def compute_spatial_features(
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
+    Expects normalized counts in ``adata.X`` and a spatial connectivity matrix in ``adata.obsp[connectivity_key]``.
 
     Parameters
     ----------
@@ -231,6 +230,7 @@ def compute_spatial_features(
     C = csr_matrix(adata.obsp[connectivity_key])
     var_names = list(adata.var_names)
     var_idx = {g: i for i, g in enumerate(var_names)}
+    # TODO: add a warning if not normalized and handle this better...
     X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
 
     if perturbations:

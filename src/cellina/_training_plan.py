@@ -156,10 +156,6 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
-        """
-        Validation step with discriminator metrics.
-        Uses training EMA scales for consistent evaluation.
-        """
         scale_clf  = self._scale_clf  if self._normalize_losses else 1.0
         scale_fool = self._scale_fool if self._normalize_losses else 1.0
 
@@ -191,12 +187,6 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         return scvi_loss.loss
 
     def configure_optimizers(self):
-        """
-        Configure 2 optimizers for adversarial training:
-        - opt1: VAE parameters (encoders, decoder, classifiers)
-        - opt2: Domain discriminator parameters only
-        """
-        # VAE optimizer (all parameters except discriminator)
         params_vae = [
             p for name, p in self.module.named_parameters()
             if p.requires_grad and "domain_discriminator" not in name

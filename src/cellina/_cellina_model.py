@@ -30,7 +30,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
     This model extends scVI with a spatial encoder that processes spatial features
     alongside the standard count encoder. The two latent representations (z from counts,
-    s from spatial+z) are summed element-wise (shifted = z + s) and decoded together 
+    s from spatial+z) are concatenated (shifted = concat(z, s)) and decoded together
     to reconstruct the count data.
 
     Parameters
@@ -55,7 +55,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     >>> CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
     >>> model = CellinaModel(adata, n_latent=10)
     >>> model.train()
-    >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = z + s
+    >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = concat(z, s)
     >>> adata.obsm["X_cellina_z"] = model.get_latent_representation(latent_key='z')
     >>> adata.obsm["X_cellina_s"] = model.get_latent_representation(latent_key='s')
     """
@@ -129,7 +129,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 self.adata if adata is None else adata,
                 indices,
                 neighbour_indices,
-                spatial_column=SPATIAL_X_KEY,
+                spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
                 sample=False,
                 random_state=seed,
             )
@@ -379,12 +379,12 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Minibatch size for data loading into model.
         latent_key
             Which latent representation to return. Options: 'shifted', 'z', 's'.
-            Default: 'shifted' (returns z + s, which is what the decoder uses).
+            Default: 'shifted' (returns concat(z, s), which is what the decoder uses).
 
         Returns
         -------
         Latent representation for each cell as numpy array.
-        - If latent_key is 'shifted': z + s (what goes into the decoder)
+        - If latent_key is 'shifted': concat(z, s) (what goes into the decoder)
         - If latent_key is 'z': only z encoder output
         - If latent_key is 's': only s encoder output
         """
@@ -407,9 +407,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             elif latent_key == 's':
                 lat = outputs["qsm"] if give_mean else outputs["s"]
             else:  # shifted
-                if give_mean: # TODO: this should not work like this, potentially inconsistent
-                    # For mean, sum the means
-                    lat = outputs["qzm"] + outputs["qsm"]
+                if give_mean:
+                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
                 else:
                     lat = outputs["shifted"]
 
