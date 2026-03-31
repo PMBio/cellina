@@ -402,7 +402,6 @@ class CellinaModule(BaseModuleClass):
                 logits = classifier(inference_outputs["z"])
 
             loss = F.cross_entropy(logits, labels, reduction="none")
-            loss = weight * loss
 
             predictions = torch.argmax(logits, dim=1)
             accuracy = (predictions == labels).float().mean().item()
@@ -488,7 +487,7 @@ class CellinaModule(BaseModuleClass):
         weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
 
         # Cell type classifier
-        classifier_loss, classifier_accuracy = self._compute_classifier_metrics(
+        classifier_loss_raw, classifier_accuracy = self._compute_classifier_metrics(
             classifier=self.classifier,
             weight=self.classifier_lambda,
             inference_outputs=inference_outputs,
@@ -496,10 +495,10 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
-        classifier_loss_scaled = classifier_loss * classifier_scale
+        classifier_loss_scaled = classifier_loss_raw * classifier_scale * self.classifier_lambda
 
         # Domain discriminator (fool loss)
-        fool_loss, discriminator_accuracy = self._compute_classifier_metrics(
+        fool_ce, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
             weight=discriminator_lambda,
             inference_outputs=inference_outputs,
@@ -507,7 +506,8 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
-        fool_loss_scaled = fool_loss * discriminator_scale
+        fool_loss_raw = -fool_ce  # negate for adversarial direction (maximize disc CE)
+        fool_loss_scaled = fool_loss_raw * discriminator_scale * discriminator_lambda
 
         # Edge prediction loss
         edge_loss = torch.tensor(0.0, device=reconst_loss.device)
@@ -545,10 +545,10 @@ class CellinaModule(BaseModuleClass):
 
         extra_metrics = {
             'vae_loss': vae_loss,
-            'classifier_loss_raw': classifier_loss.mean(),
+            'classifier_loss_raw': classifier_loss_raw.mean(),
             'classifier_loss': classifier_loss_scaled.mean(),
             'classifier_accuracy': classifier_accuracy,
-            'fool_loss_raw': fool_loss.mean(),
+            'fool_loss_raw': fool_loss_raw.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
             'edge_prediction_loss': edge_loss,

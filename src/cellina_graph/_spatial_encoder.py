@@ -202,7 +202,7 @@ class GCNLayers(nn.Module):
             x = gcn_layer(x, adj)
             if self.cov_layers[i] is not None and cov_list:
                 cov = torch.cat(cov_list, dim=-1)
-                x = x + self.cov_layers[i](cov)
+                x = x + self.cov_layers[i](cov.float())
             x = self.activation_fn(x)
             if self.dropout is not None:
                 x = self.dropout(x)

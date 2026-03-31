@@ -358,43 +358,6 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
     assert inference_outputs["s"].shape[1] == n_latent
 
 
-def test_normalize_losses_true():
-    """Test normalize_losses parameter in adversarial training plan."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
-
-    n_domains = 3
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-
-    CellinaModel.setup_anndata(
-        adata,
-        batch_key="batch",
-        domains_key="domain",
-        spatial_connectivities_key="spatial_connectivities",
-    )
-
-    model = CellinaModel(adata, n_latent=5, discriminator_lambda=1.0, classifier_lambda=0.0)
-
-    model.train(
-        max_epochs=2,
-        train_size=0.5,
-        plan_kwargs={"normalize_losses": True}
-    )
-
-    training_plan = model.trainer.strategy.model
-
-    assert training_plan._warmup_done == True
-    assert training_plan._ema["vae"] > 0
-    assert training_plan._ema["clf"] >= 0
-    assert training_plan._ema["fool"] >= 0
-    assert training_plan._normalize_losses == True
-
-    assert len(model.history_["train_loss"]) >= 1
-
-    history_keys = list(model.history_.keys())
-    assert any("discriminator" in key for key in history_keys), \
-        f"No discriminator metrics found in history. Keys: {history_keys}"
-
 
 def test_edge_prediction_loss():
     """Test edge prediction functionality when link_prediction_weight > 0."""
@@ -467,3 +430,90 @@ def test_edge_prediction_disabled_by_default():
 
     model2 = CellinaModel(adata, n_latent=5, link_prediction_weight=0.0)
     assert model2.module.link_prediction_weight == 0.0
+
+
+def test_normalize_losses_true(adata_with_spatial):
+    """Test normalize_losses parameter in adversarial training plan."""
+    n_domains = 3
+    adata_with_spatial.obs["domain"] = np.random.randint(
+        0, n_domains, size=adata_with_spatial.n_obs
+    ).astype(str)
+
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+
+    # Create model with both discriminator and classifier enabled (non-unity lambdas)
+    classifier_lambda    = 0.5
+    discriminator_lambda = 2.0
+    model = CellinaModel(adata_with_spatial, n_latent=5,
+                         discriminator_lambda=discriminator_lambda,
+                         classifier_lambda=classifier_lambda)
+
+    # Train with normalize_losses=True
+    model.train(
+        max_epochs=2,
+        train_size=0.5,
+        plan_kwargs={"normalize_losses": True}
+    )
+
+    # Access the training plan from the trainer
+    training_plan = model.trainer.strategy.model
+
+    # Check warmup completed (should be done after epoch 0)
+    assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
+
+    # Check fixed scales were computed (should be positive after warmup)
+    assert training_plan._scale_clf  > 0, "Fixed scale for clf loss should be positive"
+    assert training_plan._scale_fool > 0, "Fixed scale for fool loss should be positive"
+    assert training_plan._scale_edge > 0, "Fixed scale for edge loss should be positive"
+
+    # Check normalize_losses flag is set correctly
+    assert training_plan._normalize_losses == True
+
+    # Verify training completed successfully
+    # Note: warmup epoch (epoch 0) is not logged in history, so we expect 1 entry for epoch 1
+    assert len(model.history_["train_loss"]) >= 1
+
+    # Verify discriminator metrics are logged
+    history_keys = list(model.history_.keys())
+    assert any("discriminator" in key for key in history_keys), \
+        f"No discriminator metrics found in history. Keys: {history_keys}"
+
+    # --- Scale correctness: scaled == raw * fixed_scale * lambda ---
+    expected_scale_clf  = training_plan._scale_clf
+    expected_scale_fool = training_plan._scale_fool
+
+    model.module.eval()
+    model.module.to("cpu")
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+    
+    with torch.no_grad():
+        inf_in  = model.module._get_inference_input(batch)
+        inf_out = model.module.inference(**inf_in)
+        gen_in  = model.module._get_generative_input(batch, inf_out)
+        gen_out = model.module.generative(**gen_in)
+        loss_out = model.module.loss(
+            batch, inf_out, gen_out,
+            discriminator_lambda=discriminator_lambda,  # module negates fool_ce internally
+            classifier_scale=expected_scale_clf,
+            discriminator_scale=expected_scale_fool,
+        )
+
+    clf_raw    = loss_out.extra_metrics["classifier_loss_raw"].item()
+    clf_scaled = loss_out.extra_metrics["classifier_loss"].item()
+    fool_raw   = loss_out.extra_metrics["fool_loss_raw"].item()
+    fool_scaled = loss_out.extra_metrics["fool_loss"].item()
+
+    np.testing.assert_allclose(clf_scaled,  clf_raw  * expected_scale_clf  * classifier_lambda,   rtol=1e-4)
+    np.testing.assert_allclose(fool_scaled, fool_raw * expected_scale_fool * discriminator_lambda, rtol=1e-4)
+    # make sure that disc is roughly 4x scaled compared to clf (since discriminator_lambda is 4x classifier_lambda)
+    # fool_scaled is negative (adversarial weight=-1), so compare absolute magnitudes
+    np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.2)
+    # assert fool is negative (since it's an adversarial loss)
+    assert fool_scaled < 0, "Fool loss should be negative (adversarial weight is -1)"
