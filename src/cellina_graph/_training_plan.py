@@ -63,7 +63,8 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         kappa = self.module.discriminator_lambda
 
         # ---------------------- WARMUP COLLECTION ----------------------
-        if self._normalize_losses and (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
+        # Epoch 0: ALWAYS no-grad (graph batches include neighbors → large memory footprint)
+        if (not self._warmup_done) and getattr(self, "current_epoch", 0) == 0:
             with torch.no_grad():
                 inference_outputs, generative_outputs, scvi_loss = self.forward(
                     batch,
@@ -72,26 +73,28 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                         "discriminator_lambda": kappa,
                     }
                 )
-                scvi_val = float(scvi_loss.loss.detach().cpu().item())
-                fool_val = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
-                clf_val = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
-                edge_val = abs(float(scvi_loss.extra_metrics.get("edge_prediction_loss", 0.0)))
+                if self._normalize_losses:
+                    scvi_val = float(scvi_loss.loss.detach().cpu().item())
+                    fool_val = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
+                    clf_val = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
+                    edge_val = abs(float(scvi_loss.extra_metrics.get("edge_prediction_loss", 0.0)))
 
-                self._warmup_stats["scvi"].append(scvi_val)
-                self._warmup_stats["fool"].append(fool_val)
-                self._warmup_stats["clf"].append(clf_val)
-                self._warmup_stats["edge"].append(edge_val)
+                    self._warmup_stats["scvi"].append(scvi_val)
+                    self._warmup_stats["fool"].append(fool_val)
+                    self._warmup_stats["clf"].append(clf_val)
+                    self._warmup_stats["edge"].append(edge_val)
 
                 return {"loss": scvi_loss.loss}
 
         # ---------- END OF WARMUP → COMPUTE FIXED SCALES ----------
-        if self._normalize_losses and (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
-            vae_mean = np.mean(self._warmup_stats["scvi"])
-            self._scale_clf  = vae_mean / (np.mean(self._warmup_stats["clf"])  + 1e-8)
-            self._scale_fool = vae_mean / (np.mean(self._warmup_stats["fool"]) + 1e-8)
-            self._scale_edge = vae_mean / (np.mean(self._warmup_stats["edge"]) + 1e-8)
+        if (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
+            if self._normalize_losses:
+                vae_mean = np.mean(self._warmup_stats["scvi"])
+                self._scale_clf  = vae_mean / (np.mean(self._warmup_stats["clf"])  + 1e-8)
+                self._scale_fool = vae_mean / (np.mean(self._warmup_stats["fool"]) + 1e-8)
+                self._scale_edge = vae_mean / (np.mean(self._warmup_stats["edge"]) + 1e-8)
+                self._warmup_stats.clear()  # Free memory
             self._warmup_done = True
-            self._warmup_stats.clear()  # Free memory
 
         # ------------------ STEP 1: Train Discriminator ------------------
         with torch.no_grad():
