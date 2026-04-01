@@ -59,7 +59,9 @@ class CellinaModule(BaseModuleClass):
     n_domains
         Number of domain labels.
     condition_on_intrinsic
-        Whether to concatenate z to the GCN input features.
+        Whether to concatenate detached z to the GCN input features before message passing.
+        Defaults to True in this module; the graph-aware CellinaModel overrides this to False —
+        keeping spatial context independent of the target cell's intrinsic identity.
     link_prediction_weight
         Weight for the edge prediction loss. Set to 0 (default) to disable link prediction.
     convolution_type
@@ -91,6 +93,11 @@ class CellinaModule(BaseModuleClass):
         convolution_type: str = "gcn",
     ):
         super().__init__()
+        if not use_observed_lib_size:
+            raise NotImplementedError(
+                "cellina_graph only supports use_observed_lib_size=True. "
+                "Latent library size is not implemented for graph-aware batches."
+            )
         self.n_input = n_input
         self.n_latent = n_latent
         self.n_batch = n_batch

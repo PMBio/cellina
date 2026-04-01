@@ -18,10 +18,9 @@ def _make_conv_layer(
     conv_type: str,
     in_channels: int,
     out_channels: int,
-    use_batch_norm: bool,
+    bias: bool = True,
 ) -> nn.Module:
     """Create one graph-conv layer of the requested type."""
-    bias = not use_batch_norm
     if conv_type == "gcn":
         return GCNConv(in_channels, out_channels, bias=bias, add_self_loops=False)
     elif conv_type == "gat":
@@ -124,13 +123,18 @@ class GCNLayers(nn.Module):
         self.gcn_layers = nn.ModuleList()
         for i, (dim_in, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:])):
             self.gcn_layers.append(
-                _make_conv_layer(convolution_type, dim_in, dim_out, use_batch_norm)
+                _make_conv_layer(convolution_type, dim_in, dim_out, bias=bias)
             )
 
         self.cov_layers = nn.ModuleList([
             nn.Linear(self.n_cov, dim_out, bias=False)
             if (self.n_cov > 0 and self._inject_into_layer(i))
             else None
+            for i, (_, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:]))
+        ])
+
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(dim_out) if i < n_layers - 1 else nn.Identity()
             for i, (_, dim_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:]))
         ])
 
@@ -203,6 +207,7 @@ class GCNLayers(nn.Module):
             if self.cov_layers[i] is not None and cov_list:
                 cov = torch.cat(cov_list, dim=-1)
                 x = x + self.cov_layers[i](cov.float())
+            x = self.layer_norms[i](x)
             x = self.activation_fn(x)
             if self.dropout is not None:
                 x = self.dropout(x)

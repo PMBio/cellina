@@ -49,6 +49,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
     num_neighbors
         Number of neighbors to sample per node per GCN layer. Default: [-1] (all neighbors).
+    condition_on_intrinsic
+        Whether to concatenate detached z to the GCN input features before message passing.
+        Defaults to False: the spatial encoder aggregates raw log-counts from neighbours,
+        keeping spatial context independent of the target cell's intrinsic identity.
+        Set to True to replicate non-graph Cellina behaviour.
     use_observed_lib_size
         Use observed library size for normalization. If True, use observed library size.
     convolution_type
