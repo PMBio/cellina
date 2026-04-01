@@ -30,7 +30,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
     This model extends scVI with a spatial encoder that processes spatial features
     alongside the standard count encoder. The two latent representations (z from counts,
-    s from spatial+z) are summed element-wise (shifted = z + s) and decoded together 
+    s from spatial+z) are concatenated (shifted = concat(z, s)) and decoded together
     to reconstruct the count data.
 
     Parameters
@@ -55,7 +55,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     >>> CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
     >>> model = CellinaModel(adata, n_latent=10)
     >>> model.train()
-    >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = z + s
+    >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = concat(z, s)
     >>> adata.obsm["X_cellina_z"] = model.get_latent_representation(latent_key='z')
     >>> adata.obsm["X_cellina_s"] = model.get_latent_representation(latent_key='s')
     """
@@ -67,7 +67,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
-        condition_on_intrinsic: bool = True,
+        condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
         **model_kwargs,
     ):
@@ -98,58 +98,41 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         )
 
         # Update summary string
-        adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
+        train_mode = ""
+        if discriminator_lambda > 0:
+            train_mode = " with adversarial domain forgetting"
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){adv_str}"
+            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){train_mode}"
         )
         self.init_params_ = self._get_init_params(locals())
 
-        logger.info(f"The Cellina model has been initialized{adv_str}")
+        logger.info(f"The Cellina model has been initialized{train_mode}")
 
+        # TODO: should this be here?
+        # Store the obsm key that was registered for spatial features so that
+        # perturbation methods can temporarily swap it.
+        self._spatial_obsm_key = next(
+            f._attr_key
+            for f in self.adata_manager.fields
+            if getattr(f, '_registry_key', None) == SPATIAL_X_KEY
+        )
 
-    def _make_counterfactual_loader(
+    def _make_counterfactual_adata(
             self,
             indices: np.ndarray,
             neighbour_indices: np.ndarray,
-            batch_size: int = 128,
             seed: int = 0,
             adata: Optional[AnnData] = None,
         ):
-            """
-            Create a data loader that yields tensors for counterfactual evaluation.
-
-            This function constructs a temporary AnnData containing only the `indices`
-            cells with their `.obsm[SPATIAL_X_KEY]` replaced by sampled spatial counts
-            from `neighbour_indices` (using :func:`make_counterfactual_adata`). It then
-            delegates to the model's `_make_data_loader` to produce the same batch-wise
-            tensor tuples used during normal inference.
-
-            Parameters
-            ----------
-            indices
-                Indices of control cells (basal) to evaluate.
-            neighbour_indices
-                Indices of donor cells to sample spatial information from.
-            batch_size
-                Batch size for the returned dataloader.
-            seed
-                Random seed forwarded to the sampling routine.
-            adata
-                Optional AnnData to use instead of self.adata for generating the counterfactual loader.
-
-            Returns
-            -------
-            An iterable dataloader yielding the same tensor dicts as ``_make_data_loader``.
-            """
-            adata_cf = make_counterfactual_adata(
-                self.adata if adata is None else adata,  # use provided adata or default to self.adata
-                indices, 
-                neighbour_indices, 
-                spatial_column=SPATIAL_X_KEY, 
-                sample=False, 
-                random_state=seed
+            """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
+            return make_counterfactual_adata(
+                self.adata if adata is None else adata,
+                indices,
+                neighbour_indices,
+                spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
+                sample=False,
+                random_state=seed,
             )
-            return self._make_data_loader(adata=adata_cf, batch_size=batch_size)
 
 
     @torch.inference_mode()
@@ -191,40 +174,18 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         -------
         np.ndarray of shape ``(len(indices), n_latent)`` (or ``2*n_latent`` for shifted).
         """
-        if latent_key not in ['shifted', 'z', 's']:
-            raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
-
         self._check_if_trained(warn=False)
-        indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
-
-        scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed, adata
+        adata_cf = self._make_counterfactual_adata(
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+        )
+        return self.get_latent_representation(
+            adata=adata_cf, indices=None, give_mean=give_mean,
+            batch_size=batch_size, latent_key=latent_key,
         )
 
-        latent = []
-        for tensors in scdl:
-            inference_inputs = self.module._get_inference_input(tensors)
-            outputs = self.module.inference(**inference_inputs)
 
-            if latent_key == 'z':
-                lat = outputs["qzm"] if give_mean else outputs["z"]
-            elif latent_key == 's':
-                lat = outputs["qsm"] if give_mean else outputs["s"]
-            else:  # shifted
-                if give_mean:
-                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
-                else:
-                    lat = outputs["shifted"]
-
-            latent.append(lat.cpu())
-
-        return torch.cat(latent).numpy()
-
-
-    @torch.inference_mode()
     def get_counterfactual_expression(
         self,
         indices: np.ndarray,
@@ -232,12 +193,14 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata: Optional[AnnData] = None,
         batch_size: Optional[int] = None,
         seed: int = 0,
+        library_size: Union[float, str] = "latent",
+        return_numpy: bool = True,
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
 
-        Runs the full inference + generative pipeline with rewired graph edges,
-        returning the mean of the negative binomial distribution (``px_rate``).
+        Delegates to :meth:`get_normalized_expression` after building a counterfactual
+        AnnData with rewired spatial features.
 
         Parameters
         ----------
@@ -246,36 +209,31 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         neighbour_indices
             Indices of donor cells to sample spatial information from.
         adata
-            Optional AnnData to use instead of self.adata for generating the counterfactual loader.
+            Optional AnnData to use instead of ``self.adata``.
         batch_size
             Minibatch size for the loader.
         seed
             Random seed for neighbour sampling.
+        library_size
+            Passed to :meth:`get_normalized_expression`.  Defaults to ``"latent"``
+            (uses inferred library size, returning ``px_rate``).
+        return_numpy
+            Passed to :meth:`get_normalized_expression`.
 
         Returns
         -------
         np.ndarray of shape ``(len(indices), n_genes)``.
         """
         self._check_if_trained(warn=False)
-        indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
-
-        scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, batch_size, seed, adata
+        adata_cf = self._make_counterfactual_adata(
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
         )
-
-        expressions = []
-        for tensors in scdl:
-            inference_inputs = self.module._get_inference_input(tensors)
-            inference_outputs = self.module.inference(**inference_inputs)
-            generative_inputs = self.module._get_generative_input(tensors, inference_outputs)
-            generative_outputs = self.module.generative(**generative_inputs)
-
-            expressions.append(generative_outputs["px_rate"].cpu())
-
-        return torch.cat(expressions).numpy()
+        return self.get_normalized_expression(
+            adata=adata_cf, indices=None, batch_size=batch_size,
+            library_size=library_size, return_numpy=return_numpy,
+        )
     
 
     @classmethod
@@ -379,11 +337,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         # handled by the adversarial plan (avoid forwarding them to module.loss)
         if self.module.discriminator_lambda == 0:
             plan_kwargs.pop("normalize_losses", None)
-            plan_kwargs.pop("scale_adversarial_loss", None)
-        
+
         # Set training plan class
         if self.module.discriminator_lambda > 0:
-            # Use adversarial training plan when discriminator is enabled
             self._training_plan_cls = CellinaAdversarialTrainingPlan
         
         super().train(
@@ -423,12 +379,12 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Minibatch size for data loading into model.
         latent_key
             Which latent representation to return. Options: 'shifted', 'z', 's'.
-            Default: 'shifted' (returns z + s, which is what the decoder uses).
+            Default: 'shifted' (returns concat(z, s), which is what the decoder uses).
 
         Returns
         -------
         Latent representation for each cell as numpy array.
-        - If latent_key is 'shifted': z + s (what goes into the decoder)
+        - If latent_key is 'shifted': concat(z, s) (what goes into the decoder)
         - If latent_key is 'z': only z encoder output
         - If latent_key is 's': only s encoder output
         """
@@ -451,9 +407,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             elif latent_key == 's':
                 lat = outputs["qsm"] if give_mean else outputs["s"]
             else:  # shifted
-                if give_mean: # TODO: this should not work like this, potentially inconsistent
-                    # For mean, sum the means
-                    lat = outputs["qzm"] + outputs["qsm"]
+                if give_mean:
+                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
                 else:
                     lat = outputs["shifted"]
 
@@ -462,6 +417,96 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         latent = torch.cat(latent).numpy()
         return latent
     
+    @torch.inference_mode()
+    def get_perturbed_latents(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        give_mean: bool = False,
+        batch_size: Optional[int] = None,
+        latent_key: Optional[str] = "s",
+        spatial_obsm_key: str = "spatial_x_cf",
+    ) -> np.ndarray:
+        """
+        Return latent representation using counterfactual spatial features.
+
+        Temporarily swaps ``adata.obsm[registered_spatial_key]`` with
+        ``adata.obsm[spatial_obsm_key]``, runs inference, then restores the
+        original data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        give_mean
+            Return the mean of the posterior rather than a sample.
+        batch_size
+            Mini-batch size for inference.
+        latent_key
+            Which latent to return: ``'shifted'``, ``'z'``, or ``'s'``.
+            Default is ``'s'`` (the spatially-informed latent).
+        spatial_obsm_key
+            Key in ``adata.obsm`` that holds the counterfactual spatial features
+            (written by :func:`~cellina.make_neighbor_perturbation`).
+        """
+        adata = self._validate_anndata(adata)
+        orig = adata.obsm[self._spatial_obsm_key].copy()
+        adata.obsm[self._spatial_obsm_key] = adata.obsm[spatial_obsm_key]
+        try:
+            return self.get_latent_representation(
+                adata=adata,
+                indices=indices,
+                give_mean=give_mean,
+                batch_size=batch_size,
+                latent_key=latent_key,
+            )
+        finally:
+            adata.obsm[self._spatial_obsm_key] = orig
+
+    @torch.inference_mode()
+    def get_perturbed_expression(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: Optional[int] = None,
+        spatial_obsm_key: str = "spatial_x_cf",
+        library_size: Union[float, str] = 1.0,
+    ) -> np.ndarray:
+        """
+        Return normalised expression using counterfactual spatial features.
+
+        Temporarily swaps ``adata.obsm[registered_spatial_key]`` with
+        ``adata.obsm[spatial_obsm_key]``, runs inference and decoding, then
+        restores the original data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        batch_size
+            Mini-batch size for inference.
+        spatial_obsm_key
+            Key in ``adata.obsm`` that holds the counterfactual spatial features.
+        library_size
+            Passed directly to :meth:`get_normalized_expression`.
+        """
+        adata = self._validate_anndata(adata)
+        orig = adata.obsm[self._spatial_obsm_key].copy()
+        adata.obsm[self._spatial_obsm_key] = adata.obsm[spatial_obsm_key]
+        try:
+            return self.get_normalized_expression(
+                adata=adata,
+                indices=indices,
+                batch_size=batch_size,
+                library_size=library_size,
+            )
+        finally:
+            adata.obsm[self._spatial_obsm_key] = orig
+
     def get_marginal_ll(
         self,
         adata: Optional[AnnData] = None,

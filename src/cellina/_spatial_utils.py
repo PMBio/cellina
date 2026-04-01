@@ -1,9 +1,15 @@
-from anndata import AnnData
+import logging
+from typing import List, Optional
+
 import numpy as np
-from scipy.sparse import csr_matrix
+from anndata import AnnData
+from scipy.sparse import csr_matrix, issparse
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
+
 from ._constants import SPATIAL_X_KEY
+
+logger = logging.getLogger(__name__)
 
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):
@@ -48,8 +54,6 @@ def _spatial_neighbors_core(adata: AnnData,
     # NOTE: dist gets converted to a connectivity (proximity) matrix
     if kernel == 'gaussian':
         dist.data = _gaussian(dist.data, bandwidth)
-    elif kernel == 'misty_rbf':
-        dist.data = _misty_rbf(dist.data, bandwidth)
     elif kernel == 'exponential':
         dist.data = _exponential(dist.data, bandwidth)
     elif kernel == 'linear':
@@ -104,9 +108,9 @@ def spatial_neighbors(adata: AnnData,
     kernel
         Kernel function used to generate connectivity weights.
         It controls the shape of the connectivity weights.
-        The following options are available: ['gaussian', 'exponential', 'linear', 'misty_rbf']
+        The following options are available: ['gaussian', 'exponential', 'linear']
     set_diag
-        Logical, sets connectivity diagonal to 0 if `False`. Default is `True`.
+        Logical, sets connectivity diagonal to 0 if `False`. Default is `False`.
     zoi
         Zone of indifference. Values below this cutoff will be set to `np.inf`.
     standardize
@@ -140,7 +144,7 @@ def spatial_neighbors(adata: AnnData,
     if cutoff is None:
         raise ValueError("`cutoff` must be provided!")
     assert spatial_key in adata.obsm
-    families = ['gaussian', 'exponential', 'linear', 'misty_rbf']
+    families = ['gaussian', 'exponential', 'linear']
     if kernel not in families:
         raise AssertionError(f"{kernel} must be a member of {families}")
     if bandwidth is None:
@@ -151,25 +155,25 @@ def spatial_neighbors(adata: AnnData,
         from scipy.sparse import block_diag
         from typing import cast
         from anndata.utils import make_index_unique
-        
+
         libs = adata.obs[library_key].cat.categories
         make_index_unique(adata.obs_names)
-        
+
         mats = []
         ixs = []
         for lib in libs:
             ixs.extend(np.where(adata.obs[library_key] == lib)[0])
-            mats.append(_spatial_neighbors_core(adata[adata.obs[library_key] == lib], 
+            mats.append(_spatial_neighbors_core(adata[adata.obs[library_key] == lib],
                                         bandwidth=bandwidth, cutoff=cutoff, max_neighbours=max_neighbours,
                                         kernel=kernel, set_diag=set_diag, zoi=zoi, standardize=standardize,
                                         reference=reference, spatial_key=spatial_key))
-        
+
         ixs = cast(list[int], np.argsort(ixs).tolist())
         dist = block_diag(mats, format="csr")[ixs, :][:, ixs]
     else:
         # Single sample case
-        dist = _spatial_neighbors_core(adata, bandwidth=bandwidth, cutoff=cutoff, 
-                                      max_neighbours=max_neighbours, kernel=kernel, 
+        dist = _spatial_neighbors_core(adata, bandwidth=bandwidth, cutoff=cutoff,
+                                      max_neighbours=max_neighbours, kernel=kernel,
                                       set_diag=set_diag, zoi=zoi, standardize=standardize,
                                       reference=reference, spatial_key=spatial_key)
 
@@ -182,59 +186,151 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def weighted_pseudobulks(adata, sp, groupby, obsm_key=SPATIAL_X_KEY, binarize=True):
-    # Ensure `sp` is a sparse matrix
-    if not isinstance(sp, csr_matrix):
-        sp = csr_matrix(sp)
 
-    # Get unique cell types and their indices
-    cell_types = adata.obs[groupby].unique()
-    n_cells, n_genes = adata.shape
-    n_cell_types = len(cell_types)
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    # Initialize an array to store results
-    weighted_pseudobulks = np.zeros((n_cells, n_cell_types, n_genes))
+def compute_spatial_features(
+    adata: AnnData,
+    connectivity_key: str = "spatial_connectivities",
+    groupby: Optional[str] = None,
+    neighbor_genes: Optional[List[str]] = None,
+    obsm_key: str = SPATIAL_X_KEY,
+    perturbations: Optional[dict] = None,
+    base: float = np.e,
+) -> None:
+    """
+    Compute spatial neighbourhood features and store them in ``adata.obsm``.
+    Expects normalized counts in ``adata.X`` and a spatial connectivity matrix in ``adata.obsp[connectivity_key]``.
 
-    # Precompute gene expression matrix as dense
-    X = adata.X if isinstance(adata.X, np.ndarray) else adata.X.toarray()
-    
-    if binarize:
-        X = np.where(X > 0, 1., 0.)
+    Parameters
+    ----------
+    adata
+        AnnData object.
+    connectivity_key
+        Key in ``adata.obsp`` for the spatial connectivity matrix.
+    groupby
+        Column in ``adata.obs`` used to apply cell-type-specific perturbations.
+        Each cell is scaled by the logFC vector for its cell type before the
+        standard degree-normalised mean aggregation.  When ``None``, perturbations
+        are applied globally to all cells.
+    neighbor_genes
+        Subset of genes to aggregate.  ``None`` means all genes.
+    obsm_key
+        Key in ``adata.obsm`` where the result is stored.
 
-    # Precompute masks for cell types
-    cell_type_masks = {cell_type: np.where(adata.obs[groupby] == cell_type)[0] for cell_type in cell_types}
+    Notes
+    -----
+    The ``spatial_x`` features are a **linear aggregation of raw counts**.
+    Perturbations expressed as logFC are applied directly to counts:
+    ``X_cf[j, g] = X[j, g] * base^logFC``, which propagates correctly through
+    the linear aggregation step.
+    """
+    C = csr_matrix(adata.obsp[connectivity_key])
+    var_names = list(adata.var_names)
+    var_idx = {g: i for i, g in enumerate(var_names)}
+    # TODO: add a warning if not normalized and handle this better...
+    X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
 
-    # Loop through each cell type and compute weighted averages
-    for idx, cell_type in enumerate(cell_types):
-        # Get the indices for cells of this type
-        cell_indices = cell_type_masks[cell_type]
+    if perturbations:
+        var_names_set = set(var_idx)
+        if groupby is None:
+            skipped = [g for g in perturbations if g not in var_names_set]
+        else:
+            skipped = [g for ct_s in perturbations.values() for g in ct_s.index
+                       if g not in var_names_set]
+        if skipped:
+            logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
+                           len(skipped), skipped)
 
-        # Subset adjacency matrix for neighbors of this cell type
-        sp_subset = sp[:, cell_indices]  # Shape: (n_cells, n_cells_of_type)
+    if groupby is None:
+        if perturbations:
+            scale = np.ones(len(var_names))
+            for gene, logfc in perturbations.items():
+                if gene in var_idx:
+                    scale[var_idx[gene]] = base ** logfc
+            X = X.multiply(scale) if issparse(X) else X * scale
+    else:
+        if perturbations:
+            labels = adata.obs[groupby].values
+            scale = np.ones((adata.n_obs, len(var_names)), dtype=np.float32)
+            for ct, logfc_series in perturbations.items():
+                ct_mask = labels == ct
+                for gene, logfc in logfc_series.items():
+                    if gene in var_idx:
+                        scale[ct_mask, var_idx[gene]] = base ** logfc
+            X = X.multiply(scale) if issparse(X) else X * scale
 
-        # Extract gene expression for cells of this type
-        cell_type_expr = X[cell_indices, :]  # Shape: (n_cells_of_type, n_genes)
+    if neighbor_genes is not None:
+        gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
+        X = X[:, gene_idx]
+    result = C @ X
+    degree = np.asarray(C.sum(axis=1))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
+    adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
 
-        # Compute the weighted sum of gene expressions
-        weighted_sums = sp_subset.dot(cell_type_expr)  # Shape: (n_cells, n_genes)
 
-        # Compute the sum of weights for neighbors of this type
-        neighbor_weights = sp_subset.sum(axis=1)  # Shape: (n_cells, 1)
+def make_neighbor_perturbation(
+    adata: AnnData,
+    connectivity_key: str = "spatial_connectivities",
+    perturbations: Optional[dict] = None,
+    groupby: Optional[str] = None,
+    neighbor_genes: Optional[List[str]] = None,
+    obsm_key_out: str = "spatial_x_cf",
+    base: float = np.e,
+) -> None:
+    """
+    Apply logFC perturbations to neighbour expression and re-aggregate.
 
-        # Normalize to get the weighted average
-        with np.errstate(divide='ignore', invalid='ignore'):
-            weighted_avg = np.nan_to_num(weighted_sums / neighbor_weights)
+    Perturbed spatial features are written to ``adata.obsm[obsm_key_out]``.
+    The original count matrix ``adata.X`` is **not** modified.
 
-        # Store the result in the corresponding slice
-        weighted_pseudobulks[:, idx, :] = weighted_avg
+    Parameters
+    ----------
+    adata
+        AnnData object.
+    connectivity_key
+        Key in ``adata.obsp`` for the spatial connectivity matrix.
+    perturbations
+        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC,
+        applied globally to all cells.
+        When ``groupby`` is set: ``Dict[str, pd.Series]`` mapping cell-type label →
+        gene-indexed logFC Series; each cell is scaled by its cell type's vector
+        before standard degree-normalised aggregation.
+    groupby
+        Column in ``adata.obs`` used to apply cell-type-specific perturbations.
+        When ``None``, a simple degree-normalised mean is computed.
+    neighbor_genes
+        Subset of genes to aggregate.  ``None`` means all genes.
+    obsm_key_out
+        Key in ``adata.obsm`` for the counterfactual spatial features.
 
-    # Set names for celltype-gene features
-    cell_ids = np.unique(adata.obs[groupby].values)
-    gene_ids = adata.var.index.values
-    spatial_var = [a + "_" + b for a in cell_ids for b in gene_ids]
+    Raises
+    ------
+    ValueError
+        If ``perturbations`` contains cell-type keys that are not present in
+        ``adata.obs[groupby]``.  Partial dictionaries (covering only a subset of
+        cell types) are allowed — unspecified cell types are left unmodified.
+    """
+    if perturbations is not None and groupby is not None:
+        obs_cts = set(adata.obs[groupby].unique())
+        unknown = set(perturbations) - obs_cts
+        if unknown:
+            raise ValueError(
+                f"perturbations contains cell types not found in "
+                f"adata.obs['{groupby}']: {unknown}"
+            )
 
-    weighted_pseudobulks = weighted_pseudobulks.reshape(weighted_pseudobulks.shape[0], -1)
+    compute_spatial_features(
+        adata,
+        connectivity_key=connectivity_key,
+        groupby=groupby,
+        neighbor_genes=neighbor_genes,
+        obsm_key=obsm_key_out,
+        perturbations=perturbations,
+        base=base,
+    )
 
-    adata.obsm[obsm_key] = weighted_pseudobulks
-    adata.uns["_spatial_var"] = spatial_var
 

@@ -163,9 +163,9 @@ class CellinaModule(BaseModuleClass):
         if classifier_lambda > 0:
             classifier_kwargs = dict(classifier_kwargs or {})
             self.classifier = Classifier(
-                n_input=n_latent, 
-                n_labels=n_labels, 
-                logits=True, 
+                n_input=n_latent,
+                n_labels=n_labels,
+                logits=True,
                 **classifier_kwargs
             )
 
@@ -349,7 +349,6 @@ class CellinaModule(BaseModuleClass):
         inference_outputs,
         generative_outputs,
         kl_weight: float = 1.0,
-        discriminator_lambda: float = 0.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
     ):
@@ -366,9 +365,6 @@ class CellinaModule(BaseModuleClass):
             Outputs from generative method
         kl_weight
             Weight for KL divergence terms (warmup)
-        discriminator_lambda
-            Weight multiplier for discriminator loss. Used to scale discriminator contribution.
-            Set to 0 to exclude discriminator from loss computation.
         classifier_scale
             EMA-based normalization scale for classifier loss (default 1.0)
         discriminator_scale
@@ -381,6 +377,8 @@ class CellinaModule(BaseModuleClass):
         qsv = inference_outputs["qsv"]
         qlm = inference_outputs["qlm"]
         qlv = inference_outputs["qlv"]
+        z = inference_outputs["z"]
+        s = inference_outputs["s"]
         px_rate = generative_outputs["px_rate"]
         px_r = generative_outputs["px_r"]
         px_dropout = generative_outputs["px_dropout"]
@@ -427,25 +425,25 @@ class CellinaModule(BaseModuleClass):
         labels = tensors[REGISTRY_KEYS.LABELS_KEY].reshape(-1).long()
         classifier_loss, classifier_accuracy = self._compute_classifier_metrics(
             classifier=self.classifier,
-            weight=self.classifier_lambda,
+            weight=1.,
             inference_outputs=inference_outputs,
             labels=labels,
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
-        classifier_loss_scaled = classifier_loss * classifier_scale
+        classifier_loss_scaled = classifier_loss * classifier_scale * self.classifier_lambda
 
         # Domain discriminator (fool loss - always negative for adversarial training)
         domain_labels = tensors[DOMAINS_KEY].reshape(-1).long()
         fool_loss, discriminator_accuracy = self._compute_classifier_metrics(
             classifier=self.domain_discriminator,
-            weight=discriminator_lambda,
+            weight=-1., # Negative for adversarial loss
             inference_outputs=inference_outputs,
             labels=domain_labels,
             reconst_loss_shape=reconst_loss,
             metric_name="discriminator",
         )
-        fool_loss_scaled = fool_loss * discriminator_scale
+        fool_loss_scaled = fool_loss * discriminator_scale * self.discriminator_lambda
 
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
