@@ -301,17 +301,25 @@ class GraphEncoder(nn.Module):
         edge_index: torch.Tensor,
         *cat_list: int,
         batch_size: int | None = None,
+        return_neighbor_means: bool = False,
     ):
         q = self.encoder(x, edge_index, *cat_list)   # (seed + neighbors, n_hidden)
+
+        neighbor_means = None
         if batch_size is not None:
-            q = q[:batch_size]                        # seed nodes only
+            q_seed = q[:batch_size]                   # seed nodes only
             if self.bn is not None:
-                q = self.bn(q)                        # BN on correct population
-        q_m = self.mean_encoder(q)
-        q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
+                q_seed = self.bn(q_seed)              # BN on correct population
+            if return_neighbor_means:
+                neighbor_means = self.mean_encoder(q[batch_size:])  # (N_neighbors, n_latent)
+        else:
+            q_seed = q
+
+        q_m = self.mean_encoder(q_seed)
+        q_v = self.var_activation(self.var_encoder(q_seed)) + self.var_eps
         dist = Normal(q_m, q_v.sqrt())
         latent = self.z_transformation(dist.rsample())
 
         if self.return_dist:
             return dist, latent
-        return q_m, q_v, latent
+        return q_m, q_v, latent, neighbor_means

@@ -359,79 +359,6 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
 
 
 
-def test_edge_prediction_loss():
-    """Test edge prediction functionality when link_prediction_weight > 0."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
-
-    n_labels = 3
-    n_domains = 2
-    adata.obs["cell_type"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-
-    CellinaModel.setup_anndata(
-        adata,
-        batch_key="batch",
-        labels_key="cell_type",
-        domains_key="domain",
-        spatial_connectivities_key="spatial_connectivities",
-    )
-
-    n_latent = 5
-    link_prediction_weight = 0.1
-    model = CellinaModel(
-        adata,
-        n_latent=n_latent,
-        link_prediction_weight=link_prediction_weight,
-        classifier_lambda=1.0,
-        discriminator_lambda=1.0,
-    )
-
-    assert model.module.link_prediction_weight == link_prediction_weight
-    assert model.module.link_prediction_weight > 0
-
-    from cellina_graph._edge_data_splitter import GraphJointDataSplitter
-    assert hasattr(model, '_data_splitter_cls')
-    assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
-
-    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
-
-    history_keys = list(model.history_.keys())
-    edge_loss_keys = [k for k in history_keys if "edge_prediction_loss" in k]
-    assert len(edge_loss_keys) > 0, f"No edge prediction metrics found in history. Keys: {history_keys}"
-
-    edge_train_loss = model.history_["edge_prediction_loss_train"].iloc[-1].item()
-    assert edge_train_loss >= 0, f"Edge prediction train loss should be non-negative, got {edge_train_loss}"
-
-    edge_val_loss = model.history_["edge_prediction_loss_validation"].iloc[-1].item()
-    assert edge_val_loss >= 0, f"Edge prediction validation loss should be non-negative, got {edge_val_loss}"
-
-
-def test_edge_prediction_disabled_by_default():
-    """Test that edge prediction is disabled when link_prediction_weight=0 (default)."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
-
-    CellinaModel.setup_anndata(
-        adata,
-        batch_key="batch",
-        spatial_connectivities_key="spatial_connectivities",
-    )
-
-    model = CellinaModel(adata, n_latent=5)
-    assert model.module.link_prediction_weight == 0.0
-
-    # Always uses GraphJointDataSplitter now (GCN needs graph)
-    from cellina_graph._edge_data_splitter import GraphJointDataSplitter
-    assert issubclass(model._data_splitter_cls, GraphJointDataSplitter)
-
-    # But use_edge_prediction should be False
-    assert model._data_splitter_kwargs['use_edge_prediction'] == False
-
-    model2 = CellinaModel(adata, n_latent=5, link_prediction_weight=0.0)
-    assert model2.module.link_prediction_weight == 0.0
-
-
 def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
     n_domains = 3
@@ -470,7 +397,7 @@ def test_normalize_losses_true(adata_with_spatial):
     # Check fixed scales were computed (should be positive after warmup)
     assert training_plan._scale_clf  > 0, "Fixed scale for clf loss should be positive"
     assert training_plan._scale_fool > 0, "Fixed scale for fool loss should be positive"
-    assert training_plan._scale_edge > 0, "Fixed scale for edge loss should be positive"
+    assert training_plan._scale_supcon > 0, "Fixed scale for supcon loss should be positive"
 
     # Check normalize_losses flag is set correctly
     assert training_plan._normalize_losses == True

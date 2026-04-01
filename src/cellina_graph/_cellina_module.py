@@ -88,6 +88,7 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
+        supcon_temperature: float = 0.1,
         use_observed_lib_size: bool = True,
         use_batch_norm: bool = True,
         convolution_type: str = "gcn",
@@ -105,6 +106,7 @@ class CellinaModule(BaseModuleClass):
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
         self.link_prediction_weight = link_prediction_weight
+        self.supcon_temperature = supcon_temperature
         self.latent_distribution = "normal"
         self.use_observed_lib_size = use_observed_lib_size
 
@@ -197,41 +199,6 @@ class CellinaModule(BaseModuleClass):
                 **discriminator_kwargs
             )
 
-    def _compute_edge_scores_from_embeddings(
-        self,
-        s_emb: torch.Tensor,
-        edge_label_index: torch.Tensor,
-        edge_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Compute edge prediction scores from node embeddings.
-
-        Parameters
-        ----------
-        s_emb
-            Node embeddings (s) from edge prediction subgraph
-        edge_label_index
-            Edge indices [2, num_edges] with source and target nodes
-        edge_mask
-            Optional mask to filter edges within same batch
-
-        Returns
-        -------
-        Edge scores (logits) for binary classification
-        """
-        if edge_label_index is None or edge_label_index.size(1) == 0:
-            return torch.tensor([], device=s_emb.device)
-
-        s_norm = F.normalize(s_emb, p=2, dim=1)
-        src_emb = s_norm[edge_label_index[0]]
-        tgt_emb = s_norm[edge_label_index[1]]
-        scores = (src_emb * tgt_emb).sum(dim=-1)
-
-        if edge_mask is not None:
-            scores = scores[edge_mask]
-
-        return scores
-
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args."""
         if 'node_batch' not in tensors:
@@ -241,35 +208,12 @@ class CellinaModule(BaseModuleClass):
             )
 
         node_batch = tensors['node_batch']
-        edge_batch = tensors.get('edge_batch')
-
-        input_dict = dict(
+        return dict(
             x=node_batch['X'],
             batch_index=node_batch['batch_label'],
             edge_index=node_batch['edge_index'],
             batch_size=node_batch['batch_size'],
         )
-
-        if edge_batch is not None:
-            input_dict.update(
-                x_link=edge_batch['X'],
-                batch_index_link=edge_batch['batch_label'],
-                edge_index_link=edge_batch['edge_index'],
-                edge_label_index=edge_batch['edge_label_index'],
-                edge_label=edge_batch['edge_label'],
-                edge_mask=edge_batch['edge_mask'],
-            )
-        else:
-            input_dict.update(
-                x_link=None,
-                batch_index_link=None,
-                edge_index_link=None,
-                edge_label_index=None,
-                edge_label=None,
-                edge_mask=None,
-            )
-
-        return input_dict
 
     def _get_generative_input(self, tensors, inference_outputs):
         shifted = inference_outputs["shifted"]
@@ -292,24 +236,14 @@ class CellinaModule(BaseModuleClass):
         batch_index,
         edge_index,
         batch_size,
-        x_link=None,
-        batch_index_link=None,
-        edge_index_link=None,
-        edge_label_index=None,
-        edge_label=None,
-        edge_mask=None,
         n_samples=1,
     ):
         """
         High level inference method.
 
-        Runs the inference (encoder) model for both node reconstruction and edge prediction.
-
-        Two separate forward passes through s_encoder:
-        1. Node forward: uses node batch for reconstruction
-        2. Edge forward: uses edge batch for link prediction
+        Runs the inference (encoder) model for node reconstruction.
+        When link_prediction_weight > 0, also returns neighbor means for SupCon.
         """
-        # ======= NODE RECONSTRUCTION =======
         x_ = torch.log(1 + x)
 
         # Encode counts -> z (MLP)
@@ -322,7 +256,11 @@ class CellinaModule(BaseModuleClass):
             spatial_input = x_
 
         # Encode spatial -> s (GCN with message passing); slices to seed nodes internally
-        qsm, qsv, s = self.s_encoder(spatial_input, edge_index, batch_index, batch_size=batch_size)
+        qsm, qsv, s, neighbor_means = self.s_encoder(
+            spatial_input, edge_index, batch_index,
+            batch_size=batch_size,
+            return_neighbor_means=(self.link_prediction_weight > 0),
+        )
 
         # Library size
         if self.use_observed_lib_size:
@@ -332,7 +270,6 @@ class CellinaModule(BaseModuleClass):
             qlm, qlv, library = self.l_encoder(x_, batch_index)
 
         # Slice z outputs to actual batch size (not including sampled neighbors)
-        # qsm, qsv, s are already sliced inside s_encoder
         qzm = qzm[:batch_size, :]
         qzv = qzv[:batch_size, :]
         z_sliced = z[:batch_size, :]
@@ -352,6 +289,8 @@ class CellinaModule(BaseModuleClass):
             library=library,
             qlm=qlm,
             qlv=qlv,
+            edge_index=edge_index,
+            neighbor_means=neighbor_means,
         )
 
         # Cell type classifier (on sliced z)
@@ -361,24 +300,6 @@ class CellinaModule(BaseModuleClass):
         # Domain discriminator (on sliced z)
         if self.domain_discriminator is not None:
             outputs["discriminator_logits"] = self.domain_discriminator(z_sliced)
-
-        if self.link_prediction_weight > 0 and x_link is not None and edge_label_index is not None:
-            x_link_ = torch.log(1 + x_link)
-            _, _, z_link = self.z_encoder(x_link_, batch_index_link)
-
-            if self.condition_on_intrinsic:
-                spatial_input_link = torch.cat([x_link_, z_link.detach()], dim=-1)
-            else:
-                spatial_input_link = x_link_
-
-            _, _, s_link = self.s_encoder(spatial_input_link, edge_index_link, batch_index_link)
-
-            edge_scores = self._compute_edge_scores_from_embeddings(
-                s_link, edge_label_index, edge_mask
-            )
-            outputs["edge_scores"] = edge_scores
-            outputs["edge_label"] = edge_label
-            outputs["edge_mask"] = edge_mask
 
         return outputs
 
@@ -417,6 +338,69 @@ class CellinaModule(BaseModuleClass):
         else:
             return torch.zeros_like(reconst_loss_shape), 0.0
 
+    def _compute_supcon_loss(
+        self,
+        qsm: torch.Tensor,
+        neighbor_means: torch.Tensor,
+        edge_index: torch.Tensor,
+        labels_all: torch.Tensor,
+        domains_all: torch.Tensor,
+        batch_size: int,
+        temperature: float,
+    ) -> torch.Tensor:
+        """
+        Cross-cell-type supervised contrastive loss on s.
+
+        For each seed node i:
+          P(i): spatial neighbours j where labels[j] != labels[i]   (cross-cell-type)
+          N(i): any node j where domains[j] != domains[i]           (different niche)
+
+        Seed nodes with no valid positive or no valid negative are excluded.
+        """
+        batch_size = int(batch_size)
+        s_all = torch.cat([qsm, neighbor_means], dim=0)   # (N_total, n_latent)
+        s_all = F.normalize(s_all, p=2, dim=1)
+
+        src, dst = edge_index[0], edge_index[1]
+
+        loss_total = torch.tensor(0.0, device=qsm.device)
+        n_valid = 0
+
+        for i in range(batch_size):
+            # Positive set: spatial neighbours of seed i with different cell type
+            edge_mask = src == i
+            neighbor_idx = dst[edge_mask]
+            if len(neighbor_idx) == 0:
+                continue
+            pos_mask = labels_all[neighbor_idx] != labels_all[i]
+            pos_idx = neighbor_idx[pos_mask]
+            if len(pos_idx) == 0:
+                continue
+
+            sim_i = (s_all[i].unsqueeze(0) * s_all).sum(dim=-1) / temperature  # (N_total,)
+            sim_i[i] = float('-inf')                                              # exclude self
+
+            # Negative set: different niche label
+            neg_mask = domains_all != domains_all[i]
+            if neg_mask.sum() == 0:
+                continue
+
+            # Denominator: positives union negatives (minus self)
+            denom_mask = torch.zeros(s_all.size(0), dtype=torch.bool, device=qsm.device)
+            denom_mask[pos_idx] = True
+            denom_mask = denom_mask | neg_mask
+            denom_mask[i] = False
+
+            log_denom = torch.logsumexp(sim_i[denom_mask], dim=0)
+            log_pos   = sim_i[pos_idx] - log_denom               # (|P(i)|,)
+
+            loss_total = loss_total + (-log_pos.mean())
+            n_valid += 1
+
+        if n_valid == 0:
+            return torch.tensor(0.0, device=qsm.device)
+        return loss_total / n_valid
+
     def loss(
         self,
         tensors,
@@ -426,6 +410,7 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
+        supcon_scale: float = 1.0,
     ):
         """Loss function."""
         # Graph-aware batch format
@@ -516,33 +501,34 @@ class CellinaModule(BaseModuleClass):
         fool_loss_raw = -fool_ce  # negate for adversarial direction (maximize disc CE)
         fool_loss_scaled = fool_loss_raw * discriminator_scale * discriminator_lambda
 
-        # Edge prediction loss
-        edge_loss = torch.tensor(0.0, device=reconst_loss.device)
-        edge_accuracy = torch.tensor(0.0, device=reconst_loss.device)
-        if self.link_prediction_weight > 0 and "edge_scores" in inference_outputs:
-            edge_scores = inference_outputs["edge_scores"]
-            edge_label = inference_outputs.get("edge_label")
-            edge_mask = inference_outputs.get("edge_mask")
+        # Spatial SupCon loss on s (cross-cell-type, across-niche)
+        # Labels/domains for ALL subgraph nodes (seeds + neighbours, unsliced)
+        labels_all  = tensors["node_batch"].get(
+            REGISTRY_KEYS.LABELS_KEY,
+            torch.zeros(tensors["node_batch"]['X'].shape[0], dtype=torch.long, device=reconst_loss.device)
+        ).reshape(-1).long()
+        domains_all = tensors["node_batch"].get(
+            DOMAINS_KEY,
+            torch.zeros(tensors["node_batch"]['X'].shape[0], dtype=torch.long, device=reconst_loss.device)
+        ).reshape(-1).long()
 
-            if edge_label is not None and len(edge_scores) > 0:
-                if edge_mask is not None:
-                    edge_label_filtered = edge_label[edge_mask]
-                else:
-                    edge_label_filtered = edge_label
-
-                edge_loss = F.binary_cross_entropy_with_logits(
-                    edge_scores,
-                    edge_label_filtered.float(),
-                    reduction="mean"
-                ) * self.link_prediction_weight
-
-                edge_preds = (edge_scores > 0).float()
-                edge_accuracy = (edge_preds == edge_label_filtered.float()).float().mean()
+        supcon_loss_raw = torch.tensor(0.0, device=reconst_loss.device)
+        if self.link_prediction_weight > 0 and inference_outputs.get("neighbor_means") is not None:
+            supcon_loss_raw = self._compute_supcon_loss(
+                qsm=inference_outputs["qsm"],
+                neighbor_means=inference_outputs["neighbor_means"],
+                edge_index=inference_outputs["edge_index"],
+                labels_all=labels_all,
+                domains_all=domains_all,
+                batch_size=batch_size,
+                temperature=self.supcon_temperature,
+            )
+        supcon_loss = supcon_loss_raw * self.link_prediction_weight * supcon_scale
 
         # Total loss
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
-        loss = vae_loss + edge_loss
+        loss = vae_loss + supcon_loss
 
         kl_local = dict(
             kl_divergence_l=kl_divergence_l,
@@ -558,8 +544,8 @@ class CellinaModule(BaseModuleClass):
             'fool_loss_raw': fool_loss_raw.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
-            'edge_prediction_loss': edge_loss,
-            'edge_prediction_accuracy': edge_accuracy,
+            'supcon_loss_raw': supcon_loss_raw,
+            'supcon_loss': supcon_loss,
         }
 
         return LossOutput(

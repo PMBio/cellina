@@ -47,6 +47,13 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Number of hidden layers (shared by both encoders).
     discriminator_lambda
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
+    link_prediction_weight
+        Weight for the spatial SupCon loss on ``s``. When > 0, enforces that spatially
+        adjacent cells of different cell types have similar ``s`` representations while
+        cells from different niches are pushed apart. Set to 0 (default) to disable.
+    supcon_temperature
+        Temperature for the SupCon loss (only used when ``link_prediction_weight > 0``).
+        Default: 0.1.
     num_neighbors
         Number of neighbors to sample per node per GCN layer. Default: [-1] (all neighbors).
     condition_on_intrinsic
@@ -83,6 +90,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         discriminator_lambda: float = 0.0,
         condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 0.0,
+        supcon_temperature: float = 0.1,
         num_neighbors: List[int] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gcn",
@@ -95,8 +103,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self._num_neighbors = num_neighbors or [-1]
         self._data_splitter_kwargs = {
             'num_neighbors': self._num_neighbors,
-            'neg_sampling_ratio': 1.0,
-            'use_edge_prediction': link_prediction_weight > 0,
         }
 
         library_log_means, library_log_vars = _init_library_size(
@@ -116,6 +122,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
+            supcon_temperature=supcon_temperature,
             use_observed_lib_size=use_observed_lib_size,
             convolution_type=convolution_type,
             **model_kwargs,
@@ -140,11 +147,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if indices is None:
             indices = np.arange(adata.n_obs)
 
-        # Build a lightweight splitter for inference (no edge splits)
+        # Build a lightweight splitter for inference
         splitter = GraphJointDataSplitter(
             self.adata_manager,
             num_neighbors=self._num_neighbors,
-            use_edge_prediction=False,
             batch_size=batch_size,
         )
         return splitter.create_inference_loader(
@@ -185,7 +191,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         splitter = GraphJointDataSplitter(
             self.adata_manager,
             num_neighbors=self._num_neighbors,
-            use_edge_prediction=False,
             batch_size=batch_size,
         )
         pyg_data = splitter.pyg_data
