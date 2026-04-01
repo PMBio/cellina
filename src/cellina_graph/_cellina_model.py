@@ -326,12 +326,14 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_neighbors_per_seed: Optional[int] = None,
         batch_size: Optional[int] = None,
         seed: int = 0,
+        library_size: Union[float, str] = "latent",
+        return_numpy: bool = True,
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
 
-        Runs the full inference + generative pipeline with rewired graph edges,
-        returning the mean of the negative binomial distribution (``px_rate``).
+        Runs the full inference + generative pipeline with rewired graph edges.
+        Library normalisation follows the same logic as :meth:`get_normalized_expression`.
 
         Parameters
         ----------
@@ -345,31 +347,25 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Minibatch size for the loader.
         seed
             Random seed for neighbour sampling.
+        library_size
+            - ``"latent"``: uses inferred library size (returns px_rate). Default.
+            - float (e.g. 1e4): multiplies px_scale by this constant.
+            - 1: returns px_scale (pure proportions).
+        return_numpy
+            If True, return np.ndarray; otherwise return torch.Tensor.
 
         Returns
         -------
         np.ndarray of shape ``(len(indices), n_genes)``.
         """
         self._check_if_trained(warn=False)
-        indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
-
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed
+            np.asarray(indices), np.asarray(neighbour_indices),
+            n_neighbors_per_seed, batch_size, seed,
         )
-
-        expressions = []
-        for tensors in scdl:
-            inference_inputs = self.module._get_inference_input(tensors)
-            inference_outputs = self.module.inference(**inference_inputs)
-            generative_inputs = self.module._get_generative_input(tensors, inference_outputs)
-            generative_outputs = self.module.generative(**generative_inputs)
-
-            expressions.append(generative_outputs["px_rate"].cpu())
-
-        return torch.cat(expressions).numpy()
+        return self._compute_expression(scdl, library_size, return_numpy)
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -581,13 +577,37 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             return float(np.sum(per_batch_mlls))
 
 
+    def _compute_expression(
+        self,
+        scdl,
+        library_size: Union[float, str],
+        return_numpy: bool,
+    ) -> Union[np.ndarray, torch.Tensor]:
+        """Shared inference loop used by get_normalized_expression and get_counterfactual_expression."""
+        exprs = []
+        with torch.no_grad():
+            for tensors in scdl:
+                inference_inputs = self.module._get_inference_input(tensors)
+                inference_outputs = self.module.inference(**inference_inputs)
+                generative_inputs = self.module._get_generative_input(tensors, inference_outputs)
+                generative_outputs = self.module.generative(**generative_inputs)
+                px_scale = generative_outputs["px_scale"]
+                if library_size == "latent":
+                    lib = torch.exp(inference_outputs["library"])
+                    px = px_scale * lib
+                else:
+                    px = px_scale * library_size
+                exprs.append(px.cpu())
+        exprs = torch.cat(exprs, dim=0)
+        return exprs.numpy() if return_numpy else exprs
+
     def get_normalized_expression(
         self,
         adata: Optional[AnnData] = None,
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         return_numpy: bool = True,
-        library_size: Union[float, str] = 1.,
+        library_size: Union[float, str] = 'latent',
     ):
         """
         Return normalized expression like scvi-tools.
@@ -601,36 +621,5 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-
-        scdl = self._make_data_loader(
-            adata=adata, indices=indices, batch_size=batch_size
-        )
-
-        exprs = []
-        with torch.no_grad():
-            for tensors in scdl:
-                inference_inputs = self.module._get_inference_input(tensors)
-                inference_outputs = self.module.inference(**inference_inputs)
-
-                generative_inputs = self.module._get_generative_input(
-                    tensors, inference_outputs
-                )
-                generative_outputs = self.module.generative(**generative_inputs)
-
-                px_scale = generative_outputs["px_scale"]
-
-                if library_size == "latent":
-                    # inferred library size per cell
-                    lib = torch.exp(inference_outputs["library"])
-                    px = px_scale * lib
-                else:
-                    px = px_scale * library_size
-                
-                exprs.append(px.cpu())
-
-        exprs = torch.cat(exprs, dim=0)
-
-        if return_numpy:
-            return exprs.numpy()
-
-        return exprs
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        return self._compute_expression(scdl, library_size, return_numpy)
