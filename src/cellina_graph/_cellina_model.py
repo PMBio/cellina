@@ -54,6 +54,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     supcon_temperature
         Temperature for the SupCon loss (only used when ``link_prediction_weight > 0``).
         Default: 0.1.
+    supcon_use_celltype
+        When ``True``, SupCon positives are cross-cell-type spatial neighbours (requires
+        full cell-type coverage per niche). When ``False`` (default), positives are
+        same-niche neighbours — recommended for LOO experiments where one cell type is
+        excluded from training. Only used when ``link_prediction_weight > 0``.
     num_neighbors
         Number of neighbors to sample per node per GCN layer. Default: [-1] (all neighbors).
     condition_on_intrinsic
@@ -91,6 +96,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 0.0,
         supcon_temperature: float = 0.1,
+        supcon_use_celltype: bool = False,
         num_neighbors: List[int] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gcn",
@@ -123,6 +129,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
             supcon_temperature=supcon_temperature,
+            supcon_use_celltype=supcon_use_celltype,
             use_observed_lib_size=use_observed_lib_size,
             convolution_type=convolution_type,
             **model_kwargs,
