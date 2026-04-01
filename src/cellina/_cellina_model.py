@@ -67,7 +67,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 1,
         discriminator_lambda: float = 0.0,
-        condition_on_intrinsic: bool = True,
+        condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
         **model_kwargs,
     ):

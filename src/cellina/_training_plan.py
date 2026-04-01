@@ -181,7 +181,10 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean()
             scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
 
-        self.log("validation_loss", scvi_loss.loss, on_step=False, on_epoch=True)
+        clf_loss  = scvi_loss.extra_metrics["classifier_loss"]
+        fool_loss = scvi_loss.extra_metrics["fool_loss"]
+        total_val_loss = scvi_loss.loss + clf_loss + fool_loss
+        self.log("validation_loss", total_val_loss, on_step=False, on_epoch=True)
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         
         return scvi_loss.loss
