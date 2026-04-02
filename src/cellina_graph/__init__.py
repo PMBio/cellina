@@ -26,4 +26,4 @@ logger.propagate = False
 
 __all__ = ["CellinaModel", "CellinaModule", "CellinaAdversarialTrainingPlan"]
 
-__version__ = version("cellina")
+__version__ = version("cellina_graph")
