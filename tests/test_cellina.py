@@ -37,6 +37,8 @@ def adata_with_spatial():
     _add_spatial_connectivity(adata)
     n_labels = 3
     adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
+    n_domains = 3
+    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
     return adata
 
 
@@ -48,9 +50,10 @@ def test_cellina_model(adata_with_spatial):
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
 
     assert model.module.n_latent == n_latent
 
@@ -67,9 +70,11 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
 
     # s_encoder should be a GraphEncoder with GCN layers
     from cellina_graph._spatial_encoder import GraphEncoder
@@ -101,6 +106,7 @@ def test_cellina_losses(adata_with_spatial):
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
     model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
@@ -139,57 +145,50 @@ def test_cellina_losses(adata_with_spatial):
     assert 0 <= accuracy <= 1
 
 
-def test_classifier_disabled_by_default():
+def test_classifier_disabled(adata_with_spatial):
     """Test that classifier is disabled when classifier_lambda=0."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
-
     CellinaModel.setup_anndata(
-        adata,
+        adata_with_spatial,
         batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata, n_latent=5, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
 
 
-def test_discriminator_disabled_by_default():
+def test_discriminator_disabled_by(adata_with_spatial):
     """Test that discriminator is disabled when discriminator_lambda=0 (default)."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
 
     CellinaModel.setup_anndata(
-        adata,
+        adata_with_spatial,
         batch_key="batch",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata, n_latent=5)
+    model = CellinaModel(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model.module.domain_discriminator is None
     assert model.module.discriminator_lambda == 0.0
 
-    model2 = CellinaModel(adata, n_latent=5, discriminator_lambda=0.0)
+    model2 = CellinaModel(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model2.module.domain_discriminator is None
     assert model2.module.discriminator_lambda == 0.0
 
 
-def test_discriminator_enabled():
+def test_discriminator_enabled(adata_with_spatial):
     """Test that discriminator works when discriminator_lambda > 0."""
-    adata = synthetic_iid()
-    _add_spatial_connectivity(adata)
-
-    n_domains = 3
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
 
     CellinaModel.setup_anndata(
-        adata,
+        adata_with_spatial,
         batch_key="batch",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
 
     n_latent = 5
-    model = CellinaModel(adata, n_latent=n_latent, discriminator_lambda=1.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0, classifier_lambda=0.0)
 
     assert model.module.domain_discriminator is not None
     assert model.module.discriminator_lambda == 1.0
@@ -202,7 +201,7 @@ def test_discriminator_enabled():
 
     # Verify inference outputs include discriminator logits
     model.module.eval()
-    dataloader = model._make_data_loader(adata, batch_size=10)
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=10)
     batch = next(iter(dataloader))
 
     with torch.no_grad():
@@ -210,7 +209,7 @@ def test_discriminator_enabled():
         outputs = model.module.inference(**inference_inputs)
 
     assert "discriminator_logits" in outputs
-    assert outputs["discriminator_logits"].shape[1] == n_domains
+    assert outputs["discriminator_logits"].shape[1] == adata_with_spatial.obs["domain"].nunique()
 
 
 def test_cellina_latent_representation(adata_with_spatial):
@@ -221,9 +220,10 @@ def test_cellina_latent_representation(adata_with_spatial):
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
     model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
 
     latent_z = model.get_latent_representation(latent_key='z')
@@ -285,9 +285,11 @@ def test_marginal_ll(adata_with_spatial):
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
 
     marginal_ll_list = model.get_marginal_ll(n_mc_samples=10)
@@ -321,6 +323,8 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
 
@@ -361,11 +365,6 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
 
 def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
-    n_domains = 3
-    adata_with_spatial.obs["domain"] = np.random.randint(
-        0, n_domains, size=adata_with_spatial.n_obs
-    ).astype(str)
-
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",

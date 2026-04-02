@@ -92,7 +92,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_hidden: int = 128,
         n_latent: int = 10,
         n_layers: int = 2,
-        discriminator_lambda: float = 0.0,
+        discriminator_lambda: float = 1.0,
         condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 1.0,
         classifier_lambda: float = 1.0,
