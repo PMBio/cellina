@@ -65,10 +65,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata: AnnData,
         n_hidden: int = 128,
         n_latent: int = 10,
-        n_layers: int = 1,
-        discriminator_lambda: float = 0.0,
+        n_layers: int = 2,
+        discriminator_lambda: float = 1.0,
         condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
+        classifier_lambda: float = 1.0,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -94,6 +95,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
+            classifier_lambda=classifier_lambda,
             **model_kwargs,
         )
 
