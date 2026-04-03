@@ -213,18 +213,27 @@ def total_normalize(X, target_sum: float = 1e4) -> np.ndarray:
 # Train / val / test splitting with a held-out cell type
 # ---------------------------------------------------------------------------
 
-def split_indices(adata, holdout_celltype, labels_key='coarse_type', domains_key='typ', seed=0):
+def split_indices(
+    adata,
+    holdout_celltype,
+    labels_key='coarse_type',
+    domains_key='typ',
+    holdout_domains=('CRC',),
+    seed=0,
+):
     """Create train/val/test splits consistent with notebooks.
 
-    Test: holdout_celltype & typ contains 'CRC'
+    Test: holdout_celltype in any domain whose label contains a string from
+          holdout_domains (substring match — e.g. 'TVA' matches 'TVA1', 'TVA2').
     Val: 10% of remaining trainval (random)
     """
     if holdout_celltype not in adata.obs[labels_key].unique():
         raise ValueError(f"holdout_celltype '{holdout_celltype}' not found in adata.obs['{labels_key}'] values")
 
-    is_tumor_region = adata.obs[domains_key].astype(str).str.contains('CRC', regex=True)
+    domain_str = adata.obs[domains_key].astype(str)
+    is_holdout_domain = domain_str.apply(lambda d: any(hd in d for hd in holdout_domains))
     is_holdout_ct = adata.obs[labels_key].astype(str) == holdout_celltype
-    test_mask = is_tumor_region & is_holdout_ct
+    test_mask = is_holdout_domain & is_holdout_ct
 
     all_idx = np.arange(adata.n_obs)
     test_idx = np.where(test_mask.values)[0]
@@ -313,7 +322,8 @@ def _standard_edistance(X: np.ndarray, Y: np.ndarray) -> float:
     X, Y
         2-D arrays of shape (n_cells, n_features).
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     Xt = torch.tensor(X, dtype=torch.float32, device=device)
     Yt = torch.tensor(Y, dtype=torch.float32, device=device)
 
