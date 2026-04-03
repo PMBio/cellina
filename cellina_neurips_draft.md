@@ -385,12 +385,11 @@ responses to niche changes.
 
 We evaluate on a spatial transcriptomics dataset of colorectal cancer (CRC) comprising
 approximately 2 million cells from 8 patients, profiled at single-cell resolution across
-near-transcriptome-wide gene panels [cite]. Each slide was processed independently to
+near-transcriptome-wide gene panels [cite]. Each patient slide was processed independently to
 compute spatial neighbor graphs using a Gaussian proximity kernel with bandwidth $l$
-(units: spatial coordinate units) and cutoff 0.1, retaining up to 100 nearest neighbors
-per cell. Niche composition features $\varphi(v) \in \mathbb{R}^{CG}$ were computed
-as described in §3.1. All models were evaluated using leave-one-patient-out splits,
-with held-out patients used for counterfactual benchmarking.
+(units: spatial coordinate units) equal to 100 microns. Niche composition features $\varphi(v) \in \mathbb{R}^{CG}$ were computed
+as described in §3.1. All models were evaluated using leave-one-cell-type-out splits,
+with held-out cell types used for counterfactual benchmarking.
 
 **Counterfactual setup.** We define two domains: immune-hot and immune-cold tumor
 microenvironments, identified by the composition of T cells and myeloid cells in the

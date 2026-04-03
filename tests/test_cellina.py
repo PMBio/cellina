@@ -6,6 +6,7 @@ from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
 from cellina_graph import CellinaModel
+from cellina_graph._cellina_module import CellinaModule
 
 
 def _add_spatial_connectivity(adata, max_neighbors=5):
@@ -443,3 +444,71 @@ def test_normalize_losses_true(adata_with_spatial):
     np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.2)
     # assert fool is negative (since it's an adversarial loss)
     assert fool_scaled < 0, "Fool loss should be negative (adversarial weight is -1)"
+
+
+# ── SupCon unit tests ────────────────────────────────────────────────────────
+
+def _supcon_module():
+    return CellinaModule(
+        n_input=10,
+        library_log_means=np.zeros((1, 1)),
+        library_log_vars=np.ones((1, 1)),
+    )
+
+
+def test_supcon_loss():
+    """_compute_supcon_loss: positive, no-negatives, and no-edges cases."""
+    module = _supcon_module()
+    n_latent = 5
+
+    def _call(qsm, nbr, edge_index, domains_all):
+        return module._compute_supcon_loss(
+            qsm=qsm, neighbor_means=nbr, edge_index=edge_index,
+            domains_all=domains_all, batch_size=len(qsm), temperature=0.1,
+        )
+
+    # ── case 1: valid pairs → loss > 0
+    batch_size, n_nbr = 4, 4
+    qsm = torch.randn(batch_size, n_latent)
+    nbr = torch.randn(n_nbr, n_latent)
+    src = torch.arange(batch_size)
+    dst = torch.arange(batch_size, batch_size + n_nbr)
+    ei  = torch.stack([src, dst])
+    # seeds 0,1 + nbrs 0,1 → domain 0; seeds 2,3 + nbrs 2,3 → domain 1
+    domains = torch.tensor([0, 0, 1, 1, 0, 0, 1, 1])
+    loss = _call(qsm, nbr, ei, domains)
+    assert loss.shape == torch.Size([]) and loss.item() > 0.0
+
+    # ── case 2: all same domain → no negatives → loss == 0
+    domains_same = torch.zeros(batch_size + n_nbr, dtype=torch.long)
+    assert _call(qsm, nbr, ei, domains_same).item() == 0.0
+
+    # ── case 3: no edges → no neighbours → loss == 0
+    assert _call(
+        torch.randn(2, n_latent),
+        torch.zeros(0, n_latent),
+        torch.zeros(2, 0, dtype=torch.long),
+        torch.tensor([0, 1]),
+    ).item() == 0.0
+
+
+def test_supcon_model(adata_with_spatial):
+    """supcon_loss_raw > 0 when link_prediction_weight > 0 and domains differ."""
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaModel(adata_with_spatial, n_latent=5, link_prediction_weight=1.0)
+
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+
+    inference_outputs  = model.module.inference(**model.module._get_inference_input(batch))
+    generative_outputs = model.module.generative(**model.module._get_generative_input(batch, inference_outputs))
+    loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
+
+    assert "supcon_loss_raw" in loss_output.extra_metrics
+    assert loss_output.extra_metrics["supcon_loss_raw"] > 0
