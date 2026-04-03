@@ -89,7 +89,6 @@ class CellinaModule(BaseModuleClass):
         condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
         supcon_temperature: float = 0.1,
-        supcon_use_celltype: bool = False,
         use_observed_lib_size: bool = True,
         use_batch_norm: bool = True,
         convolution_type: str = "gcn",
@@ -108,7 +107,6 @@ class CellinaModule(BaseModuleClass):
         self.discriminator_lambda = discriminator_lambda
         self.link_prediction_weight = link_prediction_weight
         self.supcon_temperature = supcon_temperature
-        self.supcon_use_celltype = supcon_use_celltype
         self.latent_distribution = "normal"
         self.use_observed_lib_size = use_observed_lib_size
 
@@ -345,22 +343,15 @@ class CellinaModule(BaseModuleClass):
         qsm: torch.Tensor,
         neighbor_means: torch.Tensor,
         edge_index: torch.Tensor,
-        labels_all: torch.Tensor,
         domains_all: torch.Tensor,
         batch_size: int,
         temperature: float,
-        use_celltype: bool = False,
     ) -> torch.Tensor:
         """
         Spatial supervised contrastive loss on s.
 
-        When ``use_celltype=True`` (standard training with full cell-type coverage):
-          P(i): spatial neighbours j where labels[j] != labels[i]   (cross-cell-type)
-          N(i): any node j where domains[j] != domains[i]           (different niche)
-
-        When ``use_celltype=False`` (default; LOO or no cell-type labels):
-          P(i): spatial neighbours j where domains[j] == domains[i] (same niche)
-          N(i): any node j where domains[j] != domains[i]           (different niche)
+        P(i): spatial neighbours j where domains[j] == domains[i] (same niche)
+        N(i): any node j where domains[j] != domains[i]           (different niche)
 
         Seed nodes with no valid positive or no valid negative are excluded.
         """
@@ -379,10 +370,7 @@ class CellinaModule(BaseModuleClass):
             neighbor_idx = dst[edge_mask]
             if len(neighbor_idx) == 0:
                 continue
-            if use_celltype:
-                pos_mask = labels_all[neighbor_idx] != labels_all[i]   # cross-cell-type
-            else:
-                pos_mask = domains_all[neighbor_idx] == domains_all[i]  # same niche
+            pos_mask = domains_all[neighbor_idx] == domains_all[i]  # same niche
             pos_idx = neighbor_idx[pos_mask]
             if len(pos_idx) == 0:
                 continue
@@ -513,10 +501,6 @@ class CellinaModule(BaseModuleClass):
 
         # Spatial SupCon loss on s (cross-cell-type, across-niche)
         # Labels/domains for ALL subgraph nodes (seeds + neighbours, unsliced)
-        labels_all  = tensors["node_batch"].get(
-            REGISTRY_KEYS.LABELS_KEY,
-            torch.zeros(tensors["node_batch"]['X'].shape[0], dtype=torch.long, device=reconst_loss.device)
-        ).reshape(-1).long()
         domains_all = tensors["node_batch"].get(
             DOMAINS_KEY,
             torch.zeros(tensors["node_batch"]['X'].shape[0], dtype=torch.long, device=reconst_loss.device)
@@ -528,11 +512,9 @@ class CellinaModule(BaseModuleClass):
                 qsm=inference_outputs["qsm"],
                 neighbor_means=inference_outputs["neighbor_means"],
                 edge_index=inference_outputs["edge_index"],
-                labels_all=labels_all,
                 domains_all=domains_all,
                 batch_size=batch_size,
                 temperature=self.supcon_temperature,
-                use_celltype=self.supcon_use_celltype,
             )
         supcon_loss = supcon_loss_raw * self.link_prediction_weight * supcon_scale
 
