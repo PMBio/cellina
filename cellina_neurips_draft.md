@@ -225,7 +225,7 @@ count) but receive entirely different inputs: $z$ is encoded from cell-intrinsic
 counts, $s$ from the niche feature $\varphi(v)$ alone. Crucially, $s$ receives no
 supervision — no domain label, no cell type label, no explicit target. 
 
- **Why supervise $z$ and not $s$.** The dual supervision (classifier + adversary) is
+**Why supervise $z$ and not $s$.** The dual supervision (classifier + adversary) is
 applied only to $z$. The classifier ensures $z$ retains biologically meaningful cell
 identity; the adversary ensures $z$ does not encode domain-level spatial context.
 Together, they route microenvironmental variation away from $z$ and into $s$ —
@@ -303,31 +303,44 @@ target microenvironmental context. The pool is constructed to be cell-type-match
 for a seed cell $v$ of cell type $c$, $\mathcal{P}$ consists of cells of type $c$
 observed in the target domain.
 
-**Definition 1 (Edge Perturbation).** An edge perturbation replaces the niche feature
-$\varphi(v)$ of each seed cell $v \in \mathcal{I}$ with the niche feature of a
-randomly sampled donor cell from the pool:
+A tissue graph $G = (\mathcal{V}, \mathcal{E}, \tilde{X})$ has two distinct mutable
+components: the edge set $\mathcal{E}$, encoding neighborhood topology, and the node
+feature matrix $\tilde{X}$, encoding cell expression. We use do-notation to formally
+distinguish the two counterfactual queries: $\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$
+denotes replacing the edges of $v$ — changing *who* its neighbors are — and
+$\mathrm{do}\!\bigl(\{\tilde{x}_u\} \leftarrow \{\tilde{x}'_u\}\bigr)$ denotes replacing
+neighbor features — changing *what* they express — while topology is held fixed. In
+both cases, $z_v$ is held fixed at its value inferred from $v$'s own expression $x_v$.
+
+**Definition 1 (Edge Perturbation).** An edge perturbation applies
+$\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$, where $\mathcal{E}'_v$ connects
+$v$ to a uniformly sampled donor $u \in \mathcal{P}$. Because $\varphi(v)$ is a
+degree-normalized aggregation, exhaustively replacing $v$'s neighbors with $\mathcal{P}$
+is equivalent to substituting:
 
 $$\varphi'(v) = \varphi(u), \quad u \sim \mathrm{Uniform}(\mathcal{P})$$
 
-That is, the neighborhood of $v$ is replaced by the actual observed neighborhood of a
-cell of the same type in the target context. The counterfactual prediction is:
+The counterfactual prediction is:
 
-$$\hat{x}_v^\mathrm{cf} = \mathbb{E}_{q(z \mid x_v)}\, \mathbb{E}_{q(s \mid \varphi'(v))}\bigl[p(x \mid z, s)\bigr]$$
+$$\hat{x}_v^\mathrm{cf}
+= \mathbb{E}\bigl[x_v \;\big|\; z_v,\, \mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)\bigr]
+= \mathbb{E}_{q(z \mid x_v)}\,\mathbb{E}_{q(s \mid \varphi'(v))}\bigl[p(x \mid z, s)\bigr]$$
 
-Note that $z$ is always inferred from $v$'s own expression $x_v$ — intrinsic identity
-is held fixed. Only the spatial input to the $s$ encoder is substituted.
+$z_v$ is inferred from $v$'s own expression — intrinsic identity is held fixed; only
+the spatial input to the $s$-encoder is substituted.
 
 We do not claim that $\varphi'(v)$ is equivalent to recomputing a pseudobulk over a
 rewired graph. That equivalence holds only if the full neighborhood of $v$ in
 $\mathcal{G}$ were replaced by $\mathcal{P}$, with all edges incident to $v$ rewired
 simultaneously. When partial edge rewiring is considered, the aggregated feature would
-need to be recomputed over the resulting mixed neighborhood. Our implementation
-replaces $\varphi(v)$ directly with a sampled donor feature, which corresponds to
+need to be recomputed over the resulting mixed neighborhood. In our experiments, we
+replace $\varphi(v)$ directly with a sampled donor feature, which corresponds to
 the exhaustive replacement case — the entire neighborhood context of $v$ is swapped for
 that of a cell in the target domain.
 
-**Definition 2 (Node Perturbation).** A node perturbation preserves the graph topology
-$\mathcal{E}$ but alters the expression of $v$'s neighbors before aggregation.
+**Definition 2 (Node Perturbation).** A node perturbation applies
+$\mathrm{do}\!\bigl(\{\tilde{x}_u\}_{u \in \mathcal{N}(v)} \leftarrow \{\tilde{x}'_u\}\bigr)$,
+preserving topology $\mathcal{E}_v$ and modifying only the neighbor feature matrix.
 Given a cell-type-specific log fold-change map
 $\delta: (c, g) \mapsto \delta_{c,g} \in \mathbb{R}$ derived from differential
 expression between source and target domains, the counterfactual neighbor expression
@@ -339,6 +352,12 @@ and the perturbed niche feature is re-aggregated over the unmodified graph:
 
 $$\varphi'(v) = \frac{\sum_u C_{vu}\, \tilde{x}'_u}{\sum_u C_{vu}}$$
 
+The counterfactual prediction is:
+
+$$\hat{x}_v^\mathrm{cf}
+= \mathbb{E}\bigl[x_v \;\big|\; z_v,\, \mathrm{do}\!\bigl(\{\tilde{x}_u\} \leftarrow \{\tilde{x}'_u\}\bigr)\bigr]
+= \mathbb{E}_{q(z \mid x_v)}\,\mathbb{E}_{q(s \mid \varphi'(v))}\bigl[p(x \mid z, s)\bigr]$$
+
 Because the aggregation is linear, the perturbation propagates exactly: the change
 in $\varphi'(v)$ reflects the composition-weighted average of the logFC shifts applied
 to each neighbor, scaled by proximity. When the perturbation covers only a subset of
@@ -346,11 +365,13 @@ $k < G$ genes per cell type, the remaining $G - k$ dimensions of $\tilde{x}'_u$ 
 left unchanged, yielding a partial microenvironmental intervention — for example,
 shifting only cytokine-related or pathway-specific expression across neighbors.
 
-**The convergence property.** As $k \to G$, the node perturbation approaches a
+**The convergence property.** As $k \to G$, the intervention
+$\mathrm{do}\!\bigl(\{\tilde{x}_u\} \leftarrow \{\tilde{x}'_u\}\bigr)$ approaches
+$\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$ in distribution: a
 whole-transcriptome rescaling of neighbor expression toward the target domain's mean
-profile. In the limit, the resulting $\varphi'(v)$ converges in expectation toward
-what edge perturbation produces — since both replace the effective neighbor signal with
-a representation of the target context. We verify this empirically in §4.4 (Figure X):
+profile makes the post-intervention neighbor signal equivalent in expectation to
+sampling a donor neighborhood directly. In the limit, $\varphi'(v)$ from node
+perturbation converges to $\varphi(u)$ from edge perturbation. We verify this empirically in §4.4 (Figure X):
 node perturbation performance increases monotonically with $k$ and approaches the edge
 perturbation ceiling. Cell-type-specific logFC consistently outperforms global logFC
 throughout, confirming that the model captures heterogeneous cell-type-specific
