@@ -63,7 +63,16 @@ class CellinaModule(BaseModuleClass):
         Defaults to True in this module; the graph-aware CellinaModel overrides this to False —
         keeping spatial context independent of the target cell's intrinsic identity.
     link_prediction_weight
-        Weight for the edge prediction loss. Set to 0 (default) to disable link prediction.
+        Weight for the spatial loss on ``s``. Set to 0 (default) to disable.
+        Applied to whichever ``spatial_loss_type`` is selected.
+    spatial_loss_type
+        Which spatial loss to apply to ``s``. One of ``"supcon"`` (supervised contrastive,
+        default) or ``"domain_clf"`` (cross-entropy classifier predicting domains from ``s``).
+    supcon_require_same_domain
+        If True, only same-domain neighbours count as positives in the SupCon loss and
+        negatives are different-domain nodes. If False (default), all neighbours are
+        positives and non-neighbours are negatives (pure spatial contrastive).
+        Only used when ``spatial_loss_type="supcon"``.
     convolution_type
         Which graph convolution to use in the spatial encoder. One of ``"gcn"``, ``"gat"``,
         ``"gin"``, ``"sg"``. Defaults to ``"gat"``.
@@ -88,7 +97,9 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
-        supcon_temperature: float = 0.1,
+        spatial_loss_type: str = "supcon",
+        supcon_temperature: float = 0.25,
+        supcon_require_same_domain: bool = False,
         use_observed_lib_size: bool = True,
         use_batch_norm: bool = True,
         convolution_type: str = "gcn",
@@ -106,7 +117,9 @@ class CellinaModule(BaseModuleClass):
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
         self.link_prediction_weight = link_prediction_weight
+        self.spatial_loss_type = spatial_loss_type
         self.supcon_temperature = supcon_temperature
+        self.supcon_require_same_domain = supcon_require_same_domain
         self.latent_distribution = "normal"
         self.use_observed_lib_size = use_observed_lib_size
 
@@ -199,6 +212,20 @@ class CellinaModule(BaseModuleClass):
                 **discriminator_kwargs
             )
 
+        # Spatial domain classifier on s (positive direction: s should encode domain)
+        self.s_domain_classifier: Optional[Classifier] = None
+        if link_prediction_weight > 0 and spatial_loss_type == "domain_clf":
+            if n_domains is None or n_domains < 2:
+                raise ValueError(
+                    "spatial_loss_type='domain_clf' requires n_domains >= 2. "
+                    "Please provide domains_key in setup_anndata()."
+                )
+            self.s_domain_classifier = Classifier(
+                n_input=n_latent,
+                n_labels=n_domains,
+                logits=True,
+            )
+
     def _get_inference_input(self, tensors):
         """Parse the dictionary to get appropriate args."""
         if 'node_batch' not in tensors:
@@ -259,7 +286,9 @@ class CellinaModule(BaseModuleClass):
         qsm, qsv, s, neighbor_means = self.s_encoder(
             spatial_input, edge_index, batch_index,
             batch_size=batch_size,
-            return_neighbor_means=(self.link_prediction_weight > 0),
+            return_neighbor_means=(
+                self.link_prediction_weight > 0 and self.spatial_loss_type == "supcon"
+            ),
         )
 
         # Library size
@@ -300,6 +329,10 @@ class CellinaModule(BaseModuleClass):
         # Domain discriminator (on sliced z)
         if self.domain_discriminator is not None:
             outputs["discriminator_logits"] = self.domain_discriminator(z_sliced)
+
+        # Spatial domain classifier (on s)
+        if self.s_domain_classifier is not None:
+            outputs["s_domain_logits"] = self.s_domain_classifier(s)
 
         return outputs
 
@@ -346,12 +379,18 @@ class CellinaModule(BaseModuleClass):
         domains_all: torch.Tensor,
         batch_size: int,
         temperature: float,
+        require_same_domain: bool = False,
     ) -> torch.Tensor:
         """
         Spatial supervised contrastive loss on s.
 
-        P(i): spatial neighbours j where domains[j] == domains[i] (same niche)
-        N(i): any node j where domains[j] != domains[i]           (different niche)
+        When require_same_domain=False (default):
+            P(i): all spatial neighbours j
+            N(i): any node j where domains[j] != domains[i]           (different niche)
+
+        When require_same_domain=True:
+            P(i): spatial neighbours j where domains[j] == domains[i] (same niche)
+            N(i): any node j where domains[j] != domains[i]           (different niche)
 
         Seed nodes with no valid positive or no valid negative are excluded.
         """
@@ -365,23 +404,30 @@ class CellinaModule(BaseModuleClass):
         n_valid = 0
 
         for i in range(batch_size):
-            # Positive set: depends on mode
+            # Neighbours of seed node i
             edge_mask = src == i
             neighbor_idx = dst[edge_mask]
             if len(neighbor_idx) == 0:
                 continue
-            pos_mask = domains_all[neighbor_idx] == domains_all[i]  # same niche
-            pos_idx = neighbor_idx[pos_mask]
-            if len(pos_idx) == 0:
+
+            if require_same_domain:
+                # Positive set: same-niche neighbours only
+                pos_mask = domains_all[neighbor_idx] == domains_all[i]
+                pos_idx = neighbor_idx[pos_mask]
+                if len(pos_idx) == 0:
+                    continue
+            else:
+                # Positive set: all neighbours
+                pos_idx = neighbor_idx
+
+            # Negative set: different-domain nodes
+            neg_mask = domains_all != domains_all[i]
+
+            if neg_mask.sum() == 0:
                 continue
 
             sim_i = (s_all[i].unsqueeze(0) * s_all).sum(dim=-1) / temperature  # (N_total,)
             sim_i[i] = float('-inf')                                              # exclude self
-
-            # Negative set: different niche label
-            neg_mask = domains_all != domains_all[i]
-            if neg_mask.sum() == 0:
-                continue
 
             # Denominator: positives union negatives (minus self)
             denom_mask = torch.zeros(s_all.size(0), dtype=torch.bool, device=qsm.device)
@@ -408,7 +454,7 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
-        supcon_scale: float = 1.0,
+        spatial_scale: float = 1.0,
     ):
         """Loss function."""
         # Graph-aware batch format
@@ -499,29 +545,42 @@ class CellinaModule(BaseModuleClass):
         fool_loss_raw = -fool_ce  # negate for adversarial direction (maximize disc CE)
         fool_loss_scaled = fool_loss_raw * discriminator_scale * discriminator_lambda
 
-        # Spatial SupCon loss on s (cross-cell-type, across-niche)
+        # Spatial loss on s: either SupCon or domain classifier
         # Labels/domains for ALL subgraph nodes (seeds + neighbours, unsliced)
         domains_all = tensors["node_batch"].get(
             DOMAINS_KEY,
             torch.zeros(tensors["node_batch"]['X'].shape[0], dtype=torch.long, device=reconst_loss.device)
         ).reshape(-1).long()
 
-        supcon_loss_raw = torch.tensor(0.0, device=reconst_loss.device)
-        if self.link_prediction_weight > 0 and inference_outputs.get("neighbor_means") is not None:
-            supcon_loss_raw = self._compute_supcon_loss(
-                qsm=inference_outputs["qsm"],
-                neighbor_means=inference_outputs["neighbor_means"],
-                edge_index=inference_outputs["edge_index"],
-                domains_all=domains_all,
-                batch_size=batch_size,
-                temperature=self.supcon_temperature,
-            )
-        supcon_loss = supcon_loss_raw * self.link_prediction_weight * supcon_scale
+        spatial_loss_raw = torch.tensor(0.0, device=reconst_loss.device)
+        s_domain_accuracy = 0.0
+        if self.link_prediction_weight > 0:
+            if self.spatial_loss_type == "supcon" and inference_outputs.get("neighbor_means") is not None:
+                spatial_loss_raw = self._compute_supcon_loss(
+                    qsm=inference_outputs["qsm"],
+                    neighbor_means=inference_outputs["neighbor_means"],
+                    edge_index=inference_outputs["edge_index"],
+                    domains_all=domains_all,
+                    batch_size=batch_size,
+                    temperature=self.supcon_temperature,
+                    require_same_domain=self.supcon_require_same_domain,
+                )
+            elif self.spatial_loss_type == "domain_clf":
+                s_clf_loss, s_domain_accuracy = self._compute_classifier_metrics(
+                    classifier=self.s_domain_classifier,
+                    weight=self.link_prediction_weight,
+                    inference_outputs=inference_outputs,
+                    labels=domain_labels,
+                    reconst_loss_shape=reconst_loss,
+                    metric_name="s_domain",
+                )
+                spatial_loss_raw = s_clf_loss.mean()
+        spatial_loss = spatial_loss_raw * self.link_prediction_weight * spatial_scale
 
         # Total loss
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
-        loss = vae_loss + supcon_loss
+        loss = vae_loss + spatial_loss
 
         kl_local = dict(
             kl_divergence_l=kl_divergence_l,
@@ -537,8 +596,9 @@ class CellinaModule(BaseModuleClass):
             'fool_loss_raw': fool_loss_raw.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
-            'supcon_loss_raw': supcon_loss_raw,
-            'supcon_loss': supcon_loss,
+            'spatial_loss_raw': spatial_loss_raw,
+            'spatial_loss': spatial_loss,
+            's_domain_accuracy': s_domain_accuracy,
         }
 
         return LossOutput(

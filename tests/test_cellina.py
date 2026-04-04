@@ -397,7 +397,7 @@ def test_normalize_losses_true(adata_with_spatial):
     # Check fixed scales were computed (should be positive after warmup)
     assert training_plan._scale_clf  > 0, "Fixed scale for clf loss should be positive"
     assert training_plan._scale_fool > 0, "Fixed scale for fool loss should be positive"
-    assert training_plan._scale_supcon > 0, "Fixed scale for supcon loss should be positive"
+    assert training_plan._scale_spatial > 0, "Fixed scale for spatial loss should be positive"
 
     # Check normalize_losses flag is set correctly
     assert training_plan._normalize_losses == True
@@ -493,7 +493,7 @@ def test_supcon_loss():
 
 
 def test_supcon_model(adata_with_spatial):
-    """supcon_loss_raw > 0 when link_prediction_weight > 0 and domains differ."""
+    """spatial_loss_raw > 0 when link_prediction_weight > 0 and domains differ (supcon)."""
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
@@ -510,5 +510,78 @@ def test_supcon_model(adata_with_spatial):
     generative_outputs = model.module.generative(**model.module._get_generative_input(batch, inference_outputs))
     loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
 
-    assert "supcon_loss_raw" in loss_output.extra_metrics
-    assert loss_output.extra_metrics["supcon_loss_raw"] > 0
+    assert "spatial_loss_raw" in loss_output.extra_metrics
+    assert loss_output.extra_metrics["spatial_loss_raw"] > 0
+
+
+def test_domain_clf_model(adata_with_spatial):
+    """spatial_loss_raw > 0 when spatial_loss_type='domain_clf' and link_prediction_weight > 0."""
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaModel(
+        adata_with_spatial, n_latent=5,
+        link_prediction_weight=1.0,
+        spatial_loss_type="domain_clf",
+    )
+
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    batch = next(iter(dataloader))
+
+    inference_outputs  = model.module.inference(**model.module._get_inference_input(batch))
+    generative_outputs = model.module.generative(**model.module._get_generative_input(batch, inference_outputs))
+    loss_output = model.module.loss(batch, inference_outputs, generative_outputs)
+
+    assert "spatial_loss_raw" in loss_output.extra_metrics
+    assert loss_output.extra_metrics["spatial_loss_raw"] > 0
+    assert "s_domain_accuracy" in loss_output.extra_metrics
+
+
+def test_normalize_losses_spatial_scale(adata_with_spatial):
+    """spatial_loss is scaled by _scale_spatial when normalize_losses=True, for both loss types."""
+    for spatial_loss_type in ("supcon", "domain_clf"):
+        CellinaModel.setup_anndata(
+            adata_with_spatial,
+            batch_key="batch",
+            labels_key="cell_labels",
+            domains_key="domain",
+            spatial_connectivities_key="spatial_connectivities",
+        )
+        link_prediction_weight = 1.0
+        model = CellinaModel(
+            adata_with_spatial, n_latent=5,
+            discriminator_lambda=1.0,
+            link_prediction_weight=link_prediction_weight,
+            spatial_loss_type=spatial_loss_type,
+        )
+        model.train(max_epochs=2, train_size=0.5, plan_kwargs={"normalize_losses": True})
+
+        training_plan = model.trainer.strategy.model
+        assert training_plan._warmup_done
+        assert training_plan._scale_spatial > 0, \
+            f"_scale_spatial should be positive for spatial_loss_type={spatial_loss_type!r}"
+
+        expected_scale = training_plan._scale_spatial
+        model.module.eval()
+        model.module.to("cpu")
+        dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+        batch = next(iter(dataloader))
+
+        with torch.no_grad():
+            inf_out = model.module.inference(**model.module._get_inference_input(batch))
+            gen_out = model.module.generative(**model.module._get_generative_input(batch, inf_out))
+            loss_out = model.module.loss(
+                batch, inf_out, gen_out,
+                spatial_scale=expected_scale,
+            )
+
+        spatial_raw    = loss_out.extra_metrics["spatial_loss_raw"].item()
+        spatial_scaled = loss_out.extra_metrics["spatial_loss"].item()
+        np.testing.assert_allclose(
+            spatial_scaled, spatial_raw * expected_scale * link_prediction_weight, rtol=1e-4,
+            err_msg=f"Scale mismatch for spatial_loss_type={spatial_loss_type!r}",
+        )

@@ -48,9 +48,11 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     discriminator_lambda
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
     link_prediction_weight
-        Weight for the spatial SupCon loss on ``s``. When > 0, enforces that spatially
-        adjacent cells of different cell types have similar ``s`` representations while
-        cells from different niches are pushed apart. Set to 0 (default) to disable.
+        Weight for the spatial loss on ``s``. Set to 0 (default) to disable.
+        Applied to whichever ``spatial_loss_type`` is selected.
+    spatial_loss_type
+        Which spatial loss to apply to ``s``. One of ``"supcon"`` (supervised contrastive,
+        default) or ``"domain_clf"`` (cross-entropy classifier predicting domain from ``s``).
     supcon_temperature
         Temperature for the SupCon loss (only used when ``link_prediction_weight > 0``).
         Default: 0.1.
@@ -90,8 +92,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         discriminator_lambda: float = 1.0,
         condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 1.0,
+        spatial_loss_type: str = "supcon",
         classifier_lambda: float = 1.0,
-        supcon_temperature: float = 0.1,
+        supcon_temperature: float = 0.25,
         num_neighbors: List[int] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gcn",
@@ -123,6 +126,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_domains=self.summary_stats.get("n_domains"),
             condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
+            spatial_loss_type=spatial_loss_type,
             classifier_lambda=classifier_lambda,
             supcon_temperature=supcon_temperature,
             use_observed_lib_size=use_observed_lib_size,

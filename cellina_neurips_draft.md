@@ -586,7 +586,8 @@ hyperparameter sensitivity (discriminator learning rate, $\lambda_\text{disc}$);
 we ablate these in Appendix §E. Edge perturbation in Cellina-graph requires
 constructing a modified neighbor graph at inference time; this is handled efficiently
 using PyG's subgraph sampling utilities, but adds overhead for large counterfactual
-query sets.
+query sets. Future work can explore graph-informed supervision strategies that are
+less prone to mode collapse [cite: https://arxiv.org/abs/2105.04906]
 
 **Broader impact.** Spatial graph counterfactuals, as defined here, make implicit
 causal assumptions — that intervening on neighbors changes expression in a predictable

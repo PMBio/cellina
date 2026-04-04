@@ -45,14 +45,14 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.automatic_optimization = False
 
         # Warmup collection: collect first-epoch losses to compute fixed normalization scales
-        self._warmup_stats = {"scvi": [], "fool": [], "clf": [], "supcon": []}
+        self._warmup_stats = {"scvi": [], "fool": [], "clf": [], "spatial": []}
         self._warmup_done = False
         self._normalize_losses = normalize_losses
 
         # Fixed normalization scales (computed once from epoch-0 warmup stats)
-        self._scale_clf    = 1.0
-        self._scale_fool   = 1.0
-        self._scale_supcon = 1.0
+        self._scale_clf     = 1.0
+        self._scale_fool    = 1.0
+        self._scale_spatial = 1.0
 
     def training_step(self, batch, batch_idx):
         opts = self.optimizers()
@@ -77,12 +77,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     scvi_val   = float(scvi_loss.loss.detach().cpu().item())
                     fool_val   = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
                     clf_val    = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
-                    supcon_val = abs(float(scvi_loss.extra_metrics.get("supcon_loss_raw", 0.0)))
+                    spatial_val = abs(float(scvi_loss.extra_metrics.get("spatial_loss_raw", 0.0)))
 
                     self._warmup_stats["scvi"].append(scvi_val)
                     self._warmup_stats["fool"].append(fool_val)
                     self._warmup_stats["clf"].append(clf_val)
-                    self._warmup_stats["supcon"].append(supcon_val)
+                    self._warmup_stats["spatial"].append(spatial_val)
 
                 return {"loss": scvi_loss.loss}
 
@@ -90,9 +90,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         if (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
             if self._normalize_losses:
                 vae_mean = np.mean(self._warmup_stats["scvi"])
-                self._scale_clf    = vae_mean / (np.mean(self._warmup_stats["clf"])    + 1e-8)
-                self._scale_fool   = vae_mean / (np.mean(self._warmup_stats["fool"])   + 1e-8)
-                self._scale_supcon = vae_mean / (np.mean(self._warmup_stats["supcon"]) + 1e-8)
+                self._scale_clf     = vae_mean / (np.mean(self._warmup_stats["clf"])     + 1e-8)
+                self._scale_fool    = vae_mean / (np.mean(self._warmup_stats["fool"])    + 1e-8)
+                self._scale_spatial = vae_mean / (np.mean(self._warmup_stats["spatial"]) + 1e-8)
                 self._warmup_stats.clear()  # Free memory
             self._warmup_done = True
 
@@ -134,9 +134,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             p.requires_grad = False
 
         # Fixed normalization scales (computed once from epoch-0 warmup stats)
-        scale_clf    = self._scale_clf    if self._normalize_losses else 1.0
-        scale_fool   = self._scale_fool   if self._normalize_losses else 1.0
-        scale_supcon = self._scale_supcon if self._normalize_losses else 1.0
+        scale_clf     = self._scale_clf     if self._normalize_losses else 1.0
+        scale_fool    = self._scale_fool    if self._normalize_losses else 1.0
+        scale_spatial = self._scale_spatial if self._normalize_losses else 1.0
 
         # Single forward pass with scales
         inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -146,18 +146,18 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 "discriminator_lambda": kappa,
                 "classifier_scale": scale_clf,
                 "discriminator_scale": scale_fool,
-                "supcon_scale": scale_supcon,
+                "spatial_scale": scale_spatial,
             }
         )
 
         # Extract losses (tensors for gradient flow)
-        vae_loss    = scvi_loss.extra_metrics["vae_loss"]       # pure VAE
-        clf_loss    = scvi_loss.extra_metrics["classifier_loss"] # scaled
-        fool_loss   = scvi_loss.extra_metrics["fool_loss"]       # scaled
-        supcon_loss = scvi_loss.extra_metrics.get("supcon_loss", torch.tensor(0.0))  # already scaled
+        vae_loss     = scvi_loss.extra_metrics["vae_loss"]        # pure VAE
+        clf_loss     = scvi_loss.extra_metrics["classifier_loss"]  # scaled
+        fool_loss    = scvi_loss.extra_metrics["fool_loss"]        # scaled
+        spatial_loss = scvi_loss.extra_metrics.get("spatial_loss", torch.tensor(0.0))  # already scaled
 
         # Total training loss
-        total_train_loss = vae_loss + clf_loss + fool_loss + supcon_loss
+        total_train_loss = vae_loss + clf_loss + fool_loss + spatial_loss
 
         # Backward pass
         opt_vae.zero_grad()
@@ -171,18 +171,18 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
 
         if self._normalize_losses:
-            self.log("scale_clf_train",    scale_clf,    on_step=False, on_epoch=True)
-            self.log("scale_fool_train",   scale_fool,   on_step=False, on_epoch=True)
-            self.log("scale_supcon_train", scale_supcon, on_step=False, on_epoch=True)
+            self.log("scale_clf_train",     scale_clf,     on_step=False, on_epoch=True)
+            self.log("scale_fool_train",    scale_fool,    on_step=False, on_epoch=True)
+            self.log("scale_spatial_train", scale_spatial, on_step=False, on_epoch=True)
 
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
 
         return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
-        scale_clf    = self._scale_clf    if self._normalize_losses else 1.0
-        scale_fool   = self._scale_fool   if self._normalize_losses else 1.0
-        scale_supcon = self._scale_supcon if self._normalize_losses else 1.0
+        scale_clf     = self._scale_clf     if self._normalize_losses else 1.0
+        scale_fool    = self._scale_fool    if self._normalize_losses else 1.0
+        scale_spatial = self._scale_spatial if self._normalize_losses else 1.0
 
         with torch.no_grad():
             kappa = self.module.discriminator_lambda
@@ -193,7 +193,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     "discriminator_lambda": kappa,
                     "classifier_scale": scale_clf,
                     "discriminator_scale": scale_fool,
-                    "supcon_scale": scale_supcon,
+                    "spatial_scale": scale_spatial,
                 }
             )
 
@@ -216,7 +216,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean() * kappa
             scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
 
-        # Mirror train_loss: vae + supcon (in scvi_loss.loss) + clf + fool
+        # Mirror train_loss: vae + spatial (in scvi_loss.loss) + clf + fool
         clf_loss_val  = scvi_loss.extra_metrics["classifier_loss"]
         fool_loss_val = scvi_loss.extra_metrics["fool_loss"]
         total_val_loss = scvi_loss.loss + clf_loss_val + fool_loss_val
@@ -272,6 +272,6 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
     def on_train_epoch_end(self):
         """Log fixed normalization scales after warmup epoch."""
         if self._warmup_done and getattr(self, "current_epoch", 0) == 1:
-            self.log("scale_clf_fixed",    self._scale_clf,    on_step=False, on_epoch=True)
-            self.log("scale_fool_fixed",   self._scale_fool,   on_step=False, on_epoch=True)
-            self.log("scale_supcon_fixed", self._scale_supcon, on_step=False, on_epoch=True)
+            self.log("scale_clf_fixed",     self._scale_clf,     on_step=False, on_epoch=True)
+            self.log("scale_fool_fixed",    self._scale_fool,    on_step=False, on_epoch=True)
+            self.log("scale_spatial_fixed", self._scale_spatial, on_step=False, on_epoch=True)
