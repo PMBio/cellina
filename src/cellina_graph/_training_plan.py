@@ -74,7 +74,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     }
                 )
                 if self._normalize_losses:
-                    scvi_val   = float(scvi_loss.loss.detach().cpu().item())
+                    scvi_val   = float(scvi_loss.extra_metrics["vae_loss"].detach().cpu().item())
                     fool_val   = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
                     clf_val    = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
                     spatial_val = abs(float(scvi_loss.extra_metrics.get("spatial_loss_raw", 0.0)))

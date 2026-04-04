@@ -531,7 +531,7 @@ class CellinaModule(BaseModuleClass):
             reconst_loss_shape=reconst_loss,
             metric_name="classifier",
         )
-        classifier_loss_scaled = classifier_loss_raw * classifier_scale * self.classifier_lambda
+        classifier_loss_scaled = (classifier_loss_raw * classifier_scale * self.classifier_lambda).mean()
 
         # Domain discriminator (fool loss)
         fool_ce, discriminator_accuracy = self._compute_classifier_metrics(
@@ -543,7 +543,7 @@ class CellinaModule(BaseModuleClass):
             metric_name="discriminator",
         )
         fool_loss_raw = -fool_ce  # negate for adversarial direction (maximize disc CE)
-        fool_loss_scaled = fool_loss_raw * discriminator_scale * discriminator_lambda
+        fool_loss_scaled = (fool_loss_raw * discriminator_scale * discriminator_lambda).mean()
 
         # Spatial loss on s: either SupCon or domain classifier
         # Labels/domains for ALL subgraph nodes (seeds + neighbours, unsliced)
@@ -580,7 +580,7 @@ class CellinaModule(BaseModuleClass):
         # Total loss
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
-        loss = vae_loss + spatial_loss
+        loss = vae_loss + classifier_loss_scaled + fool_loss_scaled + spatial_loss
 
         kl_local = dict(
             kl_divergence_l=kl_divergence_l,
@@ -591,10 +591,10 @@ class CellinaModule(BaseModuleClass):
         extra_metrics = {
             'vae_loss': vae_loss,
             'classifier_loss_raw': classifier_loss_raw.mean(),
-            'classifier_loss': classifier_loss_scaled.mean(),
+            'classifier_loss': classifier_loss_scaled,
             'classifier_accuracy': classifier_accuracy,
             'fool_loss_raw': fool_loss_raw.mean(),
-            'fool_loss': fool_loss_scaled.mean(),
+            'fool_loss': fool_loss_scaled,
             'fool_accuracy': discriminator_accuracy,
             'spatial_loss_raw': spatial_loss_raw,
             'spatial_loss': spatial_loss,
