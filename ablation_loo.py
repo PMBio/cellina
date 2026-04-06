@@ -21,14 +21,14 @@ from cellina_graph._spatial_utils import spatial_neighbors
 from perturb_utils import load_crc_slide, split_indices, compute_cf_logfc
 
 # ── Config ───────────────────────────────────────────────────────────────────
-HOLDOUT_CELLTYPES    = ["Epithelial", "T_cell", "Fibroblast", "Myeloid", "Endothelial"]
+HOLDOUT_CELLTYPES    = ["Epithelial", "T_cell", "Myeloid"]
 SPATIAL_LOSS_TYPES   = ["supcon", "domain_clf"]
-LINK_PREDICTION_WEIGHTS = [0, 0.01, 0.1, 0.5, 1]
+LINK_PREDICTION_WEIGHTS = [0, 0.01, 0.1, 1]
 
-SLIDE_ID      = 232
+SLIDE_ID      = 242
 LABELS_KEY    = "coarse_type"
 DOMAINS_KEY   = "typ"
-TOP_N         = 100
+TOP_N         = 50
 MIN_CELLS     = 50
 BATCH_SIZE    = 512
 LIBRARY_SIZE  = 1e4
@@ -114,7 +114,7 @@ def run_one(adata_base, holdout_celltype, link_prediction_weight, spatial_loss_t
 
     adata.obsm["s"] = model.get_latent_representation(latent_key="s")
     rng = np.random.default_rng(seed=42)
-    sub_idx = rng.choice(adata.n_obs, size=int(adata.n_obs * 0.2), replace=False)
+    sub_idx = rng.choice(adata.n_obs, size=int(adata.n_obs * 0.25), replace=False)
     ari_nmi = scib_metrics.nmi_ari_cluster_labels_kmeans(
         labels=adata.obs[DOMAINS_KEY].values[sub_idx],
         X=adata.obsm["s"][sub_idx],

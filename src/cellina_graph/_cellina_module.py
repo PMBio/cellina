@@ -101,7 +101,7 @@ class CellinaModule(BaseModuleClass):
         supcon_temperature: float = 0.25,
         supcon_require_same_domain: bool = False,
         use_observed_lib_size: bool = True,
-        use_batch_norm: bool = True,
+        use_batch_norm: bool = False, # TODO: can double check later if GCN batch norm is correctly done for edge cases (e.g. supcon, etc.)
         convolution_type: str = "gcn",
     ):
         super().__init__()
