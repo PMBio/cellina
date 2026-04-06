@@ -7,22 +7,22 @@
 ## Abstract
 
 Understanding how tissue microenvironments shape cellular gene expression is a fundamental
-challenge in biology. Existing perturbation models transfer context by shifting
-latent representations toward group averages — often collapsing the continuous, compositional
-variation arising from individual neighbor combinations into a single label. We argue
+challenge in biology. Existing perturbation models often perform context transfers by shifting
+latent representations toward group averages, thereby generally collapsing the continuous, compositional
+variation arising from individual neighbor combinations into single labels. We argue
 this is a structural limitation: no spatially-uniform method can recover the cell-specific
 effects of microenvironmental contexts. To address this, we formalize *spatial graph*
 counterfactuals*, a class of interventional queries over tissue graphs in which a cell's
 neighborhood is altered either by rewiring graph edges (*edge perturbation*) or by
 modifying neighbor feature vectors (*node perturbation*). We present Cellina, a generative
-model that disentangles intrinsic cell identity from niche composition via dual supervision. 
+model that disentangles intrinsic cell identity from microenvironmental effects via dual supervision. 
 A cell-type classifier anchors the intrinsic representation to its label while an adversarial 
 discriminator removes spatial domain information from it, enabling counterfactual niche transfer by direct substitution of neighbor inputs.
-Across disentanglement and counterfactual benchmarks on emerging spatial transcriptomics technologies, Cellina outperforms both spatially-informed and spatially-agnostic baselines.
+Across a set of counterfactual benchmarks on emerging spatial transcriptomics technologies, Cellina outperforms both spatially-informed and spatially-agnostic baselines.
 Critically, Cellina's learned spatial representation identifies microenvironmental
 subtypes finer than discrete spatial domain labels, and we show that routing
-counterfactual queries through these subtypes further improves prediction accuracy —
-demonstrating that the representation captures neighbor-level context that methods
+counterfactual queries through these subtypes further improves prediction accuracy; thereby
+demonstrating that the representation captures microenvironmental context that methods
 designed for uniform perturbations cannot recover.
 
 ---
@@ -30,24 +30,24 @@ designed for uniform perturbations cannot recover.
 ## 1. Introduction
 
 Perturbation models for single-cell genomics have largely been developed for
-uniform perturbations — interventions in which the same stimulus (a drug, a
+uniform perturbations — interventions in which the same stimulus (e.g., a drug or a
 genetic knockout) is applied to every cell [scGEN, CPA, GEARS]. While cellular responses
 to such perturbations vary by cell state, this variation is intrinsic: it arises
 from differences in each cell's own transcriptional program, not from differences in
 the perturbation stimulus itself. This shared-stimulus structure licenses commonly utilized mean-shift
-context transfers (DimitrovSchrod [cite]): because the intervention is the same for all
-cells, averaging latent representations recovers its expected effect
-(Systema [cite], Ahlmann [cite]). More recent methods based on optimal transport
-[CellOT [cite], cite] or flow matching [cite] go further, modeling individual cell
-trajectories to produce cell-specific predictions — yet the perturbation input remains
-a single signal shared across the population.
+context transfers (DimitrovSchrod [cite]), where even methods that handle continuous dosage (CPA) or combinatorial
+perturbations (CPA; GEARS) share it. More recent methods based on optimal transport
+[CellOT [cite], cite] or flow matching [cite], in theory, go further, modeling individual cell
+trajectories to produce cell-specific predictions, yet the perturbation input remains
+a single signal shared across the population. Thus, because the intervention is the same for all
+cells, average effect models were recently shown to do well at recovering anticipated response
+(Systema [cite], Ahlmann [cite]).
 
 The cellular microenvironment lacks this uniform structure, and emerging spatial transcriptomics technologies now enable its measurement at ever-increasing scales. In every tissue, a
 cell's transcriptional state is shaped not by a shared external stimulus but by its
 microenvironment — the particular combination of neighboring cells, their
-transcriptional states, and the signals they emit. Each cell's neighborhood is thus a
-unique combination, where two cells of the same cell type (group), positioned even a hundred microns
-apart, may occupy fundamentally different states and express substantially different states due to their unique microenvironmental contexts. 
+transcriptional states, and the signals they emit. Each cell's neighborhood is thus unique, where two cells of the same cell type (group), positioned even a hundred microns
+apart, may occupy fundamentally different states due to their unique microenvironmental contexts. 
 This means cell-specific response modeling conditioned on a shared stimulus cannot close the gap - the stimulus itself is what differs.
 
 This observation motivates a distinct computational task: *given a generative model
@@ -65,12 +65,9 @@ neighborhood $\mathcal{N}'(v)$, obtained by either:
   $\{x_u\}_{u \in \mathcal{N}(v)}$ to reflect a counterfactual transcriptional state.
 
 These are not equivalent — edge perturbation replaces *who* the neighbors are, while
-node perturbation more flexibly replaces *what* they express — but we show empirically that node
-perturbation monotonically converges to edge perturbation as the number of perturbed
-genes increases [Correction: very concisely clarify somehow that it's when we consider perturbed genes that essentially represent edge swaping across regions]. Together they form a coherent interventional spectrum, from targeted
-pathway-level manipulations to full-scale neighborhood replacement.
+node perturbation more flexibly replaces *what* they express. Together they form a coherent interventional spectrum, from targeted pathway-level manipulations to full-scale neighborhood replacement.
 
-We present **Cellina**, a dual-encoder variational autoencoder designed to make
+We present **Cellina**, an efficient dual-encoder variational autoencoder designed to make such
 spatial graph counterfactuals tractable. Cellina separates each cell's gene expression
 into two latent components: an intrinsic representation $z$, encoding cell identity
 independently of spatial context, and a spatial representation $s$, encoding niche
@@ -81,19 +78,6 @@ cell-type classifier ensures it retains biologically meaningful cell identity. T
 supervision provides sufficient inductive bias for empirical disentanglement: the classifier anchors $z$ to
 cell-type structure and the adversary prevents niche context from entering $z$,
 routing it instead into $s$. Because the adversary prevents $z$ from encoding domain-level spatial context, and no other pathway routes that signal back into $z$, the spatial variation is absorbed by $s$ — not by explicit instruction to $s$, but by elimination from $z$, allowing microenvironmental subtypes to emerge — supervising $s$ on coarse domain labels would collapse the spatial representation to label granularity, discarding within-label heterogeneity (see §3.4 for details).
-
-scGEN and CPA are baseline perturbation models that transfer context via latent space
-arithmetics and dedicated covariate embedings, respectively; we include them as representatives of the label-based paradigm to show that
-spatial graph counterfactuals are a genuinely distinct task these methods cannot address
-by design — they have no access to neighbor composition. A mean-shift baseline — the
-average target-domain expression shift — shows the structural
-limitation: even with oracle access to the target (heldout) domain statistics, label-aggregated
-shifts underperform explicit neighbor modeling. Beyond spatially-uniformed baselines, Cellina
-outperforms MintFlow and SpatialProp — the SOTA spatially-informed counterfactual
-methods — on both edge perturbation and node perturbation benchmarks, respectively.
-Finally, we show that Cellina's learned spatial representation $s$ identifies
-microenvironmental subtypes finer than discrete domain labels, and routing
-counterfactual queries through these subtypes further improves performance.
 
 **Contributions:**
 
@@ -113,8 +97,7 @@ counterfactual queries through these subtypes further improves performance.
 **Spatial domain discovery and niche clustering.** A large body of work identifies
 spatially coherent transcriptional programs by smoothing expression over spatial
 neighborhoods [MEFISTO, spaVAE, STAMP, NicheCompass, scVIVA]. scVIVA extends the
-VAE framework with a spatial prior designed to recover spatial composition; STAMP uses niche-level pseudobulking?; NicheCompass is
-a graphVAE that utilises graph attention and signalling prior knowledge; spaVAE and MEFISTO 
+VAE framework with a spatial prior designed to recover spatial composition: NicheCompass is a graphVAE that utilises graph attention and signalling prior knowledge; spaVAE and MEFISTO 
 make use of gaussian processes. These methods excel at spatial domain discovery but do not separate niche-derived variation from
 intrinsic cell identity, limiting their utility for counterfactual prediction or
 mechanistic interpretation.
@@ -123,10 +106,10 @@ mechanistic interpretation.
 and related methods [SpaceNet, CelCoMen, kasumi] aim to decompose expression into
 intrinsic and microenvironmentally mediated components. SIMVI uses a VAE with
 spatially-conditioned priors that encourage spatial smoothness. However, while these structural biases are informative, the resulting independence
-between z and s is enforced only through unsupervised regularization (mutual
+between $z$ and $s$ is enforced only through unsupervised regularization (mutual
 information or MMD between the two latent variables), with no structured supervision
 anchoring what information each variable should encode. Without an explicit objective
-tying z to cell identity and preventing it from absorbing spatial context, the
+tying $z$ to cell identity and preventing it from absorbing spatial context, the
 partition is not guaranteed to be semantically meaningful.
 
 **Perturbation and context transfer models.** scGEN [cite] performs context transfer by learning a style-independent latent space
@@ -149,7 +132,7 @@ intrinsic and spatial variation, but without explicit supervision — an unsuper
 decomposition that lacks guarantees of invariance [Locatello et al.]. Neither method
 defines or evaluates edge perturbation and node perturbation as distinct, measurable
 tasks. Concert and CelCoMen, which target delibarate perturbations and communication network
-interventions respectively, are described in Supplementary §G.
+interventions respectively. These methods described in detail under Supplementary §G.
 
 ---
 ## 3. Method
@@ -166,10 +149,10 @@ below a cutoff threshold set to zero). Each cell $v$ has:
 - $d_v \in \{1, \ldots, D\}$: spatial domain label — a discrete partition of the tissue into spatially coherent regions or niches (e.g., immune-hot vs. immune-cold, tumor vs. normal); analogous to a region class assigned to each cell based on its local tissue context
 - $\varphi(v) \in \mathbb{R}^G$: niche composition feature (defined below)
 
-These two labels capture different levels of a hierarchy: cell-type label $y_v$ encodes intrinsic cell identity (*what* kind of cell it is), while spatial domain label $d_v$ encodes which tissue region it inhabits (*where* it is). Cells sharing the same cell-type label may reside in different spatial domains and express distinct transcriptional programs as a result — the counterfactual task is to predict expression when $d_v$ changes from a source to a target spatial domain while $y_v$ and intrinsic identity $z_v$ are held fixed.
+These two labels capture different levels of a hierarchy: cell-type label $y_v$ encodes intrinsic cell identity (*what* kind of cell it is), while spatial domain $d_v$ encodes which tissue region it inhabits (*where* it is). Cells sharing the same cell-type label may reside in different spatial domains and express distinct transcriptional programs as a result — the counterfactual task is to predict expression when $d_v$ changes from a source to a target spatial domain while $y_v$ and intrinsic identity $z_v$ are held fixed.
 
 The niche composition $\varphi(v)$ is the spatially-weighted average expression of
-$v$'s neighbors. Let $\tilde{X} \in \mathbb{R}^{N \times G}$ denote the normalized
+$v$'s neighbors [TODO: clarify, this is true only for cellina-pseudobulk, not cellina-graph which uses GAT/GCN]. Let $\tilde{X} \in \mathbb{R}^{N \times G}$ denote the normalized
 count matrix and $C \in \mathbb{R}^{N \times N}$ the sparse spatial connectivity
 matrix with entries $C_{vu} = W_{vu}$. Then:
 
@@ -228,25 +211,8 @@ $$z = \mu_z + \sigma_z \odot \epsilon_z, \quad s = \mu_s + \sigma_s \odot \epsil
 The two encoders are architecturally symmetric (shared hidden dimension and layer
 count) but receive entirely different inputs: $z$ is encoded from cell-intrinsic
 counts, $s$ from the niche feature $\varphi(v)$ alone. Crucially, $s$ receives no
-supervision — no domain label, no cell type label, no explicit target. 
-
-**Why supervise $z$ and not $s$.** The dual supervision (classifier + adversary) is
-applied only to $z$. The classifier ensures $z$ retains biologically meaningful cell
-identity; the adversary ensures $z$ does not encode domain-level spatial context.
-Together, they route microenvironmental variation away from $z$ and into $s$ —
-not by explicit instruction, but by elimination. Critically, $s$ is left entirely
-unsupervised: it receives no domain labels, no cell type anchoring, no alignment target.
-This is deliberate. Supervising $s$ on coarse spatial domain labels — e.g., "immune-hot vs. immune-cold"
-or "tumor vs. normal" — would collapse the spatial representation to the granularity of
-those labels, discarding within-domain microenvironmental heterogeneity. By contrast,
-an unsupervised $s$ is free to resolve the full continuous spectrum of niche states:
-two T cells assigned the same spatial domain label may occupy distinct
-microenvironments that $s$ can distinguish while a label-based method cannot. This
-is the mechanism behind the within-subtype improvement demonstrated in §4.5, and the
-central reason explicit neighbor modeling outperforms label-based context transfer.
-This supervision strategy is consistent with the DIVA framework [cite] and the broader
-principle that inductive bias is sufficient where formal identifiability is intractable
-[Locatello et al.].
+supervision — no domain label, no cell-type label, no explicit target. This is a
+deliberate design choice, discussed further in §3.4.
 
 ### 3.4 Training Objective
 
@@ -299,6 +265,24 @@ $$\mathcal{L} = \mathcal{L}_\mathrm{ELBO}
 
 minimized over encoder and decoder parameters, with the discriminator frozen.
 
+**Why supervise $z$ and not $s$.** The dual supervision (classifier + adversary) is
+applied only to $z$. The classifier ensures $z$ retains biologically meaningful cell
+identity; the adversary ensures $z$ does not encode spatial domain information.
+Together, they route microenvironmental variation away from $z$ and into $s$ —
+not by explicit instruction, but by elimination. Critically, $s$ is left entirely
+unsupervised: it receives no spatial domain labels, no cell-type anchoring, no
+alignment target. This is deliberate. Supervising $s$ on coarse spatial domain
+labels — e.g., "immune-hot vs. immune-cold" or "tumor vs. normal" — would collapse
+the spatial representation to the granularity of those labels, discarding
+within-domain microenvironmental heterogeneity. By contrast, an unsupervised $s$ is
+free to resolve the full continuous spectrum of niche states: two T cells assigned
+the same spatial domain label may occupy distinct microenvironments that $s$ can
+distinguish while a label-based method cannot. This is the mechanism behind the
+within-subtype improvement demonstrated in §4.4, and the central reason explicit
+neighbor modeling outperforms label-based context transfer. This supervision strategy
+is consistent with the DIVA framework [cite] and the broader principle that inductive
+bias is sufficient where formal identifiability is intractable [Locatello et al.].
+
 ### 3.5 Spatial Graph Counterfactuals
 
 We now define the two counterfactual tasks. Concretely, a spatial graph counterfactual asks: *what would cell $v$ express if its spatial domain changed from $d_v$ to a target spatial domain $d'$, while its cell-type label $y_v$ and intrinsic identity $z_v$ remained fixed?*
@@ -320,30 +304,20 @@ neighbor features — changing *what* they express — while topology is held fi
 both cases, $z_v$ is held fixed at its value inferred from $v$'s own expression $x_v$.
 
 **Definition 1 (Edge Perturbation).** An edge perturbation applies
-$\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$, where $\mathcal{E}'_v$ connects
-$v$ to a uniformly sampled donor $u \in \mathcal{P}$. Because $\varphi(v)$ is a
-degree-normalized aggregation, exhaustively replacing $v$'s neighbors with $\mathcal{P}$
-is equivalent to substituting:
-
-$$\varphi'(v) = \varphi(u), \quad u \sim \mathrm{Uniform}(\mathcal{P})$$
-
-The counterfactual prediction is:
+$\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$: all original edges incident to
+$v$ are removed and new edges connect $v$ to every cell $u \in \mathcal{P}$. The
+spatial encoder then computes $s_v^{\mathrm{cf}}$ by aggregating over this donor
+neighborhood via message passing; $z_v$ is held fixed at its value inferred from
+$v$'s own expression:
 
 $$\hat{x}_v^\mathrm{cf}
-= \mathbb{E}\bigl[x_v \;\big|\; z_v,\, \mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)\bigr]
-= \mathbb{E}_{q(z \mid x_v)}\,\mathbb{E}_{q(s \mid \varphi'(v))}\bigl[p(x \mid z, s)\bigr]$$
+= \mathbb{E}_{q(z \mid x_v)}\,\mathbb{E}_{q(s \mid \mathcal{P}_v)}\bigl[p(x \mid z, s)\bigr]$$
 
-$z_v$ is inferred from $v$'s own expression — intrinsic identity is held fixed; only
-the spatial input to the $s$-encoder is substituted.
-
-We do not claim that $\varphi'(v)$ is equivalent to recomputing a pseudobulk over a
-rewired graph. That equivalence holds only if the full neighborhood of $v$ in
-$\mathcal{G}$ were replaced by $\mathcal{P}$, with all edges incident to $v$ rewired
-simultaneously. When partial edge rewiring is considered, the aggregated feature would
-need to be recomputed over the resulting mixed neighborhood. In our experiments, we
-replace $\varphi(v)$ directly with a sampled donor feature, which corresponds to
-the exhaustive replacement case — the entire neighborhood context of $v$ is swapped for
-that of a cell in the target spatial domain.
+where $q(s \mid \mathcal{P}_v)$ denotes the posterior over $s$ conditioned on message
+passing from $\mathcal{P}$ rather than $v$'s original neighborhood. Concretely, $v$ is
+rewired to the entire pool, so the spatial encoder sees the aggregate expression of all
+donor cells rather than $v$'s original neighbors — replacing $v$'s microenvironmental
+context wholesale with that of the target spatial domain.
 
 **Definition 2 (Node Perturbation).** A node perturbation applies
 $\mathrm{do}\!\bigl(\{\tilde{x}_u\}_{u \in \mathcal{N}(v)} \leftarrow \{\tilde{x}'_u\}\bigr)$,
@@ -359,30 +333,22 @@ and the perturbed niche feature is re-aggregated over the unmodified graph:
 
 $$\varphi'(v) = \frac{\sum_u C_{vu}\, \tilde{x}'_u}{\sum_u C_{vu}}$$
 
-The counterfactual prediction is:
-
-$$\hat{x}_v^\mathrm{cf}
-= \mathbb{E}\bigl[x_v \;\big|\; z_v,\, \mathrm{do}\!\bigl(\{\tilde{x}_u\} \leftarrow \{\tilde{x}'_u\}\bigr)\bigr]
-= \mathbb{E}_{q(z \mid x_v)}\,\mathbb{E}_{q(s \mid \varphi'(v))}\bigl[p(x \mid z, s)\bigr]$$
-
 Because the aggregation is linear, the perturbation propagates exactly: the change
 in $\varphi'(v)$ reflects the composition-weighted average of the logFC shifts applied
 to each neighbor, scaled by proximity. When the perturbation covers only a subset of
 $k < G$ genes per cell type, the remaining $G - k$ dimensions of $\tilde{x}'_u$ are
 left unchanged, yielding a partial microenvironmental intervention — for example,
-shifting only cytokine-related or pathway-specific expression across neighbors.
+shifting only cytokine-related or pathway-specific expression across neighbors. [NOTE: only true for cellina-pseodobulk, not cellina-graph which uses GAT; need to clarify]
 
-**The convergence property.** As $k \to G$, the intervention
-$\mathrm{do}\!\bigl(\{\tilde{x}_u\} \leftarrow \{\tilde{x}'_u\}\bigr)$ approaches
-$\mathrm{do}(\mathcal{E}_v \leftarrow \mathcal{E}'_v)$ in distribution: a
-whole-transcriptome rescaling of neighbor expression toward the target spatial domain's mean
-profile makes the post-intervention neighbor signal equivalent in expectation to
-sampling a donor neighborhood directly. In the limit, $\varphi'(v)$ from node
-perturbation converges to $\varphi(u)$ from edge perturbation. We verify this empirically in §4.4 (Figure X):
-node perturbation performance increases monotonically with $k$ and approaches the edge
-perturbation ceiling. Cell-type-specific logFC consistently outperforms global logFC
-throughout, confirming that the model captures heterogeneous cell-type-specific
-responses to niche changes.
+**The convergence property.** As $k \to G$, the node perturbation approaches a
+whole-transcriptome rescaling of neighbor expression toward the target spatial domain's
+mean profile. In the limit, the resulting $\varphi'(v)$ converges in expectation toward
+what edge perturbation produces — since both replace the effective neighbor signal with
+a representation of the target spatial domain. We verify this empirically in §4.3
+(Figure X): node perturbation performance increases monotonically with $k$ and
+approaches the edge perturbation ceiling. We further see that cell-type-specific logFC consistently
+outperforms global logFC throughout, confirming that the model captures heterogeneous
+cell-type-specific responses to niche changes. 
 
 ---
 
@@ -407,23 +373,9 @@ domain. For node perturbation, the same seed cells receive counterfactual neighb
 features sampled from the target spatial domain distribution across varying numbers of perturbed
 genes per cell type.
 
-### 4.2 Disentanglement Benchmark
+### 4.2 Counterfactual Prediction Benchmark
 
-We evaluate intrinsic representation quality using scIB disentanglement metrics
-[cite: scIB], which measure the degree to which the latent space separates biological
-variation (cell type) from technical or contextual variation (batch/domain). Cellina
-is compared against scVI [cite], scANVI [cite], scVIVA [cite], and SIMVI [cite].
-
-[Figure 1: scIB disentanglement benchmark across methods. Cellina achieves highest
-scores on both cell-type conservation and domain mixing metrics.]
-
-Cellina outperforms all baselines on disentanglement metrics. The advantage over SIMVI
-and scVIVA is particularly notable: both are spatial VAEs with spatially-conditioned
-priors, but neither enforces disentanglement through explicit supervision. The
-improvement over scVI and scANVI demonstrates that the spatial encoder, far from merely
-adding noise, genuinely routes niche variation out of $z$.
-
-### 4.3 Counterfactual Prediction Benchmark
+Cellina achieves the strongest separation of cell-type identity from spatial domain variation across all baselines (Supplementary §S1), a prerequisite for valid counterfactual inference: if $z$ retains spatial domain information, substituting $s$ alone cannot isolate the microenvironmental effect.
 
 **Metrics.** We evaluate counterfactual predictions using three metrics, each computed
 per cell type across held-out patients:
@@ -452,6 +404,20 @@ descriptions and inclusion rationale):
   on cell type with unsupervised disentanglement; included to isolate the effect of
   supervised vs. unsupervised spatial decomposition
 
+
+scGEN and CPA are baseline perturbation models that transfer context via latent space
+arithmetics and dedicated covariate embedings, respectively; we include them as representatives of the label-based paradigm to show that
+spatial graph counterfactuals are a genuinely distinct task these methods cannot address
+by design — they have no access to neighbor composition. A mean-shift baseline — the
+average target-domain expression shift — shows the structural
+limitation: even with oracle access to the target (heldout) domain statistics, label-aggregated
+shifts underperform explicit neighbor modeling. Beyond spatially-uniformed baselines, Cellina
+outperforms MintFlow and SpatialProp — the SOTA spatially-informed counterfactual
+methods — on both edge perturbation and node perturbation benchmarks, respectively.
+Finally, we show that Cellina's learned spatial representation $s$ identifies
+microenvironmental subtypes finer than discrete domain labels, and routing
+counterfactual queries through these subtypes further improves performance.
+
 None of the label-based baselines (mean shift, scGEN, CPA) have access to neighbor
 composition. SpatialProp and MintFlow model spatial context but lack supervised
 disentanglement of intrinsic and niche components.
@@ -469,7 +435,7 @@ structural reason is that scGEN, and CPA all reduce counterfactual target to a g
 expression profile, while SpatialProp / Mintflow do not enforce the supervised betwen z and domain. Cellina instead constructs a cell-specific niche representation from actual neighbor composition, preserving the within-domain heterogeneity that
 average-based methods discard.
 
-### 4.4 Node Perturbation Converges to Edge Perturbation
+### 4.3 Node Perturbation Converges to Edge Perturbation
 
 Node perturbation with a restricted gene set can be interpreted as a partial
 microenvironmental intervention — for example, perturbing only the cytokine-related
@@ -493,7 +459,7 @@ validates the two tasks as a coherent spectrum: edge perturbation is the limit o
 node perturbation, not a separate task, and partial node perturbations recover partial
 but real microenvironmental effects.
 
-### 4.5 Learned Spatial Representations Outperform Discrete Domain Labels
+### 4.4 Learned Spatial Representations Outperform Discrete Domain Labels
 
 The previous experiments compare Cellina against baselines that use domain labels to
 define counterfactual targets. A natural question is whether Cellina's learned spatial
@@ -520,7 +486,7 @@ the label discards spatial heterogeneity that the learned representation capture
 Cells labeled "immune-hot" span a continuous spectrum of microenvironmental states;
 $s$ resolves these states and the improvement follows.
 
-### 4.6 Scalability
+### 4.5 Scalability
 
 [Figure 5: Training time (wall clock, minutes) vs. dataset size (number of cells)
 for Cellina and baselines. Cellina scales linearly, remaining competitive with scVI
@@ -546,6 +512,8 @@ epithelial, immune, stromal compartments.]
 [Figure 6, panel B: UMAP of $s$ latent colored by spatial domain (immune-hot vs.
 immune-cold). Clear separation of microenvironmental contexts within and across
 patients.]
+
+[Figure 6, panel C: Same slide shown as original and perturbed spatial graphs, showing edge perturbation of a seed cell from immune-cold to immune-hot neighborhood, i.e. how gene expression light up upon counterfactual neighborhood change.]
 
 The $z$ latent recovers the expected cell type hierarchy — epithelial, immune, and
 stromal compartments separate cleanly, confirming that the intrinsic encoder captures
@@ -814,3 +782,23 @@ All baselines are evaluated using the same leave-one-patient-out split and the s
 seed/donor pool construction as Cellina (§4.1). For scGEN and CPA, neighbor composition
 features are not provided — the methods receive only cell expression and domain labels,
 as in their original formulations.
+
+---
+
+### S1. Disentanglement Benchmark
+
+We evaluate intrinsic representation quality using scIB disentanglement metrics
+[cite: scIB], which measure the degree to which the latent space separates biological
+variation (cell-type label) from technical or contextual variation (batch/spatial domain).
+Cellina is compared against scVI [cite], scANVI [cite], scVIVA [cite], and SIMVI [cite].
+We further note that scIB disentanglement metrics are not designed for spatial data and do not directly measure the quality of the spatial representation $s$; rather, they assess whether $z$ has successfully disentangled cell identity from spatial domain information. High scores indicate that $z$ captures cell-type variation while being invariant to spatial domain, which is a prerequisite for valid counterfactual inference in our framework. Recent work has shown that
+they further can trivially represent labels, and alternative metrics should be explored in future work to directly assess the quality of the spatial representation and its ability to capture microenvironmental heterogeneity.
+
+[Figure S1: scIB disentanglement benchmark across methods. Cellina achieves highest
+scores on both cell-type conservation and spatial domain mixing metrics.]
+
+Cellina outperforms all baselines on disentanglement metrics. The advantage over SIMVI
+and scVIVA is particularly notable: both are spatial VAEs with spatially-conditioned
+priors, but neither enforces disentanglement through explicit supervision. The
+improvement over scVI and scANVI demonstrates that the spatial encoder, far from merely
+adding noise, genuinely routes niche variation out of $z$.
