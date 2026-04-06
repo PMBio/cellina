@@ -52,7 +52,7 @@ This means cell-specific response modeling conditioned on a shared stimulus cann
 
 This observation motivates a distinct computational task: *given a generative model
 that separates intrinsic cell identity from niche composition, what would a specific cell
-express if placed in a different neighborhood [cite: Mintflow, SpatialProp, CelcoMen, Concert]?* We call queries of this form **spatial
+express if placed in a different neighborhood [cite: Mintflow, SpatialProp, Concert]?* We call queries of this form **spatial
 graph counterfactuals**. Formally, let $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ be
 a tissue graph where nodes are cells and edges encode spatial proximity. For a query
 cell $v \in \mathcal{V}$ with neighborhood $\mathcal{N}(v)$, a spatial graph
@@ -131,8 +131,8 @@ performs edge swapping conditioned on cell type, and does attempt to disentangle
 intrinsic and spatial variation, but without explicit supervision — an unsupervised
 decomposition that lacks guarantees of invariance [Locatello et al.]. Neither method
 defines or evaluates edge perturbation and node perturbation as distinct, measurable
-tasks. Concert and CelCoMen, which target delibarate perturbations and communication network
-interventions respectively. These methods described in detail under Supplementary §G.
+tasks. Concerttargets delibarate perturbations in emerging, low-scale data. 
+These methods described in detail under Supplementary §G.
 
 ---
 ## 3. Method
@@ -372,23 +372,20 @@ cell-type-specific responses to niche changes.
 We evaluate on a spatial transcriptomics dataset of colorectal cancer (CRC) comprising
 approximately 2 million cells from 8 patients, profiled at single-cell resolution across
 near-transcriptome-wide gene panels [cite]. Each patient slide was processed independently to
-compute spatial neighbor graphs using a Gaussian proximity kernel with bandwidth $l$
-(units: spatial coordinate units) equal to 100 microns. Niche composition features $\varphi(v) \in \mathbb{R}^{CG}$ were computed
+compute spatial neighbor graphs using a Gaussian proximity kernel with bandwidth $\sigma$
+equal to 100 µm:
+
+$$W_{uv} = \exp\!\left(-\frac{d(u,v)^2}{2\sigma^2}\right)$$
+
+where $d(u,v)$ is the Euclidean distance in coordinate units. $W_{uv}$ is set to zero
+for pairs outside the $k = 50$ nearest neighbors of either cell or when $W_{uv} < \tau = 0.1$;
+self-loops are excluded ($W_{vv} = 0$). Niche composition features $\varphi(v) \in \mathbb{R}^{CG}$ were computed
 as described in §3.1. All models were evaluated using leave-one-cell-type-out splits,
 with held-out cell types used for counterfactual benchmarking.
 
-**Counterfactual setup.** We define two spatial domains: immune-hot and immune-cold tumor
-microenvironments, identified by the composition of T cells and myeloid cells in the
-spatial neighborhood. For edge perturbation, seed cells from the immune-cold spatial domain
-are connected to a donor pool from the immune-hot spatial domain (and vice versa), and the
-predicted counterfactual expression is compared against cells observed in the target
-domain. For node perturbation, the same seed cells receive counterfactual neighbor
-features sampled from the target spatial domain distribution across varying numbers of perturbed
-genes per cell type.
+**Counterfactual setup.** Spatial domains are pathologist-annotated tissue regions present in each slide: a control region (REF) comprising normal colonic mucosa, a colorectal cancer tumour region (CRC), and a tubular villous adenoma region (TVA). The counterfactual task is to predict how cells observed in the control region would change their expression if placed in a tumour microenvironment. For edge perturbation, seed cells from the REF region are rewired to a donor pool drawn from the target tumour region (CRC), and predicted counterfactual expression is compared against cells actually observed in that region. For node perturbation, the same seed cells receive counterfactual neighbour features derived from the target domain across varying numbers of perturbed genes per cell type. We evaluate CRC and TVA targets separately and report metrics averaged over cell types.
 
 ### 4.2 Counterfactual Prediction Benchmark
-
-Cellina achieves the strongest separation of cell-type identity from spatial domain variation across all baselines (Supplementary §S1), a prerequisite for valid counterfactual inference: if $z$ retains spatial domain information, substituting $s$ alone cannot isolate the microenvironmental effect.
 
 **Metrics.** We evaluate counterfactual predictions using three metrics, each computed per heldout cell type:
 
@@ -445,7 +442,8 @@ The gap between Cellina and SpatialProp — the strongest spatial baseline — i
 substantial: roughly $+0.46$ Pearson $r$ and $+0.48$ Spearman $\rho$. The key
 structural reason is that scGEN, and CPA all reduce counterfactual target to a group mean, either as a latent shift or as an average
 expression profile, while SpatialProp / Mintflow do not enforce the supervised betwen z and domain. Cellina instead constructs a cell-specific niche representation from actual neighbor composition, preserving the within-domain heterogeneity that
-average-based methods discard.
+average-based methods discard. We further stipulate that the supervised disentanglement is a key factor in the gap between Cellina and MintFlow, which also models neighbor composition but without explicit supervision to prevent $z$ from absorbing spatial context. 
+This is supported by Cellina also achieving the strongest separation of spatial domain variation across all baselines (Supplementary §S1), a prerequisite for valid counterfactual inference: if $z$ retains spatial domain information, substituting $s$ alone cannot isolate the microenvironmental effect.
 
 ### 4.3 Node Perturbation Converges to Edge Perturbation
 
@@ -600,8 +598,7 @@ interaction rewiring at scale.
 ## References
 
 [To be completed — key citations: scVI, scANVI, scGEN, CPA, GEARS, SIMVI, scVIVA,
-spaVAE, MEFISTO, NicheCompass, STAMP, NCEM, SVCA, MintFlow, SpatialProp, Concert,
-CelCoMen, Locatello et al. 2019, DIVA, GraphST, scIB, PyG, Armingol et al.]
+spaVAE, MEFISTO, NicheCompass, STAMP, NCEM, SVCA, MintFlow, SpatialProp, Concert, Locatello et al. 2019, DIVA, GraphST, scIB, PyG, Armingol et al.]
 
 ---
 
