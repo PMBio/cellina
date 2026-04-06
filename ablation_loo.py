@@ -91,6 +91,7 @@ def run_one(adata_base, holdout_celltype, link_prediction_weight, spatial_loss_t
         link_prediction_weight=link_prediction_weight,
         spatial_loss_type=spatial_loss_type,
         condition_on_intrinsic=False,
+        use_batch_norm=False if spatial_loss_type == "supcon" else True, # NOTE: batch norm might not be consistent with neigh means in supcon
     )
 
     model.train(
