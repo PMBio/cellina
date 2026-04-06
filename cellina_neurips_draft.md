@@ -137,6 +137,13 @@ interventions respectively. These methods described in detail under Supplementar
 ---
 ## 3. Method
 
+We present **Cellina**, a dual-encoder variational autoencoder for spatial counterfactual prediction that disentangles cell-intrinsic expression ($z$) from microenvironmental context ($s$). We introduce two variants that share the generative model (§3.2), training objective (§3.4), and counterfactual inference procedure (§3.5), differing only in how the niche representation $s$ is computed:
+
+- **Cellina** uses a fixed degree-normalized aggregation of neighbor expression as the niche input, encoded by an MLP.
+- **Cellina-graph** replaces the fixed aggregation with a learned graph neural network that processes the raw local subgraph end-to-end.
+
+Both encoders are defined in detail in §3.3.
+
 ### 3.1 Notation and Problem Setup
 
 Let $\mathcal{G} = (\mathcal{V}, \mathcal{E}, W)$ be a weighted tissue graph over
@@ -145,26 +152,12 @@ $u$ and $v$ (computed via a Gaussian kernel over Euclidean coordinates, with ent
 below a cutoff threshold set to zero). Each cell $v$ has:
 
 - $x_v \in \mathbb{Z}_{\geq 0}^G$: raw gene expression counts across $G$ genes
+- $\tilde{x}_v \in \mathbb{R}^G$: log-normalized counts, $\tilde{x}_{v,g} = \log(1 + x_{v,g}/\ell_v \cdot 10^4)$
 - $y_v \in \{1, \ldots, C\}$: cell-type label (e.g., T cell, epithelial, fibroblast)
-- $d_v \in \{1, \ldots, D\}$: spatial domain label — a discrete partition of the tissue into spatially coherent regions or niches (e.g., immune-hot vs. immune-cold, tumor vs. normal); analogous to a region class assigned to each cell based on its local tissue context
-- $\varphi(v) \in \mathbb{R}^G$: niche composition feature (defined below)
+- $d_v \in \{1, \ldots, D\}$: spatial domain label — a discrete partition of the tissue into spatially coherent regions or niches (e.g., immune-hot vs. immune-cold, tumor vs. normal)
+- $\varphi(v) \in \mathbb{R}^G$: niche input feature computed from $v$'s spatial neighborhood (defined in §3.3)
 
 These two labels capture different levels of a hierarchy: cell-type label $y_v$ encodes intrinsic cell identity (*what* kind of cell it is), while spatial domain $d_v$ encodes which tissue region it inhabits (*where* it is). Cells sharing the same cell-type label may reside in different spatial domains and express distinct transcriptional programs as a result — the counterfactual task is to predict expression when $d_v$ changes from a source to a target spatial domain while $y_v$ and intrinsic identity $z_v$ are held fixed.
-
-The niche composition $\varphi(v)$ is the spatially-weighted average expression of
-$v$'s neighbors [TODO: clarify, this is true only for cellina-pseudobulk, not cellina-graph which uses GAT/GCN]. Let $\tilde{X} \in \mathbb{R}^{N \times G}$ denote the normalized
-count matrix and $C \in \mathbb{R}^{N \times N}$ the sparse spatial connectivity
-matrix with entries $C_{vu} = W_{vu}$. Then:
-
-$$\varphi(v) = \frac{\sum_{u} C_{vu}\, \tilde{x}_u}{\sum_{u} C_{vu}}$$
-
-or in matrix form, with $\deg(v) = \sum_u C_{vu}$:
-
-$$\Phi = D^{-1} C \tilde{X}, \quad D = \mathrm{diag}(\deg)$$
-
-where $\Phi \in \mathbb{R}^{N \times G}$ collects the niche features of all cells.
-This is a simple degree-normalized neighbor aggregation over continuous (normalized)
-expression values — no binarization, no cell-type stratification in the base features.
 
 ### 3.2 Generative Model
 
@@ -194,25 +187,38 @@ both latent variables.
 
 ### 3.3 Inference Model
 
+Both Cellina variants share the $z$ encoder (an MLP on cell-intrinsic counts); they differ only in how the niche input is constructed and how $s$ is encoded, as detailed below.
+
 The approximate posterior factorizes as:
 
 $$q(z, s \mid x, \varphi) = q(z \mid x)\, q(s \mid \varphi)$$
 
-Both encoders are MLPs parametrizing diagonal Gaussian posteriors, with samples drawn
-via the reparametrization trick:
+Both variants share the $z$ encoder: an MLP parametrizing a diagonal Gaussian over cell-intrinsic counts,
 
 $$q(z \mid x) = \mathcal{N}(\mu_z(x,\, b),\; \sigma^2_z(x,\, b))$$
 
+**Cellina (base).** The niche input is the degree-normalized aggregation of log-normalized neighbor expression. Let $\mathcal{N}(v) = \{u : W_{uv} > 0\}$ and $\tilde{X} \in \mathbb{R}^{N \times G}$ the matrix of log-normalized counts. Then:
+
+$$\varphi(v) = \frac{\sum_{u \in \mathcal{N}(v)} W_{uv}\, \tilde{x}_u}{\sum_{u \in \mathcal{N}(v)} W_{uv}}, \qquad \text{or in matrix form: } \Phi = D^{-1} W \tilde{X},\; D = \mathrm{diag}(W\mathbf{1})$$
+
+where $\Phi \in \mathbb{R}^{N \times G}$ collects niche features for all cells — a simple degree-normalized aggregation. The $s$ encoder is an MLP:
+
 $$q(s \mid \varphi) = \mathcal{N}(\mu_s(\varphi,\, b),\; \sigma^2_s(\varphi,\, b))$$
+
+**Cellina-graph.** The $s$ encoder is replaced by a graph neural network $f_s$ that processes $v$'s local subgraph $(\tilde{x}_v,\, \{\tilde{x}_u\}_{u \in \mathcal{N}(v)},\, \mathcal{E}_v)$ directly, where $\mathcal{E}_v$ is the local edge set. $f_s$ is a multi-layer GATv2 \citep{brody2022how} or GCN \citep{kipf2017semi} (configurable) with optional covariate injection at each intermediate layer, layer normalisation, and dropout. Self-loops are excluded: $v$'s own expression is captured by $z$; $f_s$ aggregates only neighbor contributions. The posterior conditions on the raw subgraph:
+
+$$q\!\left(s \;\middle|\; \tilde{x}_v,\, \{\tilde{x}_u\}_{u \in \mathcal{N}(v)},\, \mathcal{E}_v\right)
+= \mathcal{N}\!\bigl(\mu_s^{\mathcal{G}}(\cdot),\; \sigma^2_s{}^{\mathcal{G}}(\cdot)\bigr)$$
+
+where $\mu_s^{\mathcal{G}}$ and $\sigma^2_s{}^{\mathcal{G}}$ are linear projections applied to the seed-node representation after $L$ rounds of message passing. The $z$ encoder remains an MLP.
+
+Samples are drawn via the reparametrization trick (shared by both variants):
 
 $$z = \mu_z + \sigma_z \odot \epsilon_z, \quad s = \mu_s + \sigma_s \odot \epsilon_s,
 \quad \epsilon \sim \mathcal{N}(0, I)$$
 
-The two encoders are architecturally symmetric (shared hidden dimension and layer
-count) but receive entirely different inputs: $z$ is encoded from cell-intrinsic
-counts, $s$ from the niche feature $\varphi(v)$ alone. Crucially, $s$ receives no
-supervision — no domain label, no cell-type label, no explicit target. This is a
-deliberate design choice, discussed further in §3.4.
+In both cases, $s$ receives no supervision — no domain label, no cell-type label, no
+explicit target. This is a deliberate design choice, discussed further in §3.4.
 
 ### 3.4 Training Objective
 
@@ -331,14 +337,21 @@ $$\tilde{x}'_{u,g} = \tilde{x}_{u,g} \cdot \exp(\delta_{y_u,\, g})$$
 
 and the perturbed niche feature is re-aggregated over the unmodified graph:
 
-$$\varphi'(v) = \frac{\sum_u C_{vu}\, \tilde{x}'_u}{\sum_u C_{vu}}$$
+$$\varphi'(v) = \frac{\sum_u W_{uv}\, \tilde{x}'_u}{\sum_u W_{uv}}$$
 
 Because the aggregation is linear, the perturbation propagates exactly: the change
 in $\varphi'(v)$ reflects the composition-weighted average of the logFC shifts applied
 to each neighbor, scaled by proximity. When the perturbation covers only a subset of
 $k < G$ genes per cell type, the remaining $G - k$ dimensions of $\tilde{x}'_u$ are
 left unchanged, yielding a partial microenvironmental intervention — for example,
-shifting only cytokine-related or pathway-specific expression across neighbors. [NOTE: only true for cellina-pseodobulk, not cellina-graph which uses GAT; need to clarify]
+shifting only cytokine-related or pathway-specific expression across neighbors. 
+
+In **Cellina-graph**, the same perturbation is applied to the raw input features before
+they enter $f_s$: the modified subgraph
+$\bigl(\tilde{x}_v,\, \{\tilde{x}'_u\}_{u \in \mathcal{N}(v)},\, \mathcal{E}_v\bigr)$
+is passed through the GNN encoder, so the perturbation propagates implicitly through
+the learned message-passing function rather than the closed-form linear formula above.
+(NOTE: this is not implemented or used.)
 
 **The convergence property.** As $k \to G$, the node perturbation approaches a
 whole-transcriptome rescaling of neighbor expression toward the target spatial domain's
@@ -377,8 +390,7 @@ genes per cell type.
 
 Cellina achieves the strongest separation of cell-type identity from spatial domain variation across all baselines (Supplementary §S1), a prerequisite for valid counterfactual inference: if $z$ retains spatial domain information, substituting $s$ alone cannot isolate the microenvironmental effect.
 
-**Metrics.** We evaluate counterfactual predictions using three metrics, each computed
-per cell type across held-out patients:
+**Metrics.** We evaluate counterfactual predictions using three metrics, each computed per heldout cell type:
 
 - **Pearson $r$**: correlation between predicted and observed log fold-change
   (logFC) vectors across genes
