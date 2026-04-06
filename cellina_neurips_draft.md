@@ -11,40 +11,44 @@ challenge in biology. Existing perturbation models transfer context by shifting
 latent representations toward group averages — often collapsing the continuous, compositional
 variation arising from individual neighbor combinations into a single label. We argue
 this is a structural limitation: no spatially-uniform method can recover the cell-specific
-effects of microenvironmental context. To address this, we formalize *spatial graph*
+effects of microenvironmental contexts. To address this, we formalize *spatial graph*
 counterfactuals*, a class of interventional queries over tissue graphs in which a cell's
 neighborhood is altered either by rewiring graph edges (*edge perturbation*) or by
 modifying neighbor feature vectors (*node perturbation*). We present Cellina, a generative
 model that disentangles intrinsic cell identity from niche composition via dual supervision. 
 A cell-type classifier anchors the intrinsic representation to its label while an adversarial 
 discriminator removes spatial domain information from it, enabling counterfactual niche transfer by direct substitution of neighbor inputs.
-Across disentanglement and counterfactual benchmarks on emerging spatial transcriptomics technologies, Cellina outperforms both spatially-informed and spatially-uniformed baselines.
+Across disentanglement and counterfactual benchmarks on emerging spatial transcriptomics technologies, Cellina outperforms both spatially-informed and spatially-agnostic baselines.
 Critically, Cellina's learned spatial representation identifies microenvironmental
-subtypes finer than discrete spatial domain labels, and we show that routing counterfactual queries through
-these subtypes further improves prediction accuracy; thereby, demonstrating that the
-representation itself captures context-specific neighbor-level information that methods developde for uniform interventions cannot capture.
+subtypes finer than discrete spatial domain labels, and we show that routing
+counterfactual queries through these subtypes further improves prediction accuracy —
+demonstrating that the representation captures neighbor-level context that methods
+designed for uniform perturbations cannot recover.
 
 ---
 
 ## 1. Introduction
 
-Perturbation models for single-cell genomics have largely been developed in a regime
-where interventions are approximately *uniform* — the same perturbation is administered to every cell: e.g. a drug is added to a cell line well, a gene is knocked out, and its downstream effects are observed across the population [scGEN, CPA, GEARS].
-In this regime, context transfer by learning a mean shift is a principled and common approximation
-(DimitrovSchrod [cite]): because all cells receive the same intervention, averaging
-their latent representations can recover the expected effect of that intervention
-(Systema [cite], Ahlmann [cite]). The uniformity assumption is what licenses the
-average (scGEN) — even methods that handle continuous dosage (CPA) or combinatorial
-perturbations (GEARS) share it.
+Perturbation models for single-cell genomics have largely been developed for
+uniform perturbations — interventions in which the same stimulus (a drug, a
+genetic knockout) is applied to every cell [scGEN, CPA, GEARS]. While cellular responses
+to such perturbations vary by cell state, this variation is intrinsic: it arises
+from differences in each cell's own transcriptional program, not from differences in
+the perturbation stimulus itself. This shared-stimulus structure licenses commonly utilized mean-shift
+context transfers (DimitrovSchrod [cite]): because the intervention is the same for all
+cells, averaging latent representations recovers its expected effect
+(Systema [cite], Ahlmann [cite]). More recent methods based on optimal transport
+[CellOT [cite], cite] or flow matching [cite] go further, modeling individual cell
+trajectories to produce cell-specific predictions — yet the perturbation input remains
+a single signal shared across the population.
 
-The cellular microenvironment violates this assumption, and spatial transcriptomics now enables it measurement at ever-increasing scales. In tissue, a cell's transcriptional
-state is shaped not by a uniform external condition but by its intrinsic state and it's *
-microenvironment* — the particular combination of neighboring cells, their
-transcriptional states, and the signals they emit. This context is thus
-(individual-)cell-specific: two cells of the same type, positioned even a hundred microns apart,
-may occupy fundamentally different states and express substantially different programs.
-Unlike a drug applied uniformly to a cell-line well,
- microenvironmental "perturbations" are not uniform across cells: each cell is subject to a distinct neighborhood configuration, making the counterfactual task fundamentally cell-specific.
+The cellular microenvironment lacks this uniform structure, and emerging spatial transcriptomics technologies now enable its measurement at ever-increasing scales. In every tissue, a
+cell's transcriptional state is shaped not by a shared external stimulus but by its
+microenvironment — the particular combination of neighboring cells, their
+transcriptional states, and the signals they emit. Each cell's neighborhood is thus a
+unique combination, where two cells of the same cell type (group), positioned even a hundred microns
+apart, may occupy fundamentally different states and express substantially different states due to their unique microenvironmental contexts. 
+This means cell-specific response modeling conditioned on a shared stimulus cannot close the gap - the stimulus itself is what differs.
 
 This observation motivates a distinct computational task: *given a generative model
 that separates intrinsic cell identity from niche composition, what would a specific cell
