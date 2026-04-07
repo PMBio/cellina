@@ -1,4 +1,12 @@
+from typing import Optional
+
 import numpy as np
+from scipy.sparse import csr_matrix
+
+from ._spatial_utils import compute_spatial_features
+
+_CF_CONN_TMP = "__cf_conn_tmp"
+_CF_OBSM_TMP = "__cf_obsm_tmp"
 
 
 def make_counterfactual_adata(
@@ -6,12 +14,14 @@ def make_counterfactual_adata(
     indices_basal,
     indices_counterfactual,
     spatial_column,
-    sample: bool = False,
+    precomputed: bool = True,
+    n_neighbours: Optional[int] = None,
     random_state: int = 0,
 ):
     """
     Create a counterfactual AnnData keeping everything from the original
-    except .obsm[spatial_column], which is replaced with sampled spatial counts.
+    except .obsm[spatial_column], which is replaced with counterfactual
+    spatial neighbourhood features.
 
     Parameters
     ----------
@@ -20,49 +30,63 @@ def make_counterfactual_adata(
     indices_basal
         Indices of basal/control cells to keep in .X and obs.
     indices_counterfactual
-        Indices of counterfactual cells to generate spatial counts from.
+        Indices of cells to use as the counterfactual neighbourhood.
     spatial_column
-        Column in .obsm containing spatial information (counts of neighbors).
-    sample
-        If True, generate NB-distributed counts per gene.
-        If False, sample rows from existing neighboring cells with replacement.
+        Key in .obsm where the spatial features are stored / written.
+    precomputed
+        If True, sample rows from existing .obsm[spatial_column] of
+        counterfactual cells (fast, uses precomputedd features).
+        If False (default), rebuild spatial features from scratch via
+        compute_spatial_features: a counterfactual connectivity matrix is
+        constructed where each basal cell's neighbourhood is reassigned to
+        cells from indices_counterfactual.
+    n_neighbours
+        Only used when precomputed=False. Number of neighbours to sample
+        per basal cell from indices_counterfactual. If None, all
+        counterfactual cells are used with equal weight (mean aggregation).
     random_state
         Seed for reproducibility.
 
     Returns
     -------
     adata_cf : AnnData
-        Copy of original AnnData with updated .obsm[spatial_column] for basal cells.
+        Copy of original AnnData (basal cells only) with updated
+        .obsm[spatial_column].
     """
     rng = np.random.default_rng(random_state)
-
-    # 1. Subset basal cells
-    adata_cf = adata[indices_basal].copy()
-
-    # 2. Get spatial counts of counterfactual cells
-    spatial_counts_cf = adata.obsm[spatial_column][indices_counterfactual]
-
     n_basal = len(indices_basal)
-    n_genes = spatial_counts_cf.shape[1]
 
-    # 3. Sampling: if true, compute representative NB dist and sample from it
-    if sample:
-        mu = spatial_counts_cf.mean(axis=0)
-        var = spatial_counts_cf.var(axis=0)
-        theta = np.maximum((mu**2) / (var - mu + 1e-8), 1e-8)
+    if precomputed:
+        adata_cf = adata[indices_basal].copy()
+        spatial_counts_cf = adata.obsm[spatial_column][indices_counterfactual]
+        idx = rng.integers(0, len(indices_counterfactual), size=n_basal)
+        adata_cf.obsm[spatial_column] = spatial_counts_cf[idx]
+        return adata_cf
 
-        spatial_counts_basal_cf = rng.negative_binomial(
-            n=theta, p=theta / (theta + mu), size=(n_basal, n_genes)
-        )
-    # Otherwise just sample from existing neighbors with replacement
+    # Build (n_obs, n_obs) counterfactual connectivity: basal rows → counterfactual cols
+    n_obs = adata.n_obs
+    n_cf = len(indices_counterfactual)
+
+    if n_neighbours is None:
+        rows = np.repeat(np.arange(n_basal), n_cf)
+        cols = np.tile(indices_counterfactual, n_basal)
     else:
-        indices = rng.integers(low=0, high=spatial_counts_cf.shape[0], size=n_basal)
-        spatial_counts_basal_cf = spatial_counts_cf[indices]
+        sampled = rng.choice(indices_counterfactual, size=(n_basal, n_neighbours), replace=True)
+        rows = np.repeat(np.arange(n_basal), n_neighbours)
+        cols = sampled.ravel()
 
-    # 4. Replace spatial_column in .obsm
-    adata_cf.obsm[spatial_column] = spatial_counts_basal_cf
+    data = np.ones(len(rows), dtype=np.float32)
+    C_cf = csr_matrix((data, (rows, cols)), shape=(n_obs, n_obs))
 
-    # 5. Keep original target cells to compare later if needed
-    adata_cf.uns["target_cells"] = adata[indices_counterfactual].X.copy()
+    # Temporarily attach to adata, delegate aggregation to compute_spatial_features, then clean up
+    adata.obsp[_CF_CONN_TMP] = C_cf
+    try:
+        compute_spatial_features(adata, connectivity_key=_CF_CONN_TMP, obsm_key=_CF_OBSM_TMP)
+        adata_cf = adata[indices_basal].copy()
+        adata_cf.obsm[spatial_column] = adata_cf.obsm.pop(_CF_OBSM_TMP)
+    finally:
+        del adata.obsp[_CF_CONN_TMP]
+        if _CF_OBSM_TMP in adata.obsm:
+            del adata.obsm[_CF_OBSM_TMP]
 
     return adata_cf

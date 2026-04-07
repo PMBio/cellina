@@ -361,56 +361,52 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
         inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
 
 def test_make_counterfactual_adata(adata_with_spatial):
-    """Test make_counterfactual_adata function with both sampling modes."""
+    """Test make_counterfactual_adata with precomputed=False (default) and precomputed=True."""
     from cellina._utils import make_counterfactual_adata
-    
-    # Replace spatial_x with positive count data for NB sampling
-    n_spatial_features = 20
-    adata_with_spatial.obsm["spatial_x"] = np.random.poisson(5, size=(adata_with_spatial.n_obs, n_spatial_features)).astype(np.float32)
-    
+
     n_obs = adata_with_spatial.n_obs
     indices_basal = np.arange(0, n_obs // 2)
     indices_cf = np.arange(n_obs // 2, n_obs)
     spatial_col = "spatial_x"
-    
-    # Test sample=True (NB sampling)
-    adata_cf_sampled = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
+
+    # --- precompute=False (default): rebuild features via compute_spatial_features ---
+    adata_cf = make_counterfactual_adata(
+        adata_with_spatial, indices_basal, indices_cf, spatial_col,
+        precomputed=False, random_state=42,
     )
-    
-    # Check basic properties
-    assert adata_cf_sampled.n_obs == len(indices_basal)
-    assert adata_cf_sampled.n_vars == adata_with_spatial.n_vars
-    assert spatial_col in adata_cf_sampled.obsm
-    assert adata_cf_sampled.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
-    
-    # Verify .X is from basal cells
-    np.testing.assert_array_equal(adata_cf_sampled.X, adata_with_spatial[indices_basal].X)
-    
-    # Verify .obs is from basal cells
-    assert all(adata_cf_sampled.obs.index == adata_with_spatial[indices_basal].obs.index)
-    
-    # Test sample=False (row sampling with replacement)
-    adata_cf_rows = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=False, random_state=42
-    )
-    
-    # Check shape is correct
-    assert adata_cf_rows.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
-    
-    # Verify each row comes from counterfactual cells (should match at least one row)
-    cf_spatial = adata_with_spatial.obsm[spatial_col][indices_cf]
-    for i in range(adata_cf_rows.n_obs):
-        row = adata_cf_rows.obsm[spatial_col][i]
-        # Check if this row exists in counterfactual spatial features
-        matches = np.any(np.all(cf_spatial == row, axis=1))
-        assert matches, f"Row {i} does not match any counterfactual spatial features"
-    
-    # Test reproducibility with same random_state
+
+    assert adata_cf.n_obs == len(indices_basal)
+    assert adata_cf.n_vars == adata_with_spatial.n_vars
+    assert spatial_col in adata_cf.obsm
+    assert adata_cf.obsm[spatial_col].shape[0] == len(indices_basal)
+
+    # .X and .obs come from basal cells
+    np.testing.assert_array_equal(adata_cf.X, adata_with_spatial[indices_basal].X)
+    assert all(adata_cf.obs.index == adata_with_spatial[indices_basal].obs.index)
+
+    # Reproducibility
     adata_cf2 = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col, sample=True, random_state=42
+        adata_with_spatial, indices_basal, indices_cf, spatial_col,
+        precomputed=False, random_state=42,
     )
-    np.testing.assert_array_equal(adata_cf_sampled.obsm[spatial_col], adata_cf2.obsm[spatial_col])
+    cf_arr  = np.asarray(adata_cf.obsm[spatial_col].todense()  if hasattr(adata_cf.obsm[spatial_col],  "todense") else adata_cf.obsm[spatial_col])
+    cf2_arr = np.asarray(adata_cf2.obsm[spatial_col].todense() if hasattr(adata_cf2.obsm[spatial_col], "todense") else adata_cf2.obsm[spatial_col])
+    np.testing.assert_array_equal(cf_arr, cf2_arr)
+
+    # --- precomputed=True: row-sample from existing obsm features ---
+    adata_cf_pre = make_counterfactual_adata(
+        adata_with_spatial, indices_basal, indices_cf, spatial_col,
+        precomputed=True, random_state=42,
+    )
+
+    assert adata_cf_pre.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
+
+    # Each row must come from an existing counterfactual obsm row
+    cf_rows = adata_with_spatial.obsm[spatial_col][indices_cf]
+    for i in range(adata_cf_pre.n_obs):
+        row = adata_cf_pre.obsm[spatial_col][i]
+        assert np.any(np.all(cf_rows == row, axis=1)), \
+            f"Row {i} of precompute=True result does not match any counterfactual obsm row"
 
 
 def test_normalize_losses_true(adata_with_spatial):
@@ -428,12 +424,14 @@ def test_normalize_losses_true(adata_with_spatial):
         domains_key="domain",
     )
 
-    # Create model with both discriminator and classifier enabled (non-unity lambdas)
-    classifier_lambda    = 0.5
-    discriminator_lambda = 2.0
+    # Create model with discriminator, classifier, and domain_classifier enabled (non-unity lambdas)
+    classifier_lambda          = 0.5
+    discriminator_lambda       = 2.0
+    domain_classifier_lambda   = 1.5
     model = CellinaModel(adata_with_spatial, n_latent=5,
                          discriminator_lambda=discriminator_lambda,
-                         classifier_lambda=classifier_lambda)
+                         classifier_lambda=classifier_lambda,
+                         domain_classifier_lambda=domain_classifier_lambda)
 
     # Train with normalize_losses=True
     model.train(
@@ -449,8 +447,9 @@ def test_normalize_losses_true(adata_with_spatial):
     assert training_plan._warmup_done == True, "Warmup should be completed after epoch 0"
 
     # Check fixed scales were computed (should be positive after warmup)
-    assert training_plan._scale_clf  > 0, "Fixed scale for clf loss should be positive"
-    assert training_plan._scale_fool > 0, "Fixed scale for fool loss should be positive"
+    assert training_plan._scale_clf        > 0, "Fixed scale for clf loss should be positive"
+    assert training_plan._scale_fool       > 0, "Fixed scale for fool loss should be positive"
+    assert training_plan._scale_domain_classifier > 0, "Fixed scale for domain_classifier loss should be positive"
 
     # Check normalize_losses flag is set correctly
     assert training_plan._normalize_losses == True
@@ -465,14 +464,15 @@ def test_normalize_losses_true(adata_with_spatial):
         f"No discriminator metrics found in history. Keys: {history_keys}"
 
     # --- Scale correctness: scaled == raw * fixed_scale * lambda ---
-    expected_scale_clf  = training_plan._scale_clf
-    expected_scale_fool = training_plan._scale_fool
+    expected_scale_clf               = training_plan._scale_clf
+    expected_scale_fool              = training_plan._scale_fool
+    expected_scale_domain_classifier = training_plan._scale_domain_classifier
 
     model.module.eval()
     model.module.to("cpu")
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    
+
     with torch.no_grad():
         inf_in  = model.module._get_inference_input(batch)
         inf_out = model.module.inference(**inf_in)
@@ -482,20 +482,26 @@ def test_normalize_losses_true(adata_with_spatial):
             batch, inf_out, gen_out,
             classifier_scale=expected_scale_clf,
             discriminator_scale=expected_scale_fool,
+            domain_classifier_scale=expected_scale_domain_classifier,
         )
 
-    clf_raw    = loss_out.extra_metrics["classifier_loss_raw"].item()
-    clf_scaled = loss_out.extra_metrics["classifier_loss"].item()
-    fool_raw   = loss_out.extra_metrics["fool_loss_raw"].item()
-    fool_scaled = loss_out.extra_metrics["fool_loss"].item()
+    clf_raw                   = loss_out.extra_metrics["classifier_loss_raw"].item()
+    clf_scaled                = loss_out.extra_metrics["classifier_loss"].item()
+    fool_raw                  = loss_out.extra_metrics["fool_loss_raw"].item()
+    fool_scaled               = loss_out.extra_metrics["fool_loss"].item()
+    domain_classifier_raw     = loss_out.extra_metrics["domain_classifier_loss_raw"].item()
+    domain_classifier_scaled  = loss_out.extra_metrics["domain_classifier_loss"].item()
 
-    np.testing.assert_allclose(clf_scaled,  clf_raw  * expected_scale_clf  * classifier_lambda,   rtol=1e-4)
-    np.testing.assert_allclose(fool_scaled, fool_raw * expected_scale_fool * discriminator_lambda, rtol=1e-4)
+    np.testing.assert_allclose(clf_scaled,               clf_raw               * expected_scale_clf               * classifier_lambda,        rtol=1e-4)
+    np.testing.assert_allclose(fool_scaled,              fool_raw              * expected_scale_fool              * discriminator_lambda,      rtol=1e-4)
+    np.testing.assert_allclose(domain_classifier_scaled, domain_classifier_raw * expected_scale_domain_classifier * domain_classifier_lambda,  rtol=1e-4)
     # make sure that disc is roughly 4x scaled compared to clf (since discriminator_lambda is 4x classifier_lambda)
     # fool_scaled is negative (adversarial weight=-1), so compare absolute magnitudes
     np.testing.assert_allclose(abs(fool_scaled / clf_scaled), discriminator_lambda / classifier_lambda, rtol=0.2)
     # assert fool is negative (since it's an adversarial loss)
     assert fool_scaled < 0, "Fool loss should be negative (adversarial weight is -1)"
+    # domain_classifier is a positive supervised loss
+    assert domain_classifier_scaled > 0, "domain_classifier loss should be positive (non-adversarial)"
 
 
 def test_get_normalized_expression(adata_with_spatial):

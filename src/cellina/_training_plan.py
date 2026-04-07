@@ -42,11 +42,12 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.automatic_optimization = False
 
         # Warmup collection: collect first-epoch losses to compute fixed normalization scales
-        self._warmup_stats = {"scvi": [], "fool": [], "clf": []}
+        self._warmup_stats = {"scvi": [], "fool": [], "clf": [], "domain_classifier": []}
         self._warmup_done = False
         self._normalize_losses = normalize_losses
-        self._scale_clf  = 1.0
-        self._scale_fool = 1.0
+        self._scale_clf        = 1.0
+        self._scale_fool       = 1.0
+        self._scale_domain_classifier = 1.0
 
     def training_step(self, batch, batch_idx):
         opts = self.optimizers()
@@ -63,21 +64,24 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                         "kl_weight": self.kl_weight,
                     }
                 )
-                scvi_val = float(scvi_loss.loss.detach().cpu().item())
-                fool_val = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
-                clf_val = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
+                scvi_val       = float(scvi_loss.loss.detach().cpu().item())
+                fool_val       = abs(float(scvi_loss.extra_metrics.get("fool_loss_raw", 0.0)))
+                clf_val        = abs(float(scvi_loss.extra_metrics.get("classifier_loss_raw", 0.0)))
+                domain_classifier_val = abs(float(scvi_loss.extra_metrics.get("domain_classifier_loss_raw", 0.0)))
 
                 self._warmup_stats["scvi"].append(scvi_val)
                 self._warmup_stats["fool"].append(fool_val)
                 self._warmup_stats["clf"].append(clf_val)
+                self._warmup_stats["domain_classifier"].append(domain_classifier_val)
 
                 return {"loss": scvi_loss.loss}
 
         # ---------- END OF WARMUP → COMPUTE FIXED SCALES ----------
         if self._normalize_losses and (not self._warmup_done) and getattr(self, "current_epoch", 0) > 0:
             vae_mean = np.mean(self._warmup_stats["scvi"])
-            self._scale_clf  = vae_mean / (np.mean(self._warmup_stats["clf"])  + 1e-8)
-            self._scale_fool = vae_mean / (np.mean(self._warmup_stats["fool"]) + 1e-8)
+            self._scale_clf        = vae_mean / (np.mean(self._warmup_stats["clf"])        + 1e-8)
+            self._scale_fool       = vae_mean / (np.mean(self._warmup_stats["fool"])       + 1e-8)
+            self._scale_domain_classifier = vae_mean / (np.mean(self._warmup_stats["domain_classifier"]) + 1e-8)
             self._warmup_done = True
             self._warmup_stats.clear()  # Free memory
 
@@ -112,8 +116,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             p.requires_grad = False
 
         # Fixed normalization scales (computed once from epoch-0 warmup stats)
-        scale_clf  = self._scale_clf  if self._normalize_losses else 1.0
-        scale_fool = self._scale_fool if self._normalize_losses else 1.0
+        scale_clf        = self._scale_clf        if self._normalize_losses else 1.0
+        scale_fool       = self._scale_fool       if self._normalize_losses else 1.0
+        scale_domain_classifier = self._scale_domain_classifier if self._normalize_losses else 1.0
 
         # Forward pass
         inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -122,16 +127,18 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 "kl_weight": self.kl_weight,
                 "classifier_scale": scale_clf,
                 "discriminator_scale": scale_fool,
+                "domain_classifier_scale": scale_domain_classifier,
             }
         )
 
         # Extract losses (tensors for gradient flow)
-        vae_loss = scvi_loss.loss
-        clf_loss  = scvi_loss.extra_metrics["classifier_loss"]
-        fool_loss = scvi_loss.extra_metrics["fool_loss"]
+        vae_loss       = scvi_loss.loss
+        clf_loss       = scvi_loss.extra_metrics["classifier_loss"]
+        fool_loss      = scvi_loss.extra_metrics["fool_loss"]
+        domain_classifier_loss = scvi_loss.extra_metrics["domain_classifier_loss"]
 
         # Total training loss (with gradients)
-        total_train_loss = vae_loss + clf_loss + fool_loss
+        total_train_loss = vae_loss + clf_loss + fool_loss + domain_classifier_loss
 
         # Backward pass
         opt_vae.zero_grad()
@@ -149,6 +156,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         if self._normalize_losses:
             self.log("scale_clf_train", scale_clf, on_step=False, on_epoch=True)
             self.log("scale_fool_train", scale_fool, on_step=False, on_epoch=True)
+            self.log("scale_domain_classifier_train", scale_domain_classifier, on_step=False, on_epoch=True)
 
         # Log all metrics from extra_metrics (raw/scaled losses, accuracies, reconstruction, KL)
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
@@ -156,8 +164,9 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
-        scale_clf  = self._scale_clf  if self._normalize_losses else 1.0
-        scale_fool = self._scale_fool if self._normalize_losses else 1.0
+        scale_clf        = self._scale_clf        if self._normalize_losses else 1.0
+        scale_fool       = self._scale_fool       if self._normalize_losses else 1.0
+        scale_domain_classifier = self._scale_domain_classifier if self._normalize_losses else 1.0
 
         with torch.no_grad():
             inference_outputs, generative_outputs, scvi_loss = self.forward(
@@ -166,6 +175,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                     "kl_weight": self.kl_weight,
                     "classifier_scale": scale_clf,
                     "discriminator_scale": scale_fool,
+                    "domain_classifier_scale": scale_domain_classifier,
                 }
             )
             # Manually compute discriminator training loss (positive weight) for monitoring
@@ -181,9 +191,10 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean()
             scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
 
-        clf_loss  = scvi_loss.extra_metrics["classifier_loss"]
-        fool_loss = scvi_loss.extra_metrics["fool_loss"]
-        total_val_loss = scvi_loss.loss + clf_loss + fool_loss
+        clf_loss        = scvi_loss.extra_metrics["classifier_loss"]
+        fool_loss       = scvi_loss.extra_metrics["fool_loss"]
+        domain_classifier_loss = scvi_loss.extra_metrics["domain_classifier_loss"]
+        total_val_loss = scvi_loss.loss + clf_loss + fool_loss + domain_classifier_loss
         self.log("validation_loss", total_val_loss, on_step=False, on_epoch=True)
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         
@@ -236,3 +247,4 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         if self._warmup_done and getattr(self, "current_epoch", 0) == 1:
             self.log("scale_clf_fixed", self._scale_clf, on_step=False, on_epoch=True)
             self.log("scale_fool_fixed", self._scale_fool, on_step=False, on_epoch=True)
+            self.log("scale_domain_classifier_fixed", self._scale_domain_classifier, on_step=False, on_epoch=True)

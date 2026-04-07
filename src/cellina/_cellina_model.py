@@ -70,6 +70,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
         classifier_lambda: float = 1.0,
+        domain_classifier_lambda: float = 0.0,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -96,6 +97,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
             classifier_lambda=classifier_lambda,
+            domain_classifier_lambda=domain_classifier_lambda,
             **model_kwargs,
         )
 
@@ -132,7 +134,6 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 indices,
                 neighbour_indices,
                 spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
-                sample=False,
                 random_state=seed,
             )
 
