@@ -12,13 +12,11 @@ def adata_with_spatial():
     """Create synthetic AnnData with spatial features and connectivity."""
     from cellina._spatial_utils import spatial_neighbors
     adata = synthetic_iid()
-    n_spatial_features = 20
-    adata.obsm["spatial_x"] = np.random.randn(adata.n_obs, n_spatial_features).astype(np.float32)
-    n_labels = 3
-    adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
-    n_domains = 3
-    adata.obs["domain"] = np.random.randint(0, n_domains, size=adata.n_obs).astype(str)
-    adata.obsm["spatial"] = np.random.randn(adata.n_obs, 2) * 100
+    rng = np.random.default_rng(0)
+    adata.obsm["spatial_x"] = rng.standard_normal((adata.n_obs, 20)).astype(np.float32)
+    adata.obs["cell_labels"] = rng.integers(0, 3, size=adata.n_obs).astype(str)
+    adata.obs["domain"]      = rng.integers(0, 3, size=adata.n_obs).astype(str)
+    adata.obsm["spatial"]    = rng.standard_normal((adata.n_obs, 2)) * 100
     spatial_neighbors(adata, bandwidth=50.0, cutoff=0.1, max_neighbours=10, kernel="gaussian",
                       spatial_key="spatial", inplace=True)
     return adata
@@ -142,11 +140,6 @@ def test_discriminator_enabled_by_default(adata_with_spatial):
 
 def test_discriminator_enabled(adata_with_spatial):
     """Test that discriminator works when discriminator_lambda > 0."""
-    n_domains = 3
-    adata_with_spatial.obs["domain"] = np.random.randint(
-        0, n_domains, size=adata_with_spatial.n_obs
-    ).astype(str)
-
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
@@ -181,6 +174,7 @@ def test_discriminator_enabled(adata_with_spatial):
     with torch.no_grad():
         outputs = model.module.inference(**test_batch)
 
+    n_domains = adata_with_spatial.obs["domain"].nunique()
     assert "discriminator_logits" in outputs
     assert outputs["discriminator_logits"].shape == (10, n_domains)
 
@@ -221,11 +215,9 @@ def test_spatial_neighbors(adata_with_spatial):
     """Test spatial_neighbors function."""
     from cellina._spatial_utils import spatial_neighbors
     from scipy.sparse import issparse
-    
-    # Add spatial coordinates to adata
+
     n_obs = adata_with_spatial.n_obs
-    adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
-    
+
     # Test basic functionality
     spatial_neighbors(
         adata_with_spatial,
@@ -266,13 +258,11 @@ def test_compute_spatial_features(adata_with_spatial):
     """Test compute_spatial_features function (pseudobulk mode)."""
     from cellina._spatial_utils import compute_spatial_features, spatial_neighbors
 
-    # Setup spatial data
     n_obs = adata_with_spatial.n_obs
-    adata_with_spatial.obsm['spatial'] = np.random.rand(n_obs, 2) * 100
 
     # Add cell type labels
     cell_types = ['TypeA', 'TypeB', 'TypeC']
-    adata_with_spatial.obs['cell_type'] = np.random.choice(cell_types, n_obs)
+    adata_with_spatial.obs['cell_type'] = np.random.default_rng(1).choice(cell_types, n_obs)
 
     # Create spatial connectivity matrix
     spatial_neighbors(
@@ -405,14 +395,24 @@ def test_make_counterfactual_adata(adata_with_spatial):
         np.any(np.all(cf_rows[:, None] == result_rows[None], axis=-1), axis=0)
     ), "precomputed=True rows must come from counterfactual obsm rows"
 
+    # precomputed=True also writes spatial_x_cf; rows must come from the cf pool
+    assert "spatial_x_cf" in adata_cf_pre.obsm, "spatial_x_cf should exist for precomputed=True"
+    cf_obsm_rows = to_dense(adata_cf_pre.obsm["spatial_x_cf"])
+    assert np.all(
+        np.any(np.all(cf_rows[:, None] == cf_obsm_rows[None], axis=-1), axis=0)
+    ), "spatial_x_cf rows must come from counterfactual obsm rows"
+
+    # Regardless of n_neighbours, the per-gene mean of spatial_x_cf should be close to
+    # the full-neighbourhood result (law of large numbers over basal cells).
+    mean_full = to_dense(_cf(precomputed=False, n_neighbours=50, random_state=0).obsm[spatial_col]).mean(axis=0)
+    mean_sub = to_dense(_cf(precomputed=False, n_neighbours=10, random_state=0).obsm[spatial_col]).mean(axis=0)
+    np.testing.assert_allclose(mean_sub, mean_full, atol=1.0, err_msg=(
+        "Per-gene mean of spatial_x_cf should be similar regardless of n_neighbours"
+    ))
+
 
 def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
-    n_domains = 3
-    adata_with_spatial.obs["domain"] = np.random.randint(
-        0, n_domains, size=adata_with_spatial.n_obs
-    ).astype(str)
-
     CellinaModel.setup_anndata(
         adata_with_spatial,
         batch_key="batch",

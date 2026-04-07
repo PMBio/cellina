@@ -127,6 +127,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             neighbour_indices: np.ndarray,
             seed: int = 0,
             adata: Optional[AnnData] = None,
+            precomputed: bool = True,
+            n_neighbours: int = 50,
+            connectivity_key: str = "spatial_connectivities",
         ):
             """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
             return make_counterfactual_adata(
@@ -135,6 +138,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 neighbour_indices,
                 spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
                 random_state=seed,
+                precomputed=precomputed,
+                n_neighbours=n_neighbours,
+                connectivity_key=connectivity_key,
             )
 
 
@@ -148,6 +154,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         latent_key: str = "shifted",
         seed: int = 0,
+        precomputed: bool = True,
+        n_neighbours: int = 50,
+        connectivity_key: str = "spatial_connectivities",
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -181,7 +190,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if batch_size is None:
             batch_size = 128
         adata_cf = self._make_counterfactual_adata(
-            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
+            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
         )
         return self.get_latent_representation(
             adata=adata_cf, indices=None, give_mean=give_mean,
@@ -198,6 +208,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
+        precomputed: bool = True,
+        n_neighbours: int = 50,
+        connectivity_key: str = "spatial_connectivities",
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
@@ -231,7 +244,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if batch_size is None:
             batch_size = 128
         adata_cf = self._make_counterfactual_adata(
-            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
+            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
         )
         return self.get_normalized_expression(
             adata=adata_cf, indices=None, batch_size=batch_size,

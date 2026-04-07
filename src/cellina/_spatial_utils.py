@@ -335,10 +335,11 @@ def make_counterfactual_adata(
     indices_counterfactual,
     spatial_column,
     precomputed: bool = True,
-    n_neighbours: Optional[int] = None,
+    n_neighbours: int = 50,
     random_state: int = 0,
-    cf_conn_key: str = "__cf_conn_tmp",
-    cf_obsm_key: str = "__cf_obsm_tmp",
+    connectivity_key: str = "spatial_connectivities",
+    cf_conn_key: str = "spatial_connectivities_cf",
+    cf_obsm_key: str = "spatial_x_cf",
 ):
     """
     Create a counterfactual AnnData keeping everything from the original
@@ -358,20 +359,25 @@ def make_counterfactual_adata(
     precomputed
         If True (default), sample rows from existing .obsm[spatial_column]
         of counterfactual cells (fast, uses precomputed features).
-        If False, rebuild spatial features from scratch via
-        compute_spatial_features: a counterfactual connectivity matrix is
-        constructed where each basal cell's neighbourhood is reassigned to
-        cells from indices_counterfactual.
+        If False, rebuild spatial features from scratch: all edges incident
+        on seed nodes are removed from the original connectivity graph and
+        replaced with bidirectional edges connecting each seed to nodes
+        sampled from indices_counterfactual.
     n_neighbours
-        Only used when precomputed=False. Number of neighbours to sample
-        per basal cell from indices_counterfactual with replacement. If
-        None, all counterfactual cells are used with equal weight.
+        Number of neighbours to sample per basal cell from
+        indices_counterfactual without replacement. Defaults to 50.
+        When precomputed=False: sample exactly n_neighbours edges per seed.
     random_state
         Seed for reproducibility.
+    connectivity_key
+        Key in adata.obsp for the original spatial connectivity matrix.
+        Only used when precomputed=False.
     cf_conn_key
-        Temporary key used in adata.obsp when precomputed=False.
+        Key written to adata.obsp for the counterfactual connectivity matrix.
+        Only used when precomputed=False.
     cf_obsm_key
-        Temporary key used in adata.obsm when precomputed=False.
+        Key written to adata.obsm for the counterfactual spatial features.
+        Written in both precomputed=True and precomputed=False.
 
     Returns
     -------
@@ -379,42 +385,58 @@ def make_counterfactual_adata(
         Copy of original AnnData (basal cells only) with updated
         .obsm[spatial_column].
     """
-    rng = np.random.default_rng(random_state)
-    n_basal = len(indices_basal)
-
     if precomputed:
+        rng = np.random.default_rng(random_state)
+        n_basal = len(indices_basal)
         adata_cf = adata[indices_basal].copy()
         spatial_counts_cf = adata.obsm[spatial_column][indices_counterfactual]
         idx = rng.integers(0, len(indices_counterfactual), size=n_basal)
-        adata_cf.obsm[spatial_column] = spatial_counts_cf[idx]
+        sampled = spatial_counts_cf[idx]
+        adata_cf.obsm[cf_obsm_key] = sampled
+        adata_cf.obsm[spatial_column] = sampled
         return adata_cf
 
-    # Build (n_obs, n_obs) counterfactual connectivity: basal rows → counterfactual cols
-    assert cf_conn_key not in adata.obsp, f"Key '{cf_conn_key}' already exists in adata.obsp"
-    assert cf_obsm_key not in adata.obsm, f"Key '{cf_obsm_key}' already exists in adata.obsm"
-
-    n_obs = adata.n_obs
+    # precomputed=False: rewire connectivity graph, recompute spatial features
+    indices_basal = np.asarray(indices_basal)
+    indices_counterfactual = np.asarray(indices_counterfactual)
+    n_basal = len(indices_basal)
     n_cf = len(indices_counterfactual)
+    rng = np.random.default_rng(random_state)
 
-    if n_neighbours is None:
-        rows = np.repeat(indices_basal, n_cf)
-        cols = np.tile(indices_counterfactual, n_basal)
+    # Remove all edges incident on seed (basal) nodes
+    C_coo = csr_matrix(adata.obsp[connectivity_key]).tocoo()
+    src_arr, dst_arr, data_arr = C_coo.row, C_coo.col, C_coo.data
+    keep = ~(np.isin(src_arr, indices_basal) | np.isin(dst_arr, indices_basal))
+    src_f, dst_f, data_f = src_arr[keep], dst_arr[keep], data_arr[keep]
+
+    # Build counterfactual edges: seed <-> counterfactual pool
+    if n_neighbours is None or n_neighbours >= n_cf:
+        cf_src = np.repeat(indices_basal, n_cf)
+        cf_dst = np.tile(indices_counterfactual, n_basal)
     else:
-        sampled = rng.choice(indices_counterfactual, size=(n_basal, n_neighbours), replace=True)
-        rows = np.repeat(indices_basal, n_neighbours)
-        cols = sampled.ravel()
+        cf_src_parts, cf_dst_parts = [], []
+        for s in indices_basal:
+            chosen = rng.choice(indices_counterfactual, size=n_neighbours, replace=False)
+            cf_src_parts.append(np.full(n_neighbours, s, dtype=indices_basal.dtype))
+            cf_dst_parts.append(chosen)
+        cf_src = np.concatenate(cf_src_parts)
+        cf_dst = np.concatenate(cf_dst_parts)
 
-    data = np.ones(len(rows), dtype=np.float32)
-    C_cf = csr_matrix((data, (rows, cols)), shape=(n_obs, n_obs))
+    # Make bidirectional and merge with filtered original edges
+    cf_src_bi = np.concatenate([cf_src, cf_dst])
+    cf_dst_bi = np.concatenate([cf_dst, cf_src])
+    cf_data = np.ones(len(cf_src_bi), dtype=np.float32)
+
+    C_cf = csr_matrix(
+        (np.concatenate([data_f.astype(np.float32), cf_data]),
+         (np.concatenate([src_f, cf_src_bi]), np.concatenate([dst_f, cf_dst_bi]))),
+        shape=(adata.n_obs, adata.n_obs),
+    )
+    C_cf.sum_duplicates()
 
     adata.obsp[cf_conn_key] = C_cf
-    try:
-        compute_spatial_features(adata, connectivity_key=cf_conn_key, obsm_key=cf_obsm_key)
-        adata_cf = adata[indices_basal].copy()
-        adata_cf.obsm[spatial_column] = adata_cf.obsm.pop(cf_obsm_key)
-    finally:
-        del adata.obsp[cf_conn_key]
-        if cf_obsm_key in adata.obsm:
-            del adata.obsm[cf_obsm_key]
-
+    compute_spatial_features(adata, connectivity_key=cf_conn_key, obsm_key=cf_obsm_key)
+    adata_cf = adata[indices_basal].copy()
+    adata_cf.obsm[spatial_column] = adata_cf.obsm[cf_obsm_key]
+    
     return adata_cf
