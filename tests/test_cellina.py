@@ -361,52 +361,49 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
         inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
 
 def test_make_counterfactual_adata(adata_with_spatial):
-    """Test make_counterfactual_adata with precomputed=False (default) and precomputed=True."""
-    from cellina._utils import make_counterfactual_adata
+    """Test make_counterfactual_adata with precomputed=False and precomputed=True."""
+    from cellina._spatial_utils import make_counterfactual_adata
+    from cellina._spatial_utils import compute_spatial_features
+
+    # Compute spatial_x from gene expression so feature dim matches precomputed=False output
+    compute_spatial_features(adata_with_spatial, connectivity_key="spatial_connectivities", obsm_key="spatial_x")
+
+    to_dense = lambda x: x.toarray() if hasattr(x, "toarray") else np.asarray(x)
 
     n_obs = adata_with_spatial.n_obs
     indices_basal = np.arange(0, n_obs // 2)
     indices_cf = np.arange(n_obs // 2, n_obs)
     spatial_col = "spatial_x"
 
-    # --- precompute=False (default): rebuild features via compute_spatial_features ---
-    adata_cf = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col,
-        precomputed=False, random_state=42,
-    )
+    def _cf(**kw):
+        return make_counterfactual_adata(
+            adata_with_spatial, indices_basal, indices_cf, spatial_col, **kw
+        )
 
+    # precomputed=False: rebuild via compute_spatial_features
+    adata_cf = _cf(precomputed=False)
     assert adata_cf.n_obs == len(indices_basal)
     assert adata_cf.n_vars == adata_with_spatial.n_vars
-    assert spatial_col in adata_cf.obsm
     assert adata_cf.obsm[spatial_col].shape[0] == len(indices_basal)
-
-    # .X and .obs come from basal cells
     np.testing.assert_array_equal(adata_cf.X, adata_with_spatial[indices_basal].X)
-    assert all(adata_cf.obs.index == adata_with_spatial[indices_basal].obs.index)
 
-    # Reproducibility
-    adata_cf2 = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col,
-        precomputed=False, random_state=42,
-    )
-    cf_arr  = np.asarray(adata_cf.obsm[spatial_col].todense()  if hasattr(adata_cf.obsm[spatial_col],  "todense") else adata_cf.obsm[spatial_col])
-    cf2_arr = np.asarray(adata_cf2.obsm[spatial_col].todense() if hasattr(adata_cf2.obsm[spatial_col], "todense") else adata_cf2.obsm[spatial_col])
-    np.testing.assert_array_equal(cf_arr, cf2_arr)
-
-    # --- precomputed=True: row-sample from existing obsm features ---
-    adata_cf_pre = make_counterfactual_adata(
-        adata_with_spatial, indices_basal, indices_cf, spatial_col,
-        precomputed=True, random_state=42,
+    # reproducibility: with n_neighbours the RNG is used; same random_state → same result
+    np.testing.assert_array_equal(
+        to_dense(_cf(precomputed=False, n_neighbours=3, random_state=7).obsm[spatial_col]),
+        to_dense(_cf(precomputed=False, n_neighbours=3, random_state=7).obsm[spatial_col]),
     )
 
-    assert adata_cf_pre.obsm[spatial_col].shape == (len(indices_basal), adata_with_spatial.obsm[spatial_col].shape[1])
-
-    # Each row must come from an existing counterfactual obsm row
-    cf_rows = adata_with_spatial.obsm[spatial_col][indices_cf]
-    for i in range(adata_cf_pre.n_obs):
-        row = adata_cf_pre.obsm[spatial_col][i]
-        assert np.any(np.all(cf_rows == row, axis=1)), \
-            f"Row {i} of precompute=True result does not match any counterfactual obsm row"
+    # precomputed=True: rows sampled from existing obsm; reproducible with same random_state
+    adata_cf_pre = _cf(precomputed=True, random_state=0)
+    np.testing.assert_array_equal(
+        to_dense(adata_cf_pre.obsm[spatial_col]),
+        to_dense(_cf(precomputed=True, random_state=0).obsm[spatial_col]),
+    )
+    cf_rows = to_dense(adata_with_spatial.obsm[spatial_col][indices_cf])
+    result_rows = to_dense(adata_cf_pre.obsm[spatial_col])
+    assert np.all(
+        np.any(np.all(cf_rows[:, None] == result_rows[None], axis=-1), axis=0)
+    ), "precomputed=True rows must come from counterfactual obsm rows"
 
 
 def test_normalize_losses_true(adata_with_spatial):

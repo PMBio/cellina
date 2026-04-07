@@ -20,7 +20,7 @@ from scvi.utils import setup_anndata_dsp
 from ._cellina_module import CellinaModule
 from ._constants import DOMAINS_KEY, SPATIAL_X_KEY
 from ._training_plan import CellinaAdversarialTrainingPlan
-from ._utils import make_counterfactual_adata
+from ._spatial_utils import make_counterfactual_adata
 
 logger = logging.getLogger(__name__)
 
