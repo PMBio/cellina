@@ -82,6 +82,8 @@ class CellinaModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         discriminator_kwargs: Optional[Dict[str, Any]] = None,
         n_domains: Optional[int] = None,
+        domain_classifier_lambda: float = 0.0,
+        domain_classifier_kwargs: Optional[Dict[str, Any]] = None,
         condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
     ):
@@ -91,6 +93,7 @@ class CellinaModule(BaseModuleClass):
         self.gene_likelihood = gene_likelihood
         self.classifier_lambda = classifier_lambda
         self.discriminator_lambda = discriminator_lambda
+        self.domain_classifier_lambda = domain_classifier_lambda
         self.use_observed_lib_size = use_observed_lib_size
         # this is needed to comply with some requirement of the VAEMixin class
         self.latent_distribution = "normal"
@@ -167,6 +170,24 @@ class CellinaModule(BaseModuleClass):
                 n_labels=n_labels,
                 logits=True,
                 **classifier_kwargs
+            )
+
+        # Domain classifier on s
+        self.domain_classifier: Optional[Classifier] = None
+        if domain_classifier_lambda > 0:
+            if n_domains is None or n_domains < 2:
+                raise ValueError(
+                    "domain_classifier_lambda > 0 requires n_domains >= 2. "
+                    "Please provide domains_key in setup_anndata()."
+                )
+            domain_classifier_kwargs = dict(domain_classifier_kwargs or {})
+            self.domain_classifier = Classifier(
+                n_input=n_latent,
+                n_labels=n_domains,
+                n_hidden=domain_classifier_kwargs.pop("n_hidden", 32),
+                n_layers=domain_classifier_kwargs.pop("n_layers", 2),
+                logits=True,
+                **domain_classifier_kwargs,
             )
 
         # Domain discriminator
@@ -258,7 +279,11 @@ class CellinaModule(BaseModuleClass):
         # Domain discriminator
         if self.domain_discriminator is not None:
             outputs["discriminator_logits"] = self.domain_discriminator(z)
-        
+
+        # Domain classifier on s
+        if self.domain_classifier is not None:
+            outputs["domain_classifier_logits"] = self.domain_classifier(s)
+
         return outputs
 
     @auto_move_data
@@ -351,6 +376,7 @@ class CellinaModule(BaseModuleClass):
         kl_weight: float = 1.0,
         classifier_scale: float = 1.0,
         discriminator_scale: float = 1.0,
+        domain_classifier_scale: float = 1.0,
     ):
         """
         Loss function.
@@ -445,6 +471,17 @@ class CellinaModule(BaseModuleClass):
         )
         fool_loss_scaled = fool_loss * discriminator_scale * self.discriminator_lambda
 
+        # Domain classifier on s (positive CE loss — encourages s to capture domain info)
+        domain_classifier_loss, domain_classifier_accuracy = self._compute_classifier_metrics(
+            classifier=self.domain_classifier,
+            weight=1.0,
+            inference_outputs=inference_outputs,
+            labels=domain_labels,
+            reconst_loss_shape=reconst_loss,
+            metric_name="domain_classifier",
+        )
+        domain_classifier_loss_scaled = domain_classifier_loss * domain_classifier_scale * self.domain_classifier_lambda
+
         # VAE loss (reconstruction + KL only)
         vae_loss_tensor = reconst_loss + weighted_kl_local
         vae_loss = torch.mean(vae_loss_tensor)
@@ -464,6 +501,9 @@ class CellinaModule(BaseModuleClass):
             'fool_loss_raw': fool_loss.mean(),
             'fool_loss': fool_loss_scaled.mean(),
             'fool_accuracy': discriminator_accuracy,
+            'domain_classifier_loss_raw': domain_classifier_loss.mean(),
+            'domain_classifier_loss': domain_classifier_loss_scaled.mean(),
+            'domain_classifier_accuracy': domain_classifier_accuracy,
         }
 
         return LossOutput(

@@ -20,7 +20,7 @@ from scvi.utils import setup_anndata_dsp
 from ._cellina_module import CellinaModule
 from ._constants import DOMAINS_KEY, SPATIAL_X_KEY
 from ._training_plan import CellinaAdversarialTrainingPlan
-from ._utils import make_counterfactual_adata
+from ._spatial_utils import make_counterfactual_adata
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
         classifier_lambda: float = 1.0,
+        domain_classifier_lambda: float = 0.0,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -96,6 +97,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
             classifier_lambda=classifier_lambda,
+            domain_classifier_lambda=domain_classifier_lambda,
             **model_kwargs,
         )
 
@@ -125,6 +127,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             neighbour_indices: np.ndarray,
             seed: int = 0,
             adata: Optional[AnnData] = None,
+            precomputed: bool = True,
+            n_neighbours: int = 50,
+            connectivity_key: str = "spatial_connectivities",
         ):
             """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
             return make_counterfactual_adata(
@@ -132,8 +137,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 indices,
                 neighbour_indices,
                 spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
-                sample=False,
                 random_state=seed,
+                precomputed=precomputed,
+                n_neighbours=n_neighbours,
+                connectivity_key=connectivity_key,
             )
 
 
@@ -147,6 +154,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         latent_key: str = "shifted",
         seed: int = 0,
+        precomputed: bool = True,
+        n_neighbours: int = 50,
+        connectivity_key: str = "spatial_connectivities",
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -178,9 +188,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
-            batch_size = 128
+            batch_size = 512
         adata_cf = self._make_counterfactual_adata(
-            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
+            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
         )
         return self.get_latent_representation(
             adata=adata_cf, indices=None, give_mean=give_mean,
@@ -197,6 +208,9 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
+        precomputed: bool = True,
+        n_neighbours: int = 50,
+        connectivity_key: str = "spatial_connectivities",
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
@@ -228,9 +242,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
-            batch_size = 128
+            batch_size = 512
         adata_cf = self._make_counterfactual_adata(
-            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata
+            np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
+            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
         )
         return self.get_normalized_expression(
             adata=adata_cf, indices=None, batch_size=batch_size,
