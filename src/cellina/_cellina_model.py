@@ -188,7 +188,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
-            batch_size = 128
+            batch_size = 512
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
@@ -242,7 +242,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
-            batch_size = 128
+            batch_size = 512
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
