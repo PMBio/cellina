@@ -413,7 +413,7 @@ def compute_cf_logfc(
         random_state=random_state,
     )
 
-    edist = _standard_edistance(pert_expr, obs_expr)
+    edist = _standard_edistance(np.log1p(pert_expr), np.log1p(obs_expr))
 
     return dict(
         pearson_r=pearson_r,

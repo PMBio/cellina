@@ -99,7 +99,7 @@ class CellinaModule(BaseModuleClass):
         link_prediction_weight: float = 0.0,
         spatial_loss_type: str = "supcon",
         supcon_temperature: float = 0.25,
-        supcon_require_same_domain: bool = False,
+        supcon_require_same_domain: bool = True,
         use_observed_lib_size: bool = True,
         use_batch_norm: bool = False, # TODO: can double check later if GCN batch norm is correctly done for edge cases (e.g. supcon, etc.)
         convolution_type: str = "gcn",
@@ -379,7 +379,7 @@ class CellinaModule(BaseModuleClass):
         domains_all: torch.Tensor,
         batch_size: int,
         temperature: float,
-        require_same_domain: bool = False,
+        require_same_domain: bool = True,
     ) -> torch.Tensor:
         """
         Spatial supervised contrastive loss on s.
@@ -555,7 +555,7 @@ class CellinaModule(BaseModuleClass):
         spatial_loss_raw = torch.tensor(0.0, device=reconst_loss.device)
         s_domain_accuracy = 0.0
         if self.link_prediction_weight > 0:
-            if self.spatial_loss_type == "supcon" and inference_outputs.get("neighbor_means") is not None:
+            if self.spatial_loss_type == "supcon":
                 spatial_loss_raw = self._compute_supcon_loss(
                     qsm=inference_outputs["qsm"],
                     neighbor_means=inference_outputs["neighbor_means"],

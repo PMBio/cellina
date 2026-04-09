@@ -143,11 +143,6 @@ class GCNLayers(nn.Module):
         user_cond = layer_num == 0 or (layer_num > 0 and self.inject_covariates)
         return int(user_cond)
 
-    def set_online_update_hooks(self, hook_first_layer=True):
-        """Set online update hooks."""
-        self.hooks = []
-        # Covariate correction is now handled by dedicated cov_layers; no gradient surgery needed.
-
     def forward(
         self,
         x: torch.Tensor,
@@ -300,20 +295,17 @@ class GraphEncoder(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         *cat_list: int,
-        batch_size: int | None = None,
+        batch_size: int,
         return_neighbor_means: bool = False,
     ):
-        q = self.encoder(x, edge_index, *cat_list)   # (seed + neighbors, n_hidden)
-
+        q = self.encoder(x, edge_index, *cat_list)
+        q_seed = q[:batch_size]
+        if self.bn is not None:
+            q_seed = self.bn(q_seed)
         neighbor_means = None
-        if batch_size is not None:
-            q_seed = q[:batch_size]                   # seed nodes only
-            if self.bn is not None:
-                q_seed = self.bn(q_seed)              # BN on correct population
-            if return_neighbor_means:
-                neighbor_means = self.mean_encoder(q[batch_size:])  # (N_neighbors, n_latent)
-        else:
-            q_seed = q
+        if return_neighbor_means:
+            # NOTE: I detach to avoid backprop through the noisy incomplete graph neighbor means
+            neighbor_means = self.mean_encoder(q[batch_size:].detach())
 
         q_m = self.mean_encoder(q_seed)
         q_v = self.var_activation(self.var_encoder(q_seed)) + self.var_eps
@@ -321,5 +313,5 @@ class GraphEncoder(nn.Module):
         latent = self.z_transformation(dist.rsample())
 
         if self.return_dist:
-            return dist, latent
+            return dist, latent, neighbor_means
         return q_m, q_v, latent, neighbor_means
