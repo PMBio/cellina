@@ -304,8 +304,9 @@ class GraphEncoder(nn.Module):
             q_seed = self.bn(q_seed)
         neighbor_means = None
         if return_neighbor_means:
-            # NOTE: I detach to avoid backprop through the noisy incomplete graph neighbor means
-            neighbor_means = self.mean_encoder(q[batch_size:].detach())
+            # NOTE: There is an argument detach to avoid backprop through the incomplete graph neighbor means
+            # However, this results in the collapse to labels; so we keep the gradients flowing through the neighbor means
+            neighbor_means = self.mean_encoder(q[batch_size:]) # .detach()
 
         q_m = self.mean_encoder(q_seed)
         q_v = self.var_activation(self.var_encoder(q_seed)) + self.var_eps
