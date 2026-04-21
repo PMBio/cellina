@@ -110,7 +110,7 @@ def run_one(adata_base, holdout_celltype, link_prediction_weight, spatial_loss_t
     )
 
     # ── Per-run scalars ───────────────────────────────────────────────────────
-    marginal_ll = model.get_marginal_ll(adata, indices=model.test_indices_, reduce="mean")
+    marginal_ll = model.get_marginal_ll(adata, indices=model.test_indices_, return_mean=True)
     print(f"  marginal_ll={marginal_ll:.4f}")
 
     adata.obsm["s"] = model.get_latent_representation(latent_key="s")

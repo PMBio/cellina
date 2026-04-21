@@ -638,7 +638,7 @@ class CellinaModule(BaseModuleClass):
 
     @torch.no_grad()
     @auto_move_data
-    def marginal_ll(self, tensors: dict, n_mc_samples: int):
+    def marginal_ll(self, tensors: dict, n_mc_samples: int) -> torch.Tensor:
         """
         Marginal ll approximation via Monte Carlo Importance Sampling.
 
@@ -648,6 +648,11 @@ class CellinaModule(BaseModuleClass):
             Input tensors from data loader (graph-aware format)
         n_mc_samples
             Number of Monte Carlo samples for approximation
+
+        Returns
+        -------
+        torch.Tensor
+            1D CPU tensor of per-cell log-likelihoods, shape [batch_size]
         """
         node_batch = tensors['node_batch']
         sample_batch = node_batch['X']
@@ -658,7 +663,7 @@ class CellinaModule(BaseModuleClass):
         sample_batch = sample_batch[:batch_size]
         batch_index = batch_index[:batch_size]
 
-        to_sum = torch.zeros(sample_batch.size()[0], n_mc_samples)
+        to_sum = torch.zeros(sample_batch.size()[0], n_mc_samples, device=sample_batch.device)
 
         for i in range(n_mc_samples):
             inference_outputs, generative_outputs = self.forward(tensors, compute_loss=False)
@@ -714,5 +719,4 @@ class CellinaModule(BaseModuleClass):
 
         # per-cell marginal log-likelihood (numerically stable log-sum-exp estimator)
         batch_log_lkl = torch.logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
-
-        return float(batch_log_lkl.mean().item())
+        return batch_log_lkl.cpu()

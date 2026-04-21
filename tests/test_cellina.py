@@ -293,27 +293,24 @@ def test_marginal_ll(adata_with_spatial):
     model = CellinaModel(adata_with_spatial, n_latent=n_latent)
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
 
-    marginal_ll_list = model.get_marginal_ll(n_mc_samples=10)
-    assert isinstance(marginal_ll_list, list)
-    assert len(marginal_ll_list) > 0
-    assert all(isinstance(ll, float) and np.isfinite(ll) for ll in marginal_ll_list)
+    marginal_ll_arr = model.get_marginal_ll(n_mc_samples=10, return_mean=False)
+    assert isinstance(marginal_ll_arr, np.ndarray)
+    assert marginal_ll_arr.ndim == 1
+    assert len(marginal_ll_arr) == adata_with_spatial.n_obs
+    assert np.all(np.isfinite(marginal_ll_arr))
 
-    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=10, reduce='mean')
-    assert isinstance(marginal_ll_mean, (float, np.floating))
+    marginal_ll_mean = model.get_marginal_ll(n_mc_samples=10, return_mean=True)
+    assert isinstance(marginal_ll_mean, float)
+    assert np.isfinite(marginal_ll_mean)
 
-    marginal_ll_sum = model.get_marginal_ll(n_mc_samples=10, reduce='sum')
-    assert isinstance(marginal_ll_sum, (float, np.floating))
-
-    with pytest.raises(ValueError, match="Reduction must be None, 'mean' or 'sum'"):
-        model.get_marginal_ll(reduce='invalid')
-
-    # Test underlying module.marginal_ll
+    # Test underlying module.marginal_ll returns 1D tensor
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    model.module.eval()
     with torch.no_grad():
         log_lkl = model.module.marginal_ll(batch, n_mc_samples=10)
-    assert isinstance(log_lkl, float) and np.isfinite(log_lkl)
+    assert isinstance(log_lkl, torch.Tensor)
+    assert log_lkl.ndim == 1
+    assert torch.all(torch.isfinite(log_lkl))
 
 
 def test_condition_on_intrinsic_false(adata_with_spatial):

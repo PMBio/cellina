@@ -561,31 +561,42 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: Optional[list] = None,
         batch_size: Optional[int] = None,
         n_mc_samples: int = 1000,
-        reduce: Optional[str] = None,
+        return_mean: bool = True,
     ):
         """Get marginal log-likelihood of the data.
-        ...
-        """
-        if reduce not in (None, 'mean', 'sum'):
-            raise ValueError("Reduction must be None, 'mean' or 'sum'")
 
+        Parameters
+        ----------
+        adata
+            AnnData object to evaluate. Defaults to the registered training data.
+        indices
+            Cell indices to evaluate. Defaults to all cells.
+        batch_size
+            Mini-batch size for the data loader.
+        n_mc_samples
+            Number of Monte Carlo importance-weighted samples per cell.
+        return_mean
+            If True (default), return the mean log-likelihood over all cells as a
+            float. If False, return a 1D numpy array of per-cell log-likelihoods.
+        """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-
         scdl = self._make_data_loader(
             adata=adata, indices=indices, batch_size=batch_size
         )
         per_batch_mlls = []
-
         for tensors in scdl:
-            per_batch_mlls.append(self.module.marginal_ll(tensors, n_mc_samples))
-
-        if reduce is None:
-            return per_batch_mlls
-        elif reduce == 'mean':
-            return float(np.mean(per_batch_mlls))
-        else:  # 'sum'
-            return float(np.sum(per_batch_mlls))
+            batch_mll = self.module.marginal_ll(tensors, n_mc_samples)
+            if not torch.is_tensor(batch_mll):
+                batch_mll = torch.as_tensor(batch_mll)
+            per_batch_mlls.append(batch_mll.cpu())
+        if len(per_batch_mlls) == 0:
+            return np.array([])
+        all_mll = torch.cat(per_batch_mlls, dim=0).numpy()  # [n_cells]
+        if return_mean:
+            return float(np.mean(all_mll))
+        else:
+            return all_mll
 
 
     def _compute_expression(
