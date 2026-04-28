@@ -97,7 +97,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         supcon_temperature: float = 0.25,
         num_neighbors: List[int] = None,
         use_observed_lib_size: bool = True,
-        convolution_type: str = "gcn",
+        convolution_type: str = "gat",
         **model_kwargs,
     ):
         super().__init__(adata)
