@@ -1,7 +1,13 @@
-from anndata import AnnData
+import logging
+from typing import Optional
+
 import numpy as np
+import scipy.sparse as sp
+from anndata import AnnData
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
+
+logger = logging.getLogger(__name__)
 # Spatial Kernels
 def _gaussian(distance_mtx, bandwidth):
     return np.exp(-(distance_mtx ** 2.0) / (2.0 * bandwidth ** 2.0))
@@ -178,5 +184,105 @@ def spatial_neighbors(adata: AnnData,
         return None
     else:
         return dist
+
+
+def make_perturbed_expression(
+    adata: AnnData,
+    perturbations: Optional[dict] = None,
+    groupby: Optional[str] = None,
+    layer_key: str = "counts_cf",
+    base: float = np.e,
+    inplace: bool = True,
+):
+    """
+    Apply logFC perturbations to counts and store the result as a layer.
+
+    Counts-space analog of cellina's ``make_neighbor_perturbation``. cellina
+    scales counts AND aggregates them via the connectivity matrix into a
+    precomputed pseudobulk. Here only the scaling step is performed; the GCN
+    aggregates over the spatial graph at inference time when this layer is
+    supplied via ``cf_layer``.
+
+    Parameters
+    ----------
+    adata
+        AnnData with raw counts in ``adata.X``.
+    perturbations
+        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC,
+        applied globally to all cells.
+        When ``groupby`` is set: ``Dict[str, pd.Series]`` mapping cell-type
+        label → gene-indexed logFC Series; each cell is scaled by its cell
+        type's vector. Partial dicts (covering only some cell types) are
+        allowed — unspecified cell types pass through unchanged.
+        When ``None``, the layer is a copy of ``adata.X``.
+    groupby
+        Column in ``adata.obs`` used for cell-type-specific perturbations.
+    layer_key
+        Where to write the perturbed matrix in ``adata.layers``.
+    base
+        Base for the logFC → fold-change conversion. Default ``np.e``.
+    inplace
+        If True, write to ``adata.layers[layer_key]`` and return None.
+        If False, return the perturbed matrix without modifying adata.
+
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is set and ``perturbations`` contains cell-type keys
+        not present in ``adata.obs[groupby]``.
+    """
+    var_idx = {g: i for i, g in enumerate(adata.var_names)}
+
+    if perturbations is not None and groupby is not None:
+        obs_cts = set(adata.obs[groupby].unique())
+        unknown = set(perturbations) - obs_cts
+        if unknown:
+            raise ValueError(
+                f"perturbations contains cell types not in "
+                f"adata.obs['{groupby}']: {unknown}"
+            )
+
+    if perturbations:
+        var_names_set = set(var_idx)
+        if groupby is None:
+            skipped = [g for g in perturbations if g not in var_names_set]
+        else:
+            skipped = [
+                g
+                for series in perturbations.values()
+                for g in series.index
+                if g not in var_names_set
+            ]
+        if skipped:
+            logger.warning(
+                "%d perturbation gene(s) not in var_names, skipped: %s",
+                len(skipped),
+                skipped,
+            )
+
+    X = adata.X
+
+    if not perturbations:
+        X_cf = X.copy()
+    elif groupby is None:
+        scale = np.ones(adata.n_vars, dtype=np.float32)
+        for gene, logfc in perturbations.items():
+            if gene in var_idx:
+                scale[var_idx[gene]] = base ** logfc
+        X_cf = X.multiply(scale) if sp.issparse(X) else X * scale
+    else:
+        labels = adata.obs[groupby].values
+        scale = np.ones((adata.n_obs, adata.n_vars), dtype=np.float32)
+        for ct, logfc_series in perturbations.items():
+            ct_mask = labels == ct
+            for gene, logfc in logfc_series.items():
+                if gene in var_idx:
+                    scale[ct_mask, var_idx[gene]] = base ** logfc
+        X_cf = X.multiply(scale) if sp.issparse(X) else X * scale
+
+    if inplace:
+        adata.layers[layer_key] = X_cf
+        return None
+    return X_cf
 
 

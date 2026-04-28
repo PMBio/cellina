@@ -65,6 +65,11 @@ def load_crc_slide(
     domains_key
         obs column name for domain/tissue labels.
 
+    Details: 
+    --------
+    The CRC 18k CosMx dataset:
+    https://www.biorxiv.org/content/10.1101/2025.06.23.660674v1.abstract
+
     Returns
     -------
     Preprocessed AnnData with:
@@ -97,6 +102,56 @@ def load_crc_slide(
     sc.pp.highly_variable_genes(
         adata, layer="counts", flavor="seurat_v3", n_top_genes=n_top_genes, subset=True
     )
+
+    return adata
+
+
+def load_merfish_brain(
+    data_dir: str = "../../data/MERFISH_mouse_brain",
+    brain_section_label: str = "C57BL6J-2.039",
+    labels_key: str = "cell_type",
+    domains_key: str = "major_brain_region",
+):
+    """Load and preprocess a MERFISH mouse brain section.
+
+    Parameters
+    ----------
+    data_dir
+        Directory containing ``WB_MERFISH_animal2_coronal.h5ad``.
+    brain_section_label
+        Value of ``brain_section_label`` obs column used to subset to one section.
+    labels_key
+        obs column name for cell-type labels.
+    domains_key
+        obs column name for brain-region/domain labels.
+        
+        
+    Details:
+    --------
+    The MERFISH dataset contains multiple brain sections:
+    https://doi.brainimagelibrary.org/doi/10.35077/act-bag from https://www.nature.com/articles/s41586-023-06808-9#data-availability
+    Where resolution is 0.109 nanometers per pixel, so 10 microns ≈ 92 pixels.
+
+    Returns
+    -------
+    Preprocessed AnnData with:
+    - ``obs[labels_key]``: cell-type categories
+    - ``obs[domains_key]``: brain-region categories
+    - ``obsm['spatial']``: spatial coordinates from ``X_spatial_coords``
+    """
+    adata = sc.read(
+        f"{data_dir}/WB_MERFISH_animal2_coronal.h5ad",
+        backup_url="https://datasets.cellxgene.cziscience.com/93c3bb97-ea05-4ee0-a760-a1508cd04612.h5ad",
+    )
+
+    adata = adata[adata.obs["brain_section_label"] == brain_section_label].copy()
+    adata = adata[~adata.obs[labels_key].isna() & ~adata.obs[domains_key].isna()].copy()
+
+    adata.obs[labels_key] = adata.obs[labels_key].astype("category")
+    adata.obs[domains_key] = adata.obs[domains_key].astype("category")
+    adata.obsm["spatial"] = adata.obsm["X_spatial_coords"]
+    
+    adata.layers['counts'] = adata.raw.X.copy()
 
     return adata
 
@@ -322,8 +377,7 @@ def _standard_edistance(X: np.ndarray, Y: np.ndarray) -> float:
     X, Y
         2-D arrays of shape (n_cells, n_features).
     """
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    device = "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
     Xt = torch.tensor(X, dtype=torch.float32, device=device)
     Yt = torch.tensor(Y, dtype=torch.float32, device=device)
 
@@ -374,7 +428,7 @@ def compute_cf_logfc(
     -------
     dict with keys:
         pearson_r, pearson_p, spearman_r, spearman_p, precision, mixing_index,
-        edistance, real_logfc, pred_logfc, top_n_mask, gene_names
+        edistance, rmse, real_logfc, pred_logfc, top_n_mask, gene_names
     """
     ref_mean = np.log1p(ref_expr.mean(0))
     crc_mean = np.log1p(obs_expr.mean(0))
@@ -405,6 +459,7 @@ def compute_cf_logfc(
 
     pearson_r, pearson_p = pearsonr(real_eval, pred_eval)
     spearman_r, spearman_p = spearmanr(real_eval, pred_eval)
+    rmse = float(np.sqrt(np.mean((pred_eval - real_eval) ** 2)))
 
     mix_idx = _mixing_index(
         pert_expr, obs_expr,
@@ -413,7 +468,7 @@ def compute_cf_logfc(
         random_state=random_state,
     )
 
-    edist = _standard_edistance(np.log1p(pert_expr), np.log1p(obs_expr))
+    edist = _standard_edistance(pert_expr, obs_expr)
 
     return dict(
         pearson_r=pearson_r,
@@ -423,6 +478,7 @@ def compute_cf_logfc(
         precision=precision,
         mixing_index=mix_idx,
         edistance=edist,
+        rmse=rmse,
         real_logfc=real_logfc,
         pred_logfc=pred_logfc,
         top_n_mask=top_n_mask,

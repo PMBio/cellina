@@ -378,6 +378,126 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         )
         return self._compute_expression(scdl, library_size, return_numpy)
 
+    def _make_perturbed_loader(
+        self,
+        adata,
+        indices,
+        batch_size: int,
+        cf_layer: str,
+    ):
+        """Create an inference loader that swaps GCN node features with adata.layers[cf_layer]."""
+        adata = self._validate_anndata(adata) if adata is not None else self.adata
+        if cf_layer not in adata.layers:
+            raise ValueError(
+                f"cf_layer '{cf_layer}' not found in adata.layers. "
+                f"Available: {list(adata.layers.keys())}"
+            )
+        if indices is None:
+            indices = np.arange(adata.n_obs)
+        splitter = GraphJointDataSplitter(
+            self.adata_manager,
+            num_neighbors=self._num_neighbors,
+            batch_size=batch_size,
+            cf_layer=cf_layer,
+        )
+        return splitter.create_inference_loader(indices=indices, batch_size=batch_size, shuffle=False)
+
+    @torch.inference_mode()
+    def get_perturbed_latents(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        give_mean: bool = False,
+        batch_size: Optional[int] = None,
+        latent_key: str = "s",
+        cf_layer: str = "counts_cf",
+    ) -> np.ndarray:
+        """
+        Return latent representations using counterfactual node features for the GCN.
+
+        ``z`` is computed from each cell's own counts (unchanged).
+        ``s`` is computed via GCN message passing with node features drawn from
+        ``adata.layers[cf_layer]`` instead of ``adata.X``.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        give_mean
+            Return the posterior mean rather than a sample.
+        batch_size
+            Mini-batch size for inference.
+        latent_key
+            Which latent to return: ``'shifted'``, ``'z'``, or ``'s'``. Default ``'s'``.
+        cf_layer
+            Key in ``adata.layers`` holding the counterfactual count matrix
+            (raw counts, same shape as ``adata.X``).
+        """
+        if latent_key not in ['shifted', 'z', 's']:
+            raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
+
+        self._check_if_trained(warn=False)
+        if batch_size is None:
+            batch_size = 128
+
+        scdl = self._make_perturbed_loader(adata, indices, batch_size, cf_layer)
+
+        latent = []
+        for tensors in scdl:
+            inference_inputs = self.module._get_inference_input(tensors)
+            outputs = self.module.inference(**inference_inputs)
+
+            if latent_key == 'z':
+                lat = outputs["qzm"] if give_mean else outputs["z"]
+            elif latent_key == 's':
+                lat = outputs["qsm"] if give_mean else outputs["s"]
+            else:
+                if give_mean:
+                    lat = torch.cat([outputs["qzm"], outputs["qsm"]], dim=-1)
+                else:
+                    lat = outputs["shifted"]
+            latent.append(lat.cpu())
+
+        return torch.cat(latent).numpy()
+
+    @torch.inference_mode()
+    def get_perturbed_expression(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: Optional[int] = None,
+        cf_layer: str = "counts_cf",
+        library_size: Union[float, str] = "latent",
+        return_numpy: bool = True,
+    ) -> Union[np.ndarray, torch.Tensor]:
+        """
+        Predict gene expression using counterfactual node features for the GCN.
+
+        Library size is computed from each cell's own observed ``adata.X`` counts.
+
+        Parameters
+        ----------
+        adata
+            AnnData object; defaults to the model's registered adata.
+        indices
+            Cell indices to use.
+        batch_size
+            Mini-batch size for inference.
+        cf_layer
+            Key in ``adata.layers`` holding the counterfactual count matrix.
+        library_size
+            ``"latent"`` (default), a float scalar, or ``1`` for pure proportions.
+        return_numpy
+            If True, return np.ndarray; otherwise return torch.Tensor.
+        """
+        self._check_if_trained(warn=False)
+        if batch_size is None:
+            batch_size = 128
+        scdl = self._make_perturbed_loader(adata, indices, batch_size, cf_layer)
+        return self._compute_expression(scdl, library_size, return_numpy)
+
     @classmethod
     @setup_anndata_dsp.dedent
     def setup_anndata(

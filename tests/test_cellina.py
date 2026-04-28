@@ -2,10 +2,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 import torch
+from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
-from cellina_graph import CellinaModel
+from cellina_graph import CellinaModel, make_perturbed_expression
 from cellina_graph._cellina_module import CellinaModule
 
 
@@ -213,27 +214,18 @@ def test_discriminator_enabled(adata_with_spatial):
     assert outputs["discriminator_logits"].shape[1] == adata_with_spatial.obs["domain"].nunique()
 
 
-def test_cellina_latent_representation(adata_with_spatial):
+def test_cellina_latent_representation(trained_model):
     """Test latent representation returns correct shapes and uses latent_key."""
-    n_latent = 5
-
-    CellinaModel.setup_anndata(
-        adata_with_spatial,
-        batch_key="batch",
-        labels_key="cell_labels",
-        domains_key="domain",
-        spatial_connectivities_key="spatial_connectivities",
-    )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
-    model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
+    model, adata = trained_model
+    n_latent = model.module.n_latent
 
     latent_z = model.get_latent_representation(latent_key='z')
     latent_s = model.get_latent_representation(latent_key='s')
     latent_shifted = model.get_latent_representation(latent_key='shifted')
 
-    assert latent_z.shape == (adata_with_spatial.n_obs, n_latent)
-    assert latent_s.shape == (adata_with_spatial.n_obs, n_latent)
-    assert latent_shifted.shape == (adata_with_spatial.n_obs, n_latent * 2)
+    assert latent_z.shape == (adata.n_obs, n_latent)
+    assert latent_s.shape == (adata.n_obs, n_latent)
+    assert latent_shifted.shape == (adata.n_obs, n_latent * 2)
 
     latent_default = model.get_latent_representation()
     assert latent_default.shape == latent_shifted.shape
@@ -279,24 +271,14 @@ def test_spatial_neighbors(adata_with_spatial):
     assert conn_matrix.shape == (n_obs, n_obs)
 
 
-def test_marginal_ll(adata_with_spatial):
+def test_marginal_ll(trained_model):
     """Test get_marginal_ll method and underlying module.marginal_ll."""
-    n_latent = 5
-
-    CellinaModel.setup_anndata(
-        adata_with_spatial,
-        batch_key="batch",
-        labels_key="cell_labels",
-        domains_key="domain",
-        spatial_connectivities_key="spatial_connectivities",
-    )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
-    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
+    model, adata = trained_model
 
     marginal_ll_arr = model.get_marginal_ll(n_mc_samples=10, return_mean=False)
     assert isinstance(marginal_ll_arr, np.ndarray)
     assert marginal_ll_arr.ndim == 1
-    assert len(marginal_ll_arr) == adata_with_spatial.n_obs
+    assert len(marginal_ll_arr) == adata.n_obs
     assert np.all(np.isfinite(marginal_ll_arr))
 
     marginal_ll_mean = model.get_marginal_ll(n_mc_samples=10, return_mean=True)
@@ -304,7 +286,7 @@ def test_marginal_ll(adata_with_spatial):
     assert np.isfinite(marginal_ll_mean)
 
     # Test underlying module.marginal_ll returns 1D tensor
-    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
+    dataloader = model._make_data_loader(adata, batch_size=32)
     batch = next(iter(dataloader))
     with torch.no_grad():
         log_lkl = model.module.marginal_ll(batch, n_mc_samples=10)
@@ -582,3 +564,50 @@ def test_normalize_losses_spatial_scale(adata_with_spatial):
             spatial_scaled, spatial_raw * expected_scale * link_prediction_weight, rtol=1e-4,
             err_msg=f"Scale mismatch for spatial_loss_type={spatial_loss_type!r}",
         )
+
+
+# ── Perturbation API ─────────────────────────────────────────────────────────
+
+@pytest.fixture
+def trained_model(adata_with_spatial):
+    CellinaModel.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaModel(adata_with_spatial, n_latent=5, discriminator_lambda=0.0, classifier_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.8, check_val_every_n_epoch=1)
+    return model, adata_with_spatial
+
+
+def test_make_perturbed_expression():
+    X = np.arange(1, 10, dtype=float).reshape(3, 3)
+    adata = AnnData(X=X.copy())
+    adata.var_names = ["G0", "G1", "G2"]
+    make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf", base=np.e)
+    expected = X.copy()
+    expected[:, 0] *= np.e ** 1.5
+    expected[:, 2] *= np.e ** -0.5
+    np.testing.assert_allclose(np.asarray(adata.layers["cf"]), expected, rtol=1e-6)
+
+
+def test_perturbed_latents(trained_model):
+    model, adata = trained_model
+    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    z_base = model.get_latent_representation(latent_key="z", give_mean=True)
+    s_base = model.get_latent_representation(latent_key="s", give_mean=True)
+    z_cf = model.get_perturbed_latents(cf_layer="cf_zero", latent_key="z", give_mean=True)
+    s_cf = model.get_perturbed_latents(cf_layer="cf_zero", latent_key="s", give_mean=True)
+    np.testing.assert_allclose(z_cf, z_base, rtol=1e-5)
+    assert not np.allclose(s_cf, s_base, atol=1e-3)
+
+
+def test_perturbed_expression(trained_model):
+    model, adata = trained_model
+    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    expr_base = model.get_normalized_expression(library_size=1e4)
+    expr_cf = model.get_perturbed_expression(cf_layer="cf_zero", library_size=1e4)
+    assert expr_cf.shape == adata.shape
+    assert not np.allclose(expr_cf, expr_base, atol=1e-3)

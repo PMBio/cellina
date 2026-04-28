@@ -3,6 +3,7 @@
 import torch
 import numpy as np
 import scipy.sparse as sp
+from typing import Optional
 from scvi.dataloaders import DataSplitter
 from scvi import REGISTRY_KEYS
 from torch_geometric.data import Data
@@ -25,7 +26,7 @@ class GraphBatchLoader:
     @staticmethod
     def _node_batch_to_dict(node_batch):
         """Convert PyG node batch to dict format expected by module."""
-        return {
+        d = {
             'X': node_batch.x,
             'edge_index': node_batch.edge_index,
             'node_indices': node_batch.input_id,
@@ -34,6 +35,9 @@ class GraphBatchLoader:
             REGISTRY_KEYS.LABELS_KEY: node_batch.labels,
             DOMAINS_KEY: node_batch.domains,
         }
+        if hasattr(node_batch, 'x_spatial'):
+            d['x_spatial'] = node_batch.x_spatial
+        return d
 
     def __iter__(self):
         for node_batch in self.node_loader:
@@ -64,12 +68,14 @@ class GraphJointDataSplitter(DataSplitter):
         self,
         adata_manager,
         num_neighbors=None,
+        cf_layer: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(adata_manager, **kwargs)
 
         self.num_neighbors = num_neighbors or [-1]
         self.batch_size = kwargs.get('batch_size', 128)
+        self.cf_layer = cf_layer
 
         self.pyg_data = self._adata_to_pyg_data()
 
@@ -112,7 +118,7 @@ class GraphJointDataSplitter(DataSplitter):
         edge_index = torch.tensor(np.vstack([adj_coo.row, adj_coo.col]), dtype=torch.long)
         edge_index, _ = remove_self_loops(edge_index)
 
-        return Data(
+        data = Data(
             x=x,
             edge_index=edge_index,
             batch_labels=batch_labels,
@@ -120,6 +126,25 @@ class GraphJointDataSplitter(DataSplitter):
             domains=domains,
             num_nodes=n_cells,
         )
+
+        if self.cf_layer is not None:
+            adata = self.adata_manager.adata
+            if self.cf_layer not in adata.layers:
+                raise ValueError(
+                    f"cf_layer '{self.cf_layer}' not in adata.layers. "
+                    f"Available: {list(adata.layers.keys())}"
+                )
+            x_cf = adata.layers[self.cf_layer]
+            if sp.issparse(x_cf):
+                x_cf = x_cf.toarray()
+            x_cf = np.asarray(x_cf)
+            if x_cf.shape != tuple(data.x.shape):
+                raise ValueError(
+                    f"cf_layer shape {x_cf.shape} does not match X shape {tuple(data.x.shape)}"
+                )
+            data.x_spatial = torch.tensor(x_cf, dtype=torch.float32)
+
+        return data
 
     def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last):
         """Create a NeighborLoader for the given node indices."""

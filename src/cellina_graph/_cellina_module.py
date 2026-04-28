@@ -233,6 +233,7 @@ class CellinaModule(BaseModuleClass):
             batch_index=node_batch['batch_label'],
             edge_index=node_batch['edge_index'],
             batch_size=node_batch['batch_size'],
+            x_spatial=node_batch.get('x_spatial'),
         )
 
     def _get_generative_input(self, tensors, inference_outputs):
@@ -257,6 +258,7 @@ class CellinaModule(BaseModuleClass):
         edge_index,
         batch_size,
         n_samples=1,
+        x_spatial=None,
     ):
         """
         High level inference method.
@@ -269,11 +271,14 @@ class CellinaModule(BaseModuleClass):
         # Encode counts -> z (MLP)
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
+        # Choose node features for GCN (perturbed or original)
+        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
+
         # Prepare GCN input features
         if self.condition_on_intrinsic:
-            spatial_input = torch.cat([x_, z.detach()], dim=-1)
+            spatial_input = torch.cat([x_spatial_, z.detach()], dim=-1)
         else:
-            spatial_input = x_
+            spatial_input = x_spatial_
 
         # Encode spatial -> s (GCN with message passing); slices to seed nodes internally
         qsm, qsv, s, neighbor_means = self.s_encoder(

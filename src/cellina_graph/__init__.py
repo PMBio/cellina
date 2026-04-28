@@ -7,6 +7,7 @@ from rich.logging import RichHandler
 from ._cellina_model import CellinaModel
 from ._cellina_module import CellinaModule
 from ._training_plan import CellinaAdversarialTrainingPlan
+from ._spatial_utils import make_perturbed_expression
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -24,6 +25,6 @@ logger.addHandler(ch)
 # Prevent double outputs
 logger.propagate = False
 
-__all__ = ["CellinaModel", "CellinaModule", "CellinaAdversarialTrainingPlan"]
+__all__ = ["CellinaModel", "CellinaModule", "CellinaAdversarialTrainingPlan", "make_perturbed_expression"]
 
 __version__ = version("cellina-graph")
