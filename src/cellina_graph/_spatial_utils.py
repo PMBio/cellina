@@ -281,8 +281,8 @@ def make_perturbed_expression(
         X_cf = X.multiply(scale) if sp.issparse(X) else X * scale
 
     if inplace:
-        adata.layers[layer_key] = X_cf
+        adata.layers[layer_key] = X_cf.tocsr()
         return None
-    return X_cf
+    return X_cf.tocsr()
 
 
