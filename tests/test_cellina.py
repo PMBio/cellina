@@ -607,6 +607,37 @@ def test_make_neighbor_perturbation(adata_with_spatial):
         adata_with_spatial.n_obs, adata_with_spatial.n_vars
     )
 
+    make_neighbor_perturbation(
+        adata_with_spatial,
+        perturbations=perturbations,
+        groupby="cell_labels",
+        obsm_key_out="spatial_x_cf_add",
+        add_shift=True,
+    )
+
+    assert "spatial_x_cf_add" in adata_with_spatial.obsm
+    assert adata_with_spatial.obsm["spatial_x_cf_add"].shape == (
+        adata_with_spatial.n_obs, adata_with_spatial.n_vars
+    )
+
+
+def test_node_perturbation_row_sum_invariance():
+    """_node_perturbation preserves row sums for both add_shift modes."""
+    from scipy.sparse import csr_matrix
+    from cellina._spatial_utils import _node_perturbation
+
+    rng = np.random.default_rng(42)
+    X = csr_matrix(rng.random((10, 5)).astype(np.float32))
+    var_idx = {f"gene{i}": i for i in range(5)}
+    row_sums_before = np.asarray(X.sum(axis=1)).ravel()
+    pert = {"gene0": 3.0, "gene1": -1.0}
+
+    for add_shift in (False, True):
+        X_out = _node_perturbation(X, var_idx, pert, add_shift=add_shift)
+        np.testing.assert_allclose(
+            np.asarray(X_out.sum(axis=1)).ravel(), row_sums_before, rtol=1e-5
+        )
+
 
 def test_make_neighbor_perturbation_unknown(adata_with_spatial):
     """Unknown cell-type key in perturbations raises ValueError."""

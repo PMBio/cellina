@@ -186,6 +186,37 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False):
+    n_vars = len(var_idx)
+    if renormalize:
+        row_sums_before = np.asarray(X.sum(axis=1)).ravel()
+
+    neutral = 0.0 if add_shift else 1.0
+    if groupby is None:
+        transform = np.full(n_vars, neutral)
+        for gene, logfc in perturbations.items():
+            if gene in var_idx:
+                transform[var_idx[gene]] = logfc if add_shift else base ** logfc
+    else:
+        transform = np.full((X.shape[0], n_vars), neutral, dtype=np.float32)
+        for ct, logfc_series in perturbations.items():
+            ct_mask = labels == ct
+            for gene, logfc in logfc_series.items():
+                if gene in var_idx:
+                    transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
+
+    if add_shift:
+        X = np.asarray(X + transform)
+    else:
+        X = X.multiply(transform) if issparse(X) else X * transform
+
+    if renormalize:
+        row_sums_after = np.asarray(X.sum(axis=1)).ravel()
+        scale_rows = np.where(row_sums_after == 0, 1.0, row_sums_before / row_sums_after)
+        X = X.multiply(scale_rows[:, np.newaxis]) if issparse(X) else X * scale_rows[:, np.newaxis]
+    return X
+
+
 def compute_spatial_features(
     adata: AnnData,
     connectivity_key: str = "spatial_connectivities",
@@ -194,6 +225,8 @@ def compute_spatial_features(
     obsm_key: str = SPATIAL_X_KEY,
     perturbations: Optional[dict] = None,
     base: float = np.e,
+    add_shift: bool = False,
+    renormalize: bool = False,
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
@@ -239,23 +272,12 @@ def compute_spatial_features(
             logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
                            len(skipped), skipped)
 
-    if groupby is None:
-        if perturbations:
-            scale = np.ones(len(var_names))
-            for gene, logfc in perturbations.items():
-                if gene in var_idx:
-                    scale[var_idx[gene]] = base ** logfc
-            X = X.multiply(scale) if issparse(X) else X * scale
-    else:
-        if perturbations:
-            labels = adata.obs[groupby].values
-            scale = np.ones((adata.n_obs, len(var_names)), dtype=np.float32)
-            for ct, logfc_series in perturbations.items():
-                ct_mask = labels == ct
-                for gene, logfc in logfc_series.items():
-                    if gene in var_idx:
-                        scale[ct_mask, var_idx[gene]] = base ** logfc
-            X = X.multiply(scale) if issparse(X) else X * scale
+    if perturbations:
+        labels = adata.obs[groupby].values if groupby is not None else None
+        X = _node_perturbation(
+            X, var_idx=var_idx, perturbations=perturbations,
+            groupby=groupby, labels=labels, base=base, add_shift=add_shift, renormalize=renormalize,
+        )
 
     if neighbor_genes is not None:
         gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
@@ -263,7 +285,8 @@ def compute_spatial_features(
     result = C @ X
     degree = np.asarray(C.sum(axis=1))
     with np.errstate(divide='ignore', invalid='ignore'):
-        result = result.multiply(1.0 / np.where(degree == 0, 1.0, degree))
+        denom = 1.0 / np.where(degree == 0, 1.0, degree)
+        result = result.multiply(denom) if issparse(result) else result * denom
     adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
 
 
@@ -275,6 +298,8 @@ def make_neighbor_perturbation(
     neighbor_genes: Optional[List[str]] = None,
     obsm_key_out: str = "spatial_x_cf",
     base: float = np.e,
+    add_shift: bool = False,
+    renormalize: bool = False,
 ) -> None:
     """
     Apply logFC perturbations to neighbour expression and re-aggregate.
@@ -326,6 +351,8 @@ def make_neighbor_perturbation(
         obsm_key=obsm_key_out,
         perturbations=perturbations,
         base=base,
+        add_shift=add_shift,
+        renormalize=renormalize,
     )
 
 
