@@ -209,7 +209,9 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
         X_arr = X.toarray() if sp.issparse(X) else np.asarray(X, dtype=np.float32)
         X = np.clip(X_arr + transform, 0, None)
     else:
-        X = X.multiply(transform) if sp.issparse(X) else X * transform
+        # +1 pseudocount so zero-expressed genes can be activated by positive logFC
+        X_arr = (X.toarray() if sp.issparse(X) else np.asarray(X, dtype=np.float32)) + 1
+        X = X_arr * transform
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()

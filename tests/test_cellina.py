@@ -587,12 +587,12 @@ def test_make_perturbed_expression():
     adata = AnnData(X=X.copy())
     adata.var_names = ["G0", "G1", "G2"]
 
-    # multiplicative (default)
+    # multiplicative (default) — uses (X+1)*scale pseudocount
     make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf", base=np.e)
-    expected = X.copy()
+    expected = (X + 1).copy()
     expected[:, 0] *= np.e ** 1.5
     expected[:, 2] *= np.e ** -0.5
-    np.testing.assert_allclose(np.asarray(adata.layers["cf"]), expected, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(adata.layers["cf"].todense()), expected, rtol=1e-6)
 
     # additive shift: logFC added directly to counts
     make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf_shift",
