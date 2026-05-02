@@ -586,11 +586,28 @@ def test_make_perturbed_expression():
     X = np.arange(1, 10, dtype=float).reshape(3, 3)
     adata = AnnData(X=X.copy())
     adata.var_names = ["G0", "G1", "G2"]
+
+    # multiplicative (default)
     make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf", base=np.e)
     expected = X.copy()
     expected[:, 0] *= np.e ** 1.5
     expected[:, 2] *= np.e ** -0.5
     np.testing.assert_allclose(np.asarray(adata.layers["cf"]), expected, rtol=1e-6)
+
+    # additive shift: logFC added directly to counts
+    make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf_shift",
+                              add_shift=True)
+    expected_shift = X.copy()
+    expected_shift[:, 0] += 1.5
+    expected_shift[:, 2] += -0.5
+    np.testing.assert_allclose(np.asarray(adata.layers["cf_shift"]), expected_shift, rtol=1e-6)
+
+    # renormalize: row sums after perturbation must match original row sums
+    make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf_renorm",
+                              renormalize=True)
+    row_sums_before = X.sum(axis=1)
+    row_sums_after = np.asarray(adata.layers["cf_renorm"].sum(axis=1)).ravel()
+    np.testing.assert_allclose(row_sums_after, row_sums_before, rtol=1e-6)
 
 
 def test_perturbed_latents(trained_model):

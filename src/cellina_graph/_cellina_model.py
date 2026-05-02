@@ -96,6 +96,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         classifier_lambda: float = 1.0,
         supcon_temperature: float = 0.25,
         num_neighbors: List[int] = None,
+        x_spatial_layer: Optional[str] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gat",
         **model_kwargs,
@@ -105,8 +106,10 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         # Always use graph-aware data splitter (GCN needs neighbors)
         self._data_splitter_cls = GraphJointDataSplitter
         self._num_neighbors = num_neighbors or [-1]
+        self._x_spatial_layer = x_spatial_layer
         self._data_splitter_kwargs = {
             'num_neighbors': self._num_neighbors,
+            'x_spatial_layer': x_spatial_layer,
         }
 
         library_log_means, library_log_vars = _init_library_size(
@@ -144,7 +147,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         logger.info(f"The Cellina model has been initialized{adv_str}{edge_str}")
 
-    def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False, data_splitter_kwargs=None):
+    def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
+                          data_splitter_kwargs=None, x_spatial_layer=None):
         """Create graph-aware data loader using NeighborLoader."""
         adata = self._validate_anndata(adata) if adata is not None else self.adata
 
@@ -153,11 +157,12 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if indices is None:
             indices = np.arange(adata.n_obs)
 
-        # Build a lightweight splitter for inference
+        spatial_layer = x_spatial_layer if x_spatial_layer is not None else self._x_spatial_layer
         splitter = GraphJointDataSplitter(
             self.adata_manager,
             num_neighbors=self._num_neighbors,
             batch_size=batch_size,
+            x_spatial_layer=spatial_layer,
         )
         return splitter.create_inference_loader(
             indices=indices,
@@ -394,13 +399,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             )
         if indices is None:
             indices = np.arange(adata.n_obs)
-        splitter = GraphJointDataSplitter(
-            self.adata_manager,
-            num_neighbors=self._num_neighbors,
-            batch_size=batch_size,
-            cf_layer=cf_layer,
-        )
-        return splitter.create_inference_loader(indices=indices, batch_size=batch_size, shuffle=False)
+        return self._make_data_loader(adata, indices, batch_size, x_spatial_layer=cf_layer)
 
     @torch.inference_mode()
     def get_perturbed_latents(

@@ -271,8 +271,9 @@ class CellinaModule(BaseModuleClass):
         # Encode counts -> z (MLP)
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        # Choose node features for GCN (perturbed or original)
-        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
+        # Choose node features for GCN; x_spatial is used as-is (caller owns preprocessing),
+        # falling back to x_ (log1p raw counts) when no separate spatial layer is set.
+        x_spatial_ = x_spatial if x_spatial is not None else x_
 
         # Prepare GCN input features
         if self.condition_on_intrinsic:

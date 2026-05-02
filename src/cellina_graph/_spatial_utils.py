@@ -185,6 +185,38 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
+                       base=np.e, add_shift=False, renormalize=False):
+    n_vars = len(var_idx)
+    if renormalize:
+        row_sums_before = np.asarray(X.sum(axis=1)).ravel()
+
+    neutral = 0.0 if add_shift else 1.0
+    if groupby is None:
+        transform = np.full(n_vars, neutral, dtype=np.float32)
+        for gene, logfc in perturbations.items():
+            if gene in var_idx:
+                transform[var_idx[gene]] = logfc if add_shift else base ** logfc
+    else:
+        transform = np.full((X.shape[0], n_vars), neutral, dtype=np.float32)
+        for ct, logfc_series in perturbations.items():
+            ct_mask = labels == ct
+            for gene, logfc in logfc_series.items():
+                if gene in var_idx:
+                    transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
+
+    if add_shift:
+        X_arr = X.toarray() if sp.issparse(X) else np.asarray(X, dtype=np.float32)
+        X = np.clip(X_arr + transform, 0, None)
+    else:
+        X = X.multiply(transform) if sp.issparse(X) else X * transform
+
+    if renormalize:
+        row_sums_after = np.asarray(X.sum(axis=1)).ravel()
+        scale_rows = np.where(row_sums_after == 0, 1.0, row_sums_before / row_sums_after)
+        X = X.multiply(scale_rows[:, np.newaxis]) if sp.issparse(X) else X * scale_rows[:, np.newaxis]
+    return X
+
 
 def make_perturbed_expression(
     adata: AnnData,
@@ -192,6 +224,8 @@ def make_perturbed_expression(
     groupby: Optional[str] = None,
     layer_key: str = "counts_cf",
     base: float = np.e,
+    add_shift: bool = False,
+    renormalize: bool = False,
     inplace: bool = True,
 ):
     """
@@ -221,6 +255,12 @@ def make_perturbed_expression(
         Where to write the perturbed matrix in ``adata.layers``.
     base
         Base for the logFC → fold-change conversion. Default ``np.e``.
+    add_shift
+        If True, add the logFC value directly to counts rather than
+        multiplying by ``base ** logfc``. Result is always a dense matrix.
+    renormalize
+        If True, rescale each row after perturbation so its sum matches
+        the pre-perturbation row sum (library-size invariant).
     inplace
         If True, write to ``adata.layers[layer_key]`` and return None.
         If False, return the perturbed matrix without modifying adata.
@@ -260,29 +300,22 @@ def make_perturbed_expression(
                 skipped,
             )
 
-    X = adata.X
+    X = adata.X if sp.issparse(adata.X) else sp.csr_matrix(adata.X)
 
     if not perturbations:
         X_cf = X.copy()
-    elif groupby is None:
-        scale = np.ones(adata.n_vars, dtype=np.float32)
-        for gene, logfc in perturbations.items():
-            if gene in var_idx:
-                scale[var_idx[gene]] = base ** logfc
-        X_cf = X.multiply(scale) if sp.issparse(X) else X * scale
     else:
-        labels = adata.obs[groupby].values
-        scale = np.ones((adata.n_obs, adata.n_vars), dtype=np.float32)
-        for ct, logfc_series in perturbations.items():
-            ct_mask = labels == ct
-            for gene, logfc in logfc_series.items():
-                if gene in var_idx:
-                    scale[ct_mask, var_idx[gene]] = base ** logfc
-        X_cf = X.multiply(scale) if sp.issparse(X) else X * scale
+        labels = adata.obs[groupby].values if groupby is not None else None
+        X_cf = _node_perturbation(
+            X, var_idx=var_idx, perturbations=perturbations,
+            groupby=groupby, labels=labels, base=base,
+            add_shift=add_shift, renormalize=renormalize,
+        )
 
+    X_csr = X_cf if sp.issparse(X_cf) else sp.csr_matrix(X_cf)
     if inplace:
-        adata.layers[layer_key] = X_cf.tocsr()
+        adata.layers[layer_key] = X_csr.tocsr()
         return None
-    return X_cf.tocsr()
+    return X_csr.tocsr()
 
 

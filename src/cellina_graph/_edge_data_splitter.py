@@ -68,14 +68,14 @@ class GraphJointDataSplitter(DataSplitter):
         self,
         adata_manager,
         num_neighbors=None,
-        cf_layer: Optional[str] = None,
+        x_spatial_layer: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(adata_manager, **kwargs)
 
         self.num_neighbors = num_neighbors or [-1]
         self.batch_size = kwargs.get('batch_size', 128)
-        self.cf_layer = cf_layer
+        self.x_spatial_layer = x_spatial_layer
 
         self.pyg_data = self._adata_to_pyg_data()
 
@@ -127,22 +127,22 @@ class GraphJointDataSplitter(DataSplitter):
             num_nodes=n_cells,
         )
 
-        if self.cf_layer is not None:
+        if self.x_spatial_layer is not None:
             adata = self.adata_manager.adata
-            if self.cf_layer not in adata.layers:
+            if self.x_spatial_layer not in adata.layers:
                 raise ValueError(
-                    f"cf_layer '{self.cf_layer}' not in adata.layers. "
+                    f"x_spatial_layer '{self.x_spatial_layer}' not in adata.layers. "
                     f"Available: {list(adata.layers.keys())}"
                 )
-            x_cf = adata.layers[self.cf_layer]
-            if sp.issparse(x_cf):
-                x_cf = x_cf.toarray()
-            x_cf = np.asarray(x_cf)
-            if x_cf.shape != tuple(data.x.shape):
+            x_sp = adata.layers[self.x_spatial_layer]
+            if sp.issparse(x_sp):
+                x_sp = x_sp.toarray()
+            x_sp = np.asarray(x_sp)
+            if x_sp.shape != tuple(data.x.shape):
                 raise ValueError(
-                    f"cf_layer shape {x_cf.shape} does not match X shape {tuple(data.x.shape)}"
+                    f"x_spatial_layer shape {x_sp.shape} does not match X shape {tuple(data.x.shape)}"
                 )
-            data.x_spatial = torch.tensor(x_cf, dtype=torch.float32)
+            data.x_spatial = torch.tensor(x_sp, dtype=torch.float32)
 
         return data
 
