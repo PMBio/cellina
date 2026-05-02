@@ -186,7 +186,7 @@ def spatial_neighbors(adata: AnnData,
         return dist
 
 def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
-                       base=np.e, add_shift=False, renormalize=False):
+                       base=np.e, add_shift=False, renormalize=True):
     n_vars = len(var_idx)
     if renormalize:
         row_sums_before = np.asarray(X.sum(axis=1)).ravel()
@@ -227,7 +227,7 @@ def make_perturbed_expression(
     layer_key: str = "counts_cf",
     base: float = np.e,
     add_shift: bool = False,
-    renormalize: bool = False,
+    renormalize: bool = True,
     inplace: bool = True,
 ):
     """
