@@ -279,7 +279,6 @@ def test_compute_spatial_features(adata_with_spatial):
     compute_spatial_features(
         adata_with_spatial,
         connectivity_key='spatial_connectivities',
-        groupby='cell_type',
         obsm_key='spatial_pseudobulks',
     )
 
@@ -633,7 +632,7 @@ def test_node_perturbation_row_sum_invariance():
     pert = {"gene0": 3.0, "gene1": -1.0}
 
     for add_shift in (False, True):
-        X_out = _node_perturbation(X, var_idx, pert, add_shift=add_shift)
+        X_out = _node_perturbation(X, var_idx, pert, add_shift=add_shift, renormalize=True)
         np.testing.assert_allclose(
             np.asarray(X_out.sum(axis=1)).ravel(), row_sums_before, rtol=1e-5
         )

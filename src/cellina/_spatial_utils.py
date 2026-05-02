@@ -217,20 +217,47 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, bas
     return X
 
 
+def _make_perturbed_expression(
+    adata: AnnData,
+    perturbations: dict,
+    groupby: Optional[str] = None,
+    base: float = np.e,
+    add_shift: bool = True,
+    renormalize: bool = True,
+):
+    """Apply logFC perturbations to ``adata.X`` and return the modified expression matrix."""
+    var_names = list(adata.var_names)
+    var_idx = {g: i for i, g in enumerate(var_names)}
+    var_names_set = set(var_idx)
+
+    if groupby is None:
+        skipped = [g for g in perturbations if g not in var_names_set]
+    else:
+        skipped = [g for ct_s in perturbations.values() for g in ct_s.index
+                   if g not in var_names_set]
+    if skipped:
+        logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
+                       len(skipped), skipped)
+
+    X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
+    labels = adata.obs[groupby].values if groupby is not None else None
+    return _node_perturbation(
+        X, var_idx=var_idx, perturbations=perturbations,
+        groupby=groupby, labels=labels, base=base, add_shift=add_shift, renormalize=renormalize,
+    )
+
+
 def compute_spatial_features(
     adata: AnnData,
     connectivity_key: str = "spatial_connectivities",
-    groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
     obsm_key: str = SPATIAL_X_KEY,
-    perturbations: Optional[dict] = None,
-    base: float = np.e,
-    add_shift: bool = False,
-    renormalize: bool = False,
+    layer: Optional[str] = None,
 ) -> None:
     """
     Compute spatial neighbourhood features and store them in ``adata.obsm``.
-    Expects normalized counts in ``adata.X`` and a spatial connectivity matrix in ``adata.obsp[connectivity_key]``.
+    Expects normalized counts in ``adata.X`` (or ``adata.layers[layer]``) and a
+    spatial connectivity matrix in ``adata.obsp[connectivity_key]``.
 
     Parameters
     ----------
@@ -238,48 +265,20 @@ def compute_spatial_features(
         AnnData object.
     connectivity_key
         Key in ``adata.obsp`` for the spatial connectivity matrix.
-    groupby
-        Column in ``adata.obs`` used to apply cell-type-specific perturbations.
-        Each cell is scaled by the logFC vector for its cell type before the
-        standard degree-normalised mean aggregation.  When ``None``, perturbations
-        are applied globally to all cells.
     neighbor_genes
         Subset of genes to aggregate.  ``None`` means all genes.
     obsm_key
         Key in ``adata.obsm`` where the result is stored.
-
-    Notes
-    -----
-    The ``spatial_x`` features are a **linear aggregation of raw counts**.
-    Perturbations expressed as logFC are applied directly to counts:
-    ``X_cf[j, g] = X[j, g] * base^logFC``, which propagates correctly through
-    the linear aggregation step.
+    layer
+        Key in ``adata.layers`` to use as expression source.
+        When ``None``, ``adata.X`` is used.
     """
     C = csr_matrix(adata.obsp[connectivity_key])
-    var_names = list(adata.var_names)
-    var_idx = {g: i for i, g in enumerate(var_names)}
-    # TODO: add a warning if not normalized and handle this better...
-    X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
-
-    if perturbations:
-        var_names_set = set(var_idx)
-        if groupby is None:
-            skipped = [g for g in perturbations if g not in var_names_set]
-        else:
-            skipped = [g for ct_s in perturbations.values() for g in ct_s.index
-                       if g not in var_names_set]
-        if skipped:
-            logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
-                           len(skipped), skipped)
-
-    if perturbations:
-        labels = adata.obs[groupby].values if groupby is not None else None
-        X = _node_perturbation(
-            X, var_idx=var_idx, perturbations=perturbations,
-            groupby=groupby, labels=labels, base=base, add_shift=add_shift, renormalize=renormalize,
-        )
+    raw = adata.layers[layer] if layer is not None else adata.X
+    X = raw if isinstance(raw, csr_matrix) else csr_matrix(raw)
 
     if neighbor_genes is not None:
+        var_idx = {g: i for i, g in enumerate(adata.var_names)}
         gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
         X = X[:, gene_idx]
     result = C @ X
@@ -292,19 +291,21 @@ def compute_spatial_features(
 
 def make_neighbor_perturbation(
     adata: AnnData,
+    perturbations: dict,
     connectivity_key: str = "spatial_connectivities",
-    perturbations: Optional[dict] = None,
     groupby: Optional[str] = None,
     neighbor_genes: Optional[List[str]] = None,
     obsm_key_out: str = "spatial_x_cf",
+    layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = False,
-    renormalize: bool = False,
+    add_shift: bool = True,
+    renormalize: bool = True,
 ) -> None:
     """
     Apply logFC perturbations to neighbour expression and re-aggregate.
 
-    Perturbed spatial features are written to ``adata.obsm[obsm_key_out]``.
+    Perturbed expression is written to ``adata.layers[layer_key]`` and the
+    resulting spatial features to ``adata.obsm[obsm_key_out]``.
     The original count matrix ``adata.X`` is **not** modified.
 
     Parameters
@@ -321,11 +322,13 @@ def make_neighbor_perturbation(
         before standard degree-normalised aggregation.
     groupby
         Column in ``adata.obs`` used to apply cell-type-specific perturbations.
-        When ``None``, a simple degree-normalised mean is computed.
+        When ``None``, perturbations are applied globally to all cells.
     neighbor_genes
         Subset of genes to aggregate.  ``None`` means all genes.
     obsm_key_out
         Key in ``adata.obsm`` for the counterfactual spatial features.
+    layer_key
+        Key in ``adata.layers`` where the perturbed counts are stored.
 
     Raises
     ------
@@ -334,7 +337,7 @@ def make_neighbor_perturbation(
         ``adata.obs[groupby]``.  Partial dictionaries (covering only a subset of
         cell types) are allowed — unspecified cell types are left unmodified.
     """
-    if perturbations is not None and groupby is not None:
+    if groupby is not None:
         obs_cts = set(adata.obs[groupby].unique())
         unknown = set(perturbations) - obs_cts
         if unknown:
@@ -343,16 +346,17 @@ def make_neighbor_perturbation(
                 f"adata.obs['{groupby}']: {unknown}"
             )
 
+    adata.layers[layer_key] = _make_perturbed_expression(
+        adata, perturbations=perturbations, groupby=groupby,
+        base=base, add_shift=add_shift, renormalize=renormalize,
+    )
+
     compute_spatial_features(
         adata,
         connectivity_key=connectivity_key,
-        groupby=groupby,
         neighbor_genes=neighbor_genes,
         obsm_key=obsm_key_out,
-        perturbations=perturbations,
-        base=base,
-        add_shift=add_shift,
-        renormalize=renormalize,
+        layer=layer_key,
     )
 
 
