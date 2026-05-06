@@ -11,16 +11,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
-    {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
+    {name = "Anonymous"},
 ]
 maintainers = [
-    {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
-    {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
+    {name = "Anonymous"},
 ]
-urls.Documentation = "https://github.com/PMBio/cellina"
-urls.Source = "https://github.com/PMBio/cellina"
-urls.Home-page = "https://github.com/PMBio/cellina"
+urls.Documentation = "https://github.com/anonymous/cellina"
+urls.Source = "https://github.com/anonymous/cellina"
+urls.Home-page = "https://github.com/anonymous/cellina"
 dependencies = [
     "anndata",
     # for debug logging (referenced from the issue template)

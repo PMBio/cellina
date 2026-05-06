@@ -3,8 +3,8 @@
 [![Tests][badge-tests]][link-tests]
 [![Documentation][badge-docs]][link-docs]
 
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/PMBio/cellina/test.yaml?branch=main
-[link-tests]: https://github.com/PMBio/cellina/actions/workflows/test.yml
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/anonymous/cellina/test.yaml?branch=main
+[link-tests]: https://github.com/anonymous/cellina/actions/workflows/test.yml
 [badge-docs]: https://img.shields.io/readthedocs/cellina
 
 Cellina: A spatial-aware variational autoencoder for spatial RNA-seq data with dual encoders.
@@ -43,7 +43,7 @@ pip install cellina
 1. Install the latest development version:
 
 ```bash
-pip install git+https://github.com/PMBio/cellina.git@main
+pip install git+https://github.com/anonymous/cellina.git@main
 ```
 
 2. Install from local directory (for development):
@@ -139,7 +139,7 @@ Built with [scvi-tools](https://scvi-tools.org):
 ```
 
 [scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/PMBio/cellina/issues
+[issue-tracker]: https://github.com/anonymous/cellina/issues
 [changelog]: https://cellina.readthedocs.io/latest/changelog.html
 [link-docs]: https://cellina.readthedocs.io
 [link-api]: https://cellina.readthedocs.io/latest/api.html
@@ -158,4 +158,4 @@ If you like scverse® and want to support our mission, please consider making a 
 </a>
 </div>
 
-Copyright (c) 2025, PMBio
+Copyright (c) 2025, Anonymous
