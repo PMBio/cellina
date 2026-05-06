@@ -11,12 +11,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
-    {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
 ]
 maintainers = [
-    {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
-    {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
 ]
 urls.Documentation = "https://github.com/PMBio/cellina"
 urls.Source = "https://github.com/PMBio/cellina"
