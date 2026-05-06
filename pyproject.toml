@@ -11,12 +11,15 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
 authors = [
+    {name = "anonymous"}
 ]
 maintainers = [
+    {name = "anonymous"}
+
 ]
-urls.Documentation = "https://github.com/PMBio/cellina"
-urls.Source = "https://github.com/PMBio/cellina"
-urls.Home-page = "https://github.com/PMBio/cellina"
+urls.Documentation = "https://github.com/anon/cellina"
+urls.Source = "https://github.com/anon/cellina"
+urls.Home-page = "https://github.com/anon/cellina"
 dependencies = [
     "anndata",
     # for debug logging (referenced from the issue template)
