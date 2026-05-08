@@ -22,27 +22,27 @@ def _linear(distance_mtx, bandwidth):
     connectivity = 1 - distance_mtx / bandwidth
     return np.clip(connectivity, a_min=0, a_max=np.inf)
 
+
 def _spatial_neighbors_core(adata: AnnData,
-                           bandwidth=None,
-                           cutoff=0.1,
-                           max_neighbours=100,
-                           kernel='gaussian',
-                           set_diag=False,
-                           zoi=0,
-                           standardize=False,
-                           reference=None,
-                           spatial_key='spatial'):
+                            bandwidth=None,
+                            cutoff=0.1,
+                            max_neighbours=100,
+                            kernel='gaussian',
+                            set_diag=False,
+                            zoi=0,
+                            standardize=False,
+                            test_indices=None,
+                            spatial_key='spatial'):
     """Core spatial neighbors computation without library_key handling."""
     coordinates = adata.obsm[spatial_key]
-
-    if reference is None:
-        _reference = coordinates
-    else:
-        _reference = reference
-
+    if test_indices is not None and len(test_indices) > 0:
+        coordinates = coordinates.astype(float)
+        extent = np.abs(coordinates).max() + 1.0
+        test_arr = np.asarray(test_indices)
+        coordinates[test_arr, 0] += extent * 1e6 * (np.arange(len(test_arr)) + 1)
     tree = NearestNeighbors(n_neighbors=max_neighbours + 1, # +1 to exclude self
                             algorithm='ball_tree',
-                            metric='euclidean').fit(_reference)
+                            metric='euclidean').fit(coordinates)
     dist = tree.kneighbors_graph(coordinates, mode='distance')
 
     # prevent float overflow
@@ -65,12 +65,12 @@ def _spatial_neighbors_core(adata: AnnData,
         dist.setdiag(0)
     if cutoff is not None:
         dist.data = dist.data * (dist.data > cutoff)
+        dist.eliminate_zeros()
     if standardize:
         dist = normalize(dist, axis=1, norm='l1')
 
     spot_n = dist.shape[0]
-    if reference is None:
-        assert spot_n == adata.shape[0]
+    assert spot_n == adata.shape[0]
     if spot_n > 1000:
         dist = dist.astype(np.float32)
 
@@ -89,6 +89,7 @@ def spatial_neighbors(adata: AnnData,
                       spatial_key='spatial',
                       key_added='spatial',
                       library_key=None,
+                      test_indices=None,
                       inplace=True
                       ):
     """
@@ -108,9 +109,9 @@ def spatial_neighbors(adata: AnnData,
     kernel
         Kernel function used to generate connectivity weights.
         It controls the shape of the connectivity weights.
-        The following options are available: ['gaussian', 'exponential', 'linear']
+        The following options are available: ['gaussian', 'exponential', 'linear', 'misty_rbf']
     set_diag
-        Logical, sets connectivity diagonal to 0 if `False`. Default is `False`.
+        Logical, sets connectivity diagonal to 0 if `False`. Default is `True`.
     zoi
         Zone of indifference. Values below this cutoff will be set to `np.inf`.
     standardize
@@ -127,6 +128,11 @@ def spatial_neighbors(adata: AnnData,
         Key to add to `adata.obsp` if `inplace = True`. If reference is not `None`, key will be added to `adata.obsm`.
     library_key
         Key in adata.obs for grouping samples. If provided, builds separate graphs per sample and concatenates them.
+    test_indices
+        Integer indices (into ``adata``) of cells to exclude from being selected as neighbors.
+        Their coordinates are displaced to a position that cannot appear in any KNN result.
+        Rows for these cells in the output matrix will reflect artificial distances; only the
+        column-exclusion (they are never a neighbor of another cell) is guaranteed.
     %(inplace)s
 
     Notes
@@ -144,7 +150,7 @@ def spatial_neighbors(adata: AnnData,
     if cutoff is None:
         raise ValueError("`cutoff` must be provided!")
     assert spatial_key in adata.obsm
-    families = ['gaussian', 'exponential', 'linear']
+    families = ['gaussian', 'exponential', 'linear', 'misty_rbf']
     if kernel not in families:
         raise AssertionError(f"{kernel} must be a member of {families}")
     if bandwidth is None:
@@ -155,19 +161,23 @@ def spatial_neighbors(adata: AnnData,
         from scipy.sparse import block_diag
         from typing import cast
         from anndata.utils import make_index_unique
-
+        
         libs = adata.obs[library_key].cat.categories
         make_index_unique(adata.obs_names)
-
+        
+        test_set = set(test_indices) if test_indices is not None else set()
         mats = []
         ixs = []
         for lib in libs:
-            ixs.extend(np.where(adata.obs[library_key] == lib)[0])
+            global_ixs = np.where(adata.obs[library_key] == lib)[0]
+            ixs.extend(global_ixs)
+            local_test = [int(np.searchsorted(global_ixs, gi)) for gi in test_indices
+                          if gi in test_set and gi in set(global_ixs.tolist())] if test_indices is not None else None
             mats.append(_spatial_neighbors_core(adata[adata.obs[library_key] == lib],
                                         bandwidth=bandwidth, cutoff=cutoff, max_neighbours=max_neighbours,
                                         kernel=kernel, set_diag=set_diag, zoi=zoi, standardize=standardize,
-                                        reference=reference, spatial_key=spatial_key))
-
+                                        test_indices=local_test, spatial_key=spatial_key))
+        
         ixs = cast(list[int], np.argsort(ixs).tolist())
         dist = block_diag(mats, format="csr")[ixs, :][:, ixs]
     else:
@@ -175,7 +185,7 @@ def spatial_neighbors(adata: AnnData,
         dist = _spatial_neighbors_core(adata, bandwidth=bandwidth, cutoff=cutoff,
                                       max_neighbours=max_neighbours, kernel=kernel,
                                       set_diag=set_diag, zoi=zoi, standardize=standardize,
-                                      reference=reference, spatial_key=spatial_key)
+                                      test_indices=test_indices, spatial_key=spatial_key)
 
     if inplace:
         if reference is not None:
