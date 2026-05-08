@@ -32,7 +32,7 @@ def _spatial_neighbors_core(adata: AnnData,
     """Core spatial neighbors computation without library_key handling."""
     coordinates = adata.obsm[spatial_key]
     if test_indices is not None and len(test_indices) > 0:
-        coordinates = coordinates.copy()
+        coordinates = coordinates.astype(float)
         extent = np.abs(coordinates).max() + 1.0
         test_arr = np.asarray(test_indices)
         coordinates[test_arr, 0] += extent * 1e6 * (np.arange(len(test_arr)) + 1)
