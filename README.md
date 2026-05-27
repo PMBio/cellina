@@ -16,9 +16,10 @@ In tissues, a cell's transcriptional state is shaped by its local neighborhood: 
 
 **Generative model.** Cellina is a VAE with two latent variables. An MLP encoder $\text{Enc}_z$ maps raw counts to $z \sim q(z \mid x)$; a spatial encoder maps the cell's neighborhood to $s \sim q(s \mid \mathcal{N}(v))$. A shared decoder reconstructs counts from $[z;\, s]$ under a Negative Binomial likelihood. Both latents have standard normal priors.
 
-**Supervised disentanglement.** Optimizing the ELBO alone does not prevent $z$ from absorbing spatially-driven variation. Cellina adds two auxiliary objectives:
+**Supervised disentanglement.** Optimizing the ELBO alone does not prevent $z$ from absorbing spatially-driven variation. Cellina adds auxiliary objectives:
 - A **cell-type classifier** on $z$ anchors it to transcriptional identity.
 - An **adversarial discriminator** is trained to predict spatial domain from $z$; the encoder is then trained to fool it, routing microenvironmental variation to $s$ by elimination.
+- *(CellinaGCN only, optional)* A **graph-supervised contrastive loss** $\mathcal{L}_{\mathrm{spatial}}$ on $s$, as a biologically grounded inductive bias that promotes similarity within local neighbourhoods. Enabled by setting `link_prediction_weight > 0`.
 
 **Training** alternates between a discriminator step (encoder frozen) and a VAE step (discriminator frozen), following a standard adversarial schedule.
 

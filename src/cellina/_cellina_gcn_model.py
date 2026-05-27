@@ -47,11 +47,11 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     n_layers
         Hidden layers (shared by both encoders).
     discriminator_lambda
-        Weight for adversarial domain forgetting. 0 disables.
+        Weight for adversarial domain forgetting. 0 disables it.
     condition_on_intrinsic
         If True, concatenate detached z to GCN input before message passing.
     link_prediction_weight
-        Weight for spatial loss on s. 0 disables.
+        Weight for spatial loss on s. 0 disables it.
     spatial_loss_type
         ``"supcon"`` (supervised contrastive, default) or ``"domain_clf"``.
     classifier_lambda
