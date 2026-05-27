@@ -1,4 +1,4 @@
-"""Graph data splitter for CellinaGraph model."""
+"""Graph data splitter for CellinaGCN model."""
 
 import torch
 import numpy as np
@@ -17,7 +17,7 @@ class GraphBatchLoader:
     """
     Iterator for graph-aware batches.
 
-    Wraps a NeighborLoader and yields dicts in the format CellinaGraphModule expects.
+    Wraps a NeighborLoader and yields dicts in the format CellinaGCNModule expects.
     """
 
     def __init__(self, node_loader):
@@ -100,10 +100,10 @@ class GraphJointDataSplitter(DataSplitter):
 
         spatial_key = self.adata_manager.adata.uns.get(SPATIAL_CONNECTIVITIES_KEY)
         if spatial_key is None or spatial_key not in self.adata_manager.adata.obsp:
+            key_name = spatial_key or "<not set>"
             raise ValueError(
-                f"Spatial connectivity key '{spatial_key}' not found in adata.obsp. "
-                f"Available keys: {list(self.adata_manager.adata.obsp.keys())}. "
-                "Please provide spatial_connectivities_key in setup_anndata()."
+                f"Spatial connectivity matrix '{key_name}' not found in adata.obsp. "
+                f"Run spatial_neighbors(adata, key_added='{key_name}') before training."
             )
         adj_matrix = self.adata_manager.adata.obsp[spatial_key]
         if not sp.issparse(adj_matrix):

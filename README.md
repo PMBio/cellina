@@ -26,10 +26,10 @@ In tissues, a cell's transcriptional state is shaped by its local neighborhood: 
 
 | Code class | Paper name | Spatial encoder |
 |---|---|---|
-| `CellinaModel` | *Cellina* | Degree-normalized weighted pseudobulk aggregation of neighbor expression → MLP |
-| `CellinaGraph` | *Cellina-GAT* | Multi-layer GATv2 on the local subgraph; self-loops excluded so $v$'s own expression is captured by $z$ alone; modified contrastive loss on $s$ |
+| `Cellina` | *Cellina* | Degree-normalized weighted pseudobulk aggregation of neighbor expression → MLP |
+| `CellinaGCN` | *Cellina-GAT* | Multi-layer GATv2 on the local subgraph; self-loops excluded so $v$'s own expression is captured by $z$ alone; modified contrastive loss on $s$ |
 
-The two variants perform on par. `CellinaModel` decouples neighborhood construction from training and scales similarly to non-spatial baselines; `CellinaGraph` learns attention over each subgraph at additional cost per step.
+The two variants perform on par. `Cellina` decouples neighborhood construction from training and scales similarly to non-spatial baselines; `CellinaGCN` learns attention over each subgraph at additional cost per step.
 
 ## Tissue graph counterfactuals
 
@@ -54,7 +54,7 @@ $$x_{u,g}^{\mathrm{cf}} = \begin{cases} T_g(x_{u,g}) & g \in \mathcal{S} \\ x_{u
 
 $T_g$ can encode any intervention (additive shift, knockout, overexpression, or learned counterfactual values). The two variants differ in both how $T_g$ is instantiated and when the perturbed features are consumed:
 
-*CellinaModel* — $T_g(x_{u,g}) = x_{u,g} + \delta_g$ applied to log-normalised neighbour expression (`add_shift=True`); pre-aggregate into pseudobulk spatial features, then run inference:
+*Cellina* — $T_g(x_{u,g}) = x_{u,g} + \delta_g$ applied to log-normalised neighbour expression (`add_shift=True`); pre-aggregate into pseudobulk spatial features, then run inference:
 
 ```python
 from cellina import make_neighbor_perturbation
@@ -63,7 +63,7 @@ make_neighbor_perturbation(adata, {"VEGFA": 2.0, "MYC": -1.5}, add_shift=True)  
 expr_cf = model.get_perturbed_expression(adata)
 ```
 
-*CellinaGraph* — $T_g(x_{u,g}) = x_{u,g} \cdot e^{\delta_g}$ applied to raw counts (`add_shift=False`); store perturbed counts as a layer and let the GCN aggregate them on the fly at inference:
+*CellinaGCN* — $T_g(x_{u,g}) = x_{u,g} \cdot e^{\delta_g}$ applied to raw counts (`add_shift=False`); store perturbed counts as a layer and let the GCN aggregate them on the fly at inference:
 
 ```python
 from cellina import make_perturbed_expression
@@ -78,10 +78,10 @@ Both perturbation types also expose `get_*_latents` counterparts for inspecting 
 
 ```
 src/cellina/
-  _cellina_model.py          # CellinaModel (Cellina)
+  _cellina_model.py          # Cellina (Cellina)
   _cellina_module.py
-  _cellina_graph_model.py    # CellinaGraph (Cellina-GAT)
-  _cellina_graph_module.py
+  _cellina_gcn_model.py    # CellinaGCN (Cellina-GAT)
+  _cellina_gcn_module.py
   _spatial_encoder.py        # GATv2-based GraphEncoder
   _edge_data_splitter.py     # Graph-aware data loading (NeighborLoader / LinkNeighborLoader)
   _training_plan.py          # Shared adversarial training plan

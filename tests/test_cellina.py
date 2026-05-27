@@ -4,7 +4,7 @@ import torch
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
-from cellina import CellinaModel
+from cellina import Cellina
 
 
 @pytest.fixture
@@ -23,16 +23,16 @@ def adata_with_spatial():
 
 
 def test_cellina_model(adata_with_spatial):
-    """Test basic CellinaModel functionality."""
+    """Test basic Cellina functionality."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial,
+    Cellina.setup_anndata(adata_with_spatial,
                                batch_key="batch",
                                spatial_obsm_key="spatial_x",
                                labels_key="cell_labels",
                                domains_key="domain"
                                )
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     
     # Test architecture
     assert model.module.n_latent == n_latent
@@ -52,8 +52,8 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     n_latent = 5
     n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
 
     # Test forward pass produces correct outputs
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
@@ -77,8 +77,8 @@ def test_cellina_losses(adata_with_spatial):
     """Test that loss includes KL divergence for both z and s, and classifier loss when enabled."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", labels_key="cell_labels", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
     
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
@@ -116,31 +116,31 @@ def test_cellina_losses(adata_with_spatial):
 
 def test_classifier_disabled_by_default(adata_with_spatial):
     """Test that classifier is disabled when classifier_lambda=0."""
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
 
     # Should work fine without labels when classifier_lambda=0
-    model = CellinaModel(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
+    model = Cellina(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
 
 
 def test_discriminator_enabled_by_default(adata_with_spatial):
     """Test that discriminator is enabled by default (discriminator_lambda=1.0)."""
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
 
-    model = CellinaModel(adata_with_spatial, n_latent=5)
+    model = Cellina(adata_with_spatial, n_latent=5)
     assert model.module.domain_discriminator is not None
     assert model.module.discriminator_lambda == 1.0
 
     # Explicitly set to 0 disables it
-    model2 = CellinaModel(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
+    model2 = Cellina(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model2.module.domain_discriminator is None
     assert model2.module.discriminator_lambda == 0.0
 
 
 def test_discriminator_enabled(adata_with_spatial):
     """Test that discriminator works when discriminator_lambda > 0."""
-    CellinaModel.setup_anndata(
+    Cellina.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         spatial_obsm_key="spatial_x",
@@ -148,7 +148,7 @@ def test_discriminator_enabled(adata_with_spatial):
     )
 
     n_latent = 5
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0)
+    model = Cellina(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0)
 
     # Check discriminator is initialized
     assert model.module.domain_discriminator is not None
@@ -183,10 +183,10 @@ def test_cellina_latent_representation(adata_with_spatial):
     """Test latent representation returns correct shapes and uses latent_key."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, 
+    Cellina.setup_anndata(adata_with_spatial, 
                                batch_key="batch", spatial_obsm_key="spatial_x",
                                labels_key="cell_labels", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     model.train(max_epochs=1, check_val_every_n_epoch=1, train_size=0.5)
     
     # Test separate representations
@@ -321,8 +321,8 @@ def test_marginal_ll(adata_with_spatial):
     """Test get_marginal_ll method and underlying module.marginal_ll."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0)
     model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5)
     
     # Test basic computation (returns list by default)
@@ -348,14 +348,14 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
     n_latent = 5
     n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
     
     # Test with condition_on_intrinsic=True (default)
-    model_true = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
+    model_true = Cellina(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
     assert model_true.module.condition_on_intrinsic == True
     
     # Test with condition_on_intrinsic=False
-    model_false = CellinaModel(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
+    model_false = Cellina(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
     assert model_false.module.condition_on_intrinsic == False
     
     # Check the difference in encoder input dimensions
@@ -439,7 +439,7 @@ def test_make_counterfactual_adata(adata_with_spatial):
 
 def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
-    CellinaModel.setup_anndata(
+    Cellina.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         spatial_obsm_key="spatial_x",
@@ -451,7 +451,7 @@ def test_normalize_losses_true(adata_with_spatial):
     classifier_lambda          = 0.5
     discriminator_lambda       = 2.0
     domain_classifier_lambda   = 1.5
-    model = CellinaModel(adata_with_spatial, n_latent=5,
+    model = Cellina(adata_with_spatial, n_latent=5,
                          discriminator_lambda=discriminator_lambda,
                          classifier_lambda=classifier_lambda,
                          domain_classifier_lambda=domain_classifier_lambda)
@@ -531,8 +531,8 @@ def test_get_normalized_expression(adata_with_spatial):
     """Test get_normalized_expression method returns correct shapes."""
     n_latent = 5
     
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent)
     model.train(max_epochs=2, train_size=0.5)
     
     # Test default (numpy array)
@@ -550,8 +550,8 @@ def test_get_normalized_expression(adata_with_spatial):
 def test_get_counterfactual_latents(adata_with_spatial):
     """get_counterfactual_latents returns correct shape for all latent_key options."""
     n_latent = 5
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
 
     n_obs = adata_with_spatial.n_obs
@@ -567,8 +567,8 @@ def test_get_counterfactual_latents(adata_with_spatial):
 def test_get_counterfactual_expression(adata_with_spatial):
     """get_counterfactual_expression returns (n_indices, n_vars) of non-negative values."""
     n_latent = 5
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
 
     n_obs = adata_with_spatial.n_obs
@@ -584,8 +584,8 @@ def test_get_counterfactual_expression(adata_with_spatial):
 def test_get_perturbed_latents(adata_with_spatial):
     """get_perturbed_latents returns (n_obs, n_latent) when given a counterfactual obsm key."""
     n_latent = 5
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
 
     adata_with_spatial.obsm["spatial_x_cf"] = adata_with_spatial.obsm["spatial_x"].copy()
@@ -598,8 +598,8 @@ def test_get_perturbed_latents(adata_with_spatial):
 def test_get_perturbed_expression(adata_with_spatial):
     """get_perturbed_expression returns (n_obs, n_vars) of non-negative values."""
     n_latent = 5
-    CellinaModel.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    model = CellinaModel(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
     
     assert model.module.classifier is None, "Classifier should be disabled when classifier_lambda=0.0"

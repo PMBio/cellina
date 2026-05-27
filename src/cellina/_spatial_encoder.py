@@ -166,7 +166,7 @@ class GCNLayers(nn.Module):
         if self.convolution_type in _SPARSE_COMPAT_TYPES:
             num_nodes = x.size(0)
             adj = SparseTensor(
-                row=edge_index[1], col=edge_index[0],
+                row=edge_index[1], col=edge_index[0],  # PyG adj_t convention: row=dst, col=src
                 sparse_sizes=(num_nodes, num_nodes),
             )
         else:

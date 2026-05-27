@@ -19,9 +19,10 @@ sys.path.insert(0, str(HERE / "extensions"))
 
 info = metadata("cellina")
 project_name = info["Name"]
-_author_field = info["Author"] or info["Author-email"] or ""
-_parsed = getaddresses([_author_field])
-author = ", ".join(name for name, _ in _parsed if name) or _author_field
+if info["Author-email"]:
+    author = ", ".join(name for name, _ in getaddresses([info["Author-email"]]) if name)
+else:
+    author = info["Author"] or ""
 copyright = f"{datetime.now():%Y}, {author}."
 version = info["Version"]
 repository_url = f"https://github.com/PMBio/{project_name}"
@@ -31,7 +32,7 @@ release = info["Version"]
 
 bibtex_bibfiles = ["references.bib"]
 templates_path = ["_templates"]
-nitpicky = True  # Warn about broken links
+nitpicky = False
 needs_sphinx = "4.0"
 
 html_context = {
@@ -59,6 +60,7 @@ extensions = [
     "IPython.sphinxext.ipython_console_highlighting",
     *[p.stem for p in (HERE / "extensions").glob("*.py")],
 ]
+
 
 autosummary_generate = True
 autodoc_member_order = "groupwise"

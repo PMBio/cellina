@@ -11,8 +11,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
-    {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
+    {name = "Abdul Moeed"},
+    {name = "Stefan Schrod"},
+    {name = "Martin Rohbeck"},
+    {name = "Marc Jan Bonder"},
+    {name = "Pavlo Lutsik"},
+    {name = "Oliver Stegle"},
+    {name = "Daniel Dimitrov"},
 ]
 maintainers = [
     {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},

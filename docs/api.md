@@ -9,5 +9,19 @@
 .. autosummary::
     :toctree: generated
 
-    CellinaModel
+    Cellina
+    CellinaGCN
+```
+
+## Utilities
+
+```{eval-rst}
+.. autosummary::
+    :toctree: generated
+
+    compute_spatial_features
+    make_counterfactual_adata
+    make_neighbor_perturbation
+    make_perturbed_expression
+    spatial_neighbors
 ```

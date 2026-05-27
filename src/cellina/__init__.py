@@ -4,15 +4,17 @@ from importlib.metadata import version
 from rich.console import Console
 from rich.logging import RichHandler
 
-from ._cellina_model import CellinaModel
+from ._cellina_model import Cellina
 from ._cellina_module import CellinaModule
-from ._cellina_graph_model import CellinaGraph
-from ._cellina_graph_module import CellinaGraphModule
+from ._cellina_gcn_model import CellinaGCN
+from ._cellina_gcn_module import CellinaGCNModule
 from ._training_plan import CellinaAdversarialTrainingPlan
 from ._spatial_utils import (
     compute_spatial_features,
+    make_counterfactual_adata,
     make_neighbor_perturbation,
     make_perturbed_expression,
+    spatial_neighbors,
 )
 
 # Configure logger
@@ -32,14 +34,16 @@ logger.addHandler(ch)
 logger.propagate = False
 
 __all__ = [
-    "CellinaModel",
+    "Cellina",
     "CellinaModule",
-    "CellinaGraph",
-    "CellinaGraphModule",
+    "CellinaGCN",
+    "CellinaGCNModule",
     "CellinaAdversarialTrainingPlan",
     "compute_spatial_features",
+    "make_counterfactual_adata",
     "make_neighbor_perturbation",
     "make_perturbed_expression",
+    "spatial_neighbors",
 ]
 
 __version__ = version("cellina")

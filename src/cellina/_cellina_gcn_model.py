@@ -19,7 +19,7 @@ from scvi.utils import setup_anndata_dsp
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 
-from ._cellina_graph_module import CellinaGraphModule
+from ._cellina_gcn_module import CellinaGCNModule
 from ._constants import DOMAINS_KEY, SPATIAL_CONNECTIVITIES_KEY
 from ._edge_data_splitter import GraphBatchLoader, GraphJointDataSplitter
 from ._training_plan import CellinaAdversarialTrainingPlan
@@ -27,7 +27,7 @@ from ._training_plan import CellinaAdversarialTrainingPlan
 logger = logging.getLogger(__name__)
 
 
-class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
+class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
     Cellina model with dual encoders for counts (MLP) and spatial context (GCN).
 
@@ -39,7 +39,7 @@ class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     Parameters
     ----------
     adata
-        AnnData registered via :meth:`~cellina.CellinaGraph.setup_anndata`.
+        AnnData registered via :meth:`~cellina.CellinaGCN.setup_anndata`.
     n_hidden
         Nodes per hidden layer (shared by both encoders).
     n_latent
@@ -67,15 +67,15 @@ class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     convolution_type
         GCN type: ``"gcn"``, ``"gat"``, ``"gin"``, ``"sg"``.
     **model_kwargs
-        Keyword args for :class:`~cellina.CellinaGraphModule`.
+        Keyword args for :class:`~cellina.CellinaGCNModule`.
 
     Examples
     --------
-    >>> CellinaGraph.setup_anndata(adata, batch_key="batch",
+    >>> CellinaGCN.setup_anndata(adata, batch_key="batch",
     ...     spatial_connectivities_key="spatial_connectivities")
-    >>> model = CellinaGraph(adata, n_latent=10)
+    >>> model = CellinaGCN(adata, n_latent=10)
     >>> model.train()
-    >>> adata.obsm["X_cellina_graph"] = model.get_latent_representation()
+    >>> adata.obsm["X_cellina_gcn"] = model.get_latent_representation()
     """
 
     def __init__(
@@ -110,7 +110,7 @@ class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             self.adata_manager, self.summary_stats["n_batch"]
         )
 
-        self.module = CellinaGraphModule(
+        self.module = CellinaGCNModule(
             n_input=self.summary_stats["n_vars"],
             n_batch=self.summary_stats["n_batch"],
             n_hidden=n_hidden,
@@ -134,11 +134,11 @@ class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adv_str = " with adversarial domain forgetting" if discriminator_lambda > 0 else ""
         edge_str = " with edge prediction" if link_prediction_weight > 0 else ""
         self._model_summary_string = (
-            f"CellinaGraph Model with {n_latent}-dim latent space "
+            f"CellinaGCN Model with {n_latent}-dim latent space "
             f"(z MLP + s GCN encoders){adv_str}{edge_str}"
         )
         self.init_params_ = self._get_init_params(locals())
-        logger.info(f"The CellinaGraph model has been initialized{adv_str}{edge_str}")
+        logger.info(f"The CellinaGCN model has been initialized{adv_str}{edge_str}")
 
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
                           data_splitter_kwargs=None, x_spatial_layer=None):
@@ -482,12 +482,7 @@ class CellinaGraph(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if plan_kwargs is None:
             plan_kwargs = {}
 
-        if self.module.discriminator_lambda == 0:
-            plan_kwargs.pop("normalize_losses", None)
-            plan_kwargs.pop("scale_adversarial_loss", None)
-
-        if self.module.discriminator_lambda > 0:
-            self._training_plan_cls = CellinaAdversarialTrainingPlan
+        self._training_plan_cls = CellinaAdversarialTrainingPlan
 
         if datasplitter_kwargs is None:
             datasplitter_kwargs = {}

@@ -7,6 +7,7 @@ import torch
 from scvi.train import TrainingPlan
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+from ._cellina_gcn_module import CellinaGCNModule
 from ._constants import DOMAINS_KEY
 
 logger = logging.getLogger(__name__)
@@ -21,13 +22,13 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
     2. Train VAE to fool discriminator (frozen discriminator)
 
     Compatible with both CellinaModule (original MLP spatial encoder) and
-    CellinaGraphModule (GCN spatial encoder). The plan auto-detects the module
+    CellinaGCNModule (GCN spatial encoder). The plan auto-detects the module
     type and passes the appropriate loss kwargs.
 
     Parameters
     ----------
     module
-        CellinaModule or CellinaGraphModule instance.
+        CellinaModule or CellinaGCNModule instance.
     normalize_losses
         Whether to normalize classifier/fool/spatial losses relative to VAE loss.
         Scales are computed once from epoch-0 warmup statistics.
@@ -53,11 +54,10 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self._scale_clf               = 1.0
         self._scale_fool              = 1.0
         self._scale_spatial           = 1.0
-        # Alias kept for backward compat with CellinaModel tests
+        # Alias kept for backward compat with Cellina tests
         self._scale_domain_classifier = 1.0
 
-        # True when module is CellinaGraphModule (has link_prediction_weight)
-        self._is_graph_module = hasattr(module, 'link_prediction_weight')
+        self._is_graph_module = isinstance(module, CellinaGCNModule)
 
     def _get_domain_labels(self, batch):
         """Extract domain labels from either graph-aware or standard batch."""
@@ -91,6 +91,17 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             return spatial
         return extra_metrics.get("domain_classifier_loss", torch.tensor(0.0))
 
+    @staticmethod
+    def _batch_size(batch) -> int:
+        """Return the number of seed nodes (graph) or cells (MLP) in the batch."""
+        if 'node_batch' in batch:
+            return int(batch['node_batch']['batch_size'])
+        # Standard scVI batch: first tensor in the dict gives the cell count.
+        for v in batch.values():
+            if isinstance(v, torch.Tensor):
+                return v.shape[0]
+        return 1
+
     def training_step(self, batch, batch_idx):
         opts = self.optimizers()
         opts_list = opts if isinstance(opts, list) else [opts]
@@ -98,6 +109,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         opt_discriminator = opts_list[1] if len(opts_list) > 1 else None
 
         kappa = self.module.discriminator_lambda
+        batch_size = self._batch_size(batch)
 
         # ── WARMUP COLLECTION ────────────────────────────────────────────────
         # Graph modules: always run epoch 0 as no-grad (memory optimization).
@@ -140,36 +152,38 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
             self._warmup_done = True
 
         # ── STEP 1: Train Discriminator ──────────────────────────────────────
-        with torch.no_grad():
-            inference_inputs = self.module._get_inference_input(batch)
-            inference_outputs = self.module.inference(**inference_inputs)
-            z_detach = inference_outputs["z"].detach()
+        if self.module.domain_discriminator is not None:
+            with torch.no_grad():
+                inference_inputs = self.module._get_inference_input(batch)
+                inference_outputs = self.module.inference(**inference_inputs)
+                z_detach = inference_outputs["z"].detach()
 
-        domain_labels = self._get_domain_labels(batch)
-        # Pass weight=1.0 so both module types return raw cross-entropy; apply kappa below.
-        # (CellinaModule multiplies by weight internally; CellinaGraphModule does not — so
-        # using weight=1.0 normalises the two and lets us always do .mean() * kappa.)
-        disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
-            classifier=self.module.domain_discriminator,
-            weight=1.0,
-            inference_outputs={"z": z_detach},
-            labels=domain_labels,
-            reconst_loss_shape=None,
-            metric_name="discriminator",
-        )
-        disc_loss = disc_loss_tensor.mean() * kappa
+            domain_labels = self._get_domain_labels(batch)
+            # Pass weight=1.0 so both module types return raw cross-entropy; apply kappa below.
+            # (CellinaModule multiplies by weight internally; CellinaGCNModule does not — so
+            # using weight=1.0 normalises the two and lets us always do .mean() * kappa.)
+            disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
+                classifier=self.module.domain_discriminator,
+                weight=1.0,
+                inference_outputs={"z": z_detach},
+                labels=domain_labels,
+                reconst_loss_shape=None,
+                metric_name="discriminator",
+            )
+            disc_loss = disc_loss_tensor.mean() * kappa
 
-        if disc_loss.requires_grad:
-            opt_discriminator.zero_grad()
-            self.manual_backward(disc_loss)
-            opt_discriminator.step()
+            if disc_loss.requires_grad:
+                opt_discriminator.zero_grad()
+                self.manual_backward(disc_loss)
+                opt_discriminator.step()
 
-        self.log("discriminator_loss_train", disc_loss, on_step=False, on_epoch=True)
-        self.log("discriminator_accuracy_train", disc_accuracy, on_step=False, on_epoch=True)
+            self.log("discriminator_loss_train", disc_loss, on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("discriminator_accuracy_train", disc_accuracy, on_step=False, on_epoch=True, batch_size=batch_size)
 
         # ── STEP 2: Train VAE + Fool Discriminator ───────────────────────────
-        for p in self.module.domain_discriminator.parameters():
-            p.requires_grad = False
+        if self.module.domain_discriminator is not None:
+            for p in self.module.domain_discriminator.parameters():
+                p.requires_grad = False
 
         scale_clf     = self._scale_clf     if self._normalize_losses else 1.0
         scale_fool    = self._scale_fool    if self._normalize_losses else 1.0
@@ -193,20 +207,22 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         self.manual_backward(total_train_loss)
         opt_vae.step()
 
-        for p in self.module.domain_discriminator.parameters():
-            p.requires_grad = True
+        if self.module.domain_discriminator is not None:
+            for p in self.module.domain_discriminator.parameters():
+                p.requires_grad = True
 
-        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train_loss", total_train_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
         if self._normalize_losses:
-            self.log("scale_clf_train",     scale_clf,     on_step=False, on_epoch=True)
-            self.log("scale_fool_train",    scale_fool,    on_step=False, on_epoch=True)
-            self.log("scale_spatial_train", scale_spatial, on_step=False, on_epoch=True)
+            self.log("scale_clf_train",     scale_clf,     on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("scale_fool_train",    scale_fool,    on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("scale_spatial_train", scale_spatial, on_step=False, on_epoch=True, batch_size=batch_size)
 
         self.compute_and_log_metrics(scvi_loss, self.train_metrics, "train")
         return {"loss": total_train_loss}
 
     def validation_step(self, batch, batch_idx):
+        batch_size = self._batch_size(batch)
         scale_clf     = self._scale_clf     if self._normalize_losses else 1.0
         scale_fool    = self._scale_fool    if self._normalize_losses else 1.0
         scale_spatial = self._scale_spatial if self._normalize_losses else 1.0
@@ -220,17 +236,18 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 ),
             )
 
-            domain_labels = self._get_domain_labels(batch)
-            disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
-                classifier=self.module.domain_discriminator,
-                weight=1.0,
-                inference_outputs=inference_outputs,
-                labels=domain_labels,
-                reconst_loss_shape=None,
-                metric_name="discriminator",
-            )
-            scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean() * kappa
-            scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
+            if self.module.domain_discriminator is not None:
+                domain_labels = self._get_domain_labels(batch)
+                disc_loss_tensor, disc_accuracy = self.module._compute_classifier_metrics(
+                    classifier=self.module.domain_discriminator,
+                    weight=1.0,
+                    inference_outputs=inference_outputs,
+                    labels=domain_labels,
+                    reconst_loss_shape=None,
+                    metric_name="discriminator",
+                )
+                scvi_loss.extra_metrics["discriminator_loss"] = disc_loss_tensor.mean() * kappa
+                scvi_loss.extra_metrics["discriminator_accuracy"] = disc_accuracy
 
         clf_loss  = scvi_loss.extra_metrics["classifier_loss"]
         fool_loss = scvi_loss.extra_metrics["fool_loss"]
@@ -238,7 +255,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Use pure VAE loss whether the module returns it in loss (original) or extra_metrics (graph)
         vae_loss = scvi_loss.extra_metrics.get("vae_loss", scvi_loss.loss)
         total_val_loss = vae_loss + clf_loss + fool_loss + secondary
-        self.log("validation_loss", total_val_loss, on_step=False, on_epoch=True)
+        self.log("validation_loss", total_val_loss, on_step=False, on_epoch=True, batch_size=batch_size)
         self.compute_and_log_metrics(scvi_loss, self.val_metrics, "validation")
         return total_val_loss
 
@@ -264,18 +281,20 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
                 "monitor": self.lr_scheduler_metric,
             }
 
-        params_discriminator = filter(
-            lambda p: p.requires_grad,
-            self.module.domain_discriminator.parameters()
-        )
-        optimizer_discriminator = torch.optim.Adam(
-            params_discriminator,
-            lr=1e-3,
-            eps=0.01,
-            weight_decay=self.weight_decay,
-        )
+        opts = [config_vae["optimizer"]]
+        if self.module.domain_discriminator is not None:
+            params_discriminator = filter(
+                lambda p: p.requires_grad,
+                self.module.domain_discriminator.parameters()
+            )
+            optimizer_discriminator = torch.optim.Adam(
+                params_discriminator,
+                lr=1e-3,
+                eps=0.01,
+                weight_decay=self.weight_decay,
+            )
+            opts.append(optimizer_discriminator)
 
-        opts = [config_vae["optimizer"], optimizer_discriminator]
         if "lr_scheduler" in config_vae:
             return opts, [config_vae["lr_scheduler"]]
         else:

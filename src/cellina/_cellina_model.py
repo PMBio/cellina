@@ -24,7 +24,7 @@ from ._spatial_utils import make_counterfactual_adata
 
 logger = logging.getLogger(__name__)
 
-class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
+class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
     Cellina model with dual encoders for counts and spatial data.
 
@@ -36,7 +36,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     Parameters
     ----------
     adata
-        AnnData object that has been registered via :meth:`~cellina.CellinaModel.setup_anndata`.
+        AnnData object that has been registered via :meth:`~cellina.Cellina.setup_anndata`.
     n_hidden
         Number of nodes per hidden layer (shared by both encoders).
     n_latent
@@ -52,8 +52,8 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     --------
     >>> adata = anndata.read_h5ad(path_to_anndata)
     >>> # adata.obsm["spatial_x"] should contain spatial features
-    >>> CellinaModel.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
-    >>> model = CellinaModel(adata, n_latent=10)
+    >>> Cellina.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x")
+    >>> model = Cellina(adata, n_latent=10)
     >>> model.train()
     >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = concat(z, s)
     >>> adata.obsm["X_cellina_z"] = model.get_latent_representation(latent_key='z')
@@ -112,14 +112,15 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         logger.info(f"The Cellina model has been initialized{train_mode}")
 
-        # TODO: should this be here?
-        # Store the obsm key that was registered for spatial features so that
-        # perturbation methods can temporarily swap it.
         self._spatial_obsm_key = next(
-            f._attr_key
-            for f in self.adata_manager.fields
-            if getattr(f, '_registry_key', None) == SPATIAL_X_KEY
+            (f._attr_key for f in self.adata_manager.fields
+             if getattr(f, '_registry_key', None) == SPATIAL_X_KEY),
+            None,
         )
+        if self._spatial_obsm_key is None:
+            raise ValueError(
+                "No spatial obsm field found. Pass `spatial_obsm_key` to setup_anndata()."
+            )
 
     def _make_counterfactual_adata(
             self,
@@ -136,7 +137,7 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 self.adata if adata is None else adata,
                 indices,
                 neighbour_indices,
-                spatial_column=SPATIAL_X_KEY, # TODO: get from registry instead of hardcoding: self._spatial_obsm_key
+                spatial_column=self._spatial_obsm_key,
                 random_state=seed,
                 precomputed=precomputed,
                 n_neighbours=n_neighbours,
@@ -341,24 +342,16 @@ class CellinaModel(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         datasplitter_kwargs
             Additional keyword arguments passed into :class:`~scvi.dataloaders.DataSplitter`.
         plan_kwargs
-            Keyword args for :class:`~cellina.CellinaAdversarialTrainingPlan` or :class:`~scvi.train.TrainingPlan`.
+            Keyword args for :class:`~cellina.CellinaAdversarialTrainingPlan`.
             Keyword arguments passed to `train()` will overwrite values present in `plan_kwargs`, when appropriate.
         **kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
-        # Ensure plan_kwargs is a dict we can mutate
         if plan_kwargs is None:
             plan_kwargs = {}
-        
-        # If adversarial training is disabled, remove plan-only keys that would be
-        # handled by the adversarial plan (avoid forwarding them to module.loss)
-        if self.module.discriminator_lambda == 0:
-            plan_kwargs.pop("normalize_losses", None)
 
-        # Set training plan class
-        if self.module.discriminator_lambda > 0:
-            self._training_plan_cls = CellinaAdversarialTrainingPlan
-        
+        self._training_plan_cls = CellinaAdversarialTrainingPlan
+
         super().train(
             max_epochs=max_epochs,
             accelerator=accelerator,

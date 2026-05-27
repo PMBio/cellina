@@ -20,7 +20,7 @@ def _exponential(distance_mtx, bandwidth):
 
 def _linear(distance_mtx, bandwidth):
     connectivity = 1 - distance_mtx / bandwidth
-    return np.clip(connectivity, a_min=0, a_max=np.inf)
+    return np.clip(connectivity, a_min=0, a_max=1.0)
 
 def _spatial_neighbors_core(adata: AnnData,
                            bandwidth=None,
@@ -206,14 +206,14 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False):
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False, pseudocount=False):
     n_vars = len(var_idx)
     if renormalize:
         row_sums_before = np.asarray(X.sum(axis=1)).ravel()
 
     neutral = 0.0 if add_shift else 1.0
     if groupby is None:
-        transform = np.full(n_vars, neutral)
+        transform = np.full(n_vars, neutral, dtype=np.float32)
         for gene, logfc in perturbations.items():
             if gene in var_idx:
                 transform[var_idx[gene]] = logfc if add_shift else base ** logfc
@@ -226,7 +226,12 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, bas
                     transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
 
     if add_shift:
-        X = np.clip(np.asarray(X + transform), 0, None)
+        X_arr = X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)
+        X = np.clip(X_arr + transform, 0, None)
+    elif pseudocount:
+        # +1 pseudocount so zero-expressed genes can be activated by a positive logFC
+        X_arr = (X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)) + 1
+        X = X_arr * transform
     else:
         X = X.multiply(transform) if issparse(X) else X * transform
 
@@ -245,7 +250,7 @@ def _make_perturbed_expression(
     add_shift: bool = True,
     renormalize: bool = True,
 ):
-    """Apply logFC perturbations to ``adata.X`` and return the modified expression matrix."""
+    """Apply Node perturbations to ``adata.X`` and return the modified expression matrix."""
     var_names = list(adata.var_names)
     var_idx = {g: i for i, g in enumerate(var_names)}
     var_names_set = set(var_idx)
@@ -322,7 +327,7 @@ def make_neighbor_perturbation(
     renormalize: bool = True,
 ) -> None:
     """
-    Apply logFC perturbations to neighbour expression and re-aggregate.
+    Apply Node perturbations to neighbour expression and re-aggregate.
 
     Perturbed expression is written to ``adata.layers[layer_key]`` and the
     resulting spatial features to ``adata.obsm[obsm_key_out]``.
@@ -335,11 +340,13 @@ def make_neighbor_perturbation(
     connectivity_key
         Key in ``adata.obsp`` for the spatial connectivity matrix.
     perturbations
-        When ``groupby=None``: ``Dict[str, float]`` mapping gene → logFC,
-        applied globally to all cells.
+        When ``groupby=None``: ``Dict[str, float]`` mapping gene → perturbation value
+        (:math:`\delta_g`) applied globally to all cells.
         When ``groupby`` is set: ``Dict[str, pd.Series]`` mapping cell-type label →
-        gene-indexed logFC Series; each cell is scaled by its cell type's vector
-        before standard degree-normalised aggregation.
+        gene-indexed perturbation value (:math:`\delta_g`) Series.
+        Values are interpreted as additive shifts when ``add_shift=True``
+        (:math:`T_g(x) = x + \delta_g`) or as logFCs when ``add_shift=False``
+        (:math:`T_g(x) = x \cdot e^{\delta_g}`).
     groupby
         Column in ``adata.obs`` used to apply cell-type-specific perturbations.
         When ``None``, perturbations are applied globally to all cells.
@@ -493,49 +500,6 @@ def make_counterfactual_adata(
     return adata_cf
 
 
-def _node_perturbation_graph(X, var_idx, perturbations, groupby=None, labels=None,
-                             base=np.e, add_shift=False, renormalize=True):
-    """Variant of _node_perturbation used by make_perturbed_expression.
-
-    Differs from the shared _node_perturbation in that the multiplicative path
-    adds a +1 pseudocount before scaling (so zero-expressed genes can be
-    activated by a positive logFC).
-    """
-    import scipy.sparse as sp_local
-
-    n_vars = len(var_idx)
-    if renormalize:
-        row_sums_before = np.asarray(X.sum(axis=1)).ravel()
-
-    neutral = 0.0 if add_shift else 1.0
-    if groupby is None:
-        transform = np.full(n_vars, neutral, dtype=np.float32)
-        for gene, logfc in perturbations.items():
-            if gene in var_idx:
-                transform[var_idx[gene]] = logfc if add_shift else base ** logfc
-    else:
-        transform = np.full((X.shape[0], n_vars), neutral, dtype=np.float32)
-        for ct, logfc_series in perturbations.items():
-            ct_mask = labels == ct
-            for gene, logfc in logfc_series.items():
-                if gene in var_idx:
-                    transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
-
-    if add_shift:
-        X_arr = X.toarray() if sp_local.issparse(X) else np.asarray(X, dtype=np.float32)
-        X = np.clip(X_arr + transform, 0, None)
-    else:
-        # +1 pseudocount so zero-expressed genes can be activated by positive logFC
-        X_arr = (X.toarray() if sp_local.issparse(X) else np.asarray(X, dtype=np.float32)) + 1
-        X = X_arr * transform
-
-    if renormalize:
-        row_sums_after = np.asarray(X.sum(axis=1)).ravel()
-        scale_rows = np.where(row_sums_after == 0, 1.0, row_sums_before / row_sums_after)
-        X = X * scale_rows[:, np.newaxis]
-    return X
-
-
 def make_perturbed_expression(
     adata: AnnData,
     perturbations: Optional[dict] = None,
@@ -547,7 +511,7 @@ def make_perturbed_expression(
     inplace: bool = True,
 ):
     """
-    Apply logFC perturbations to counts and store the result as a layer.
+    Apply Node perturbations to counts and store the result as a layer.
 
     Counts-space analog of :func:`make_neighbor_perturbation`. Cellina scales
     counts; the GCN aggregates over the spatial graph at inference time when
@@ -558,9 +522,13 @@ def make_perturbed_expression(
     adata
         AnnData with raw counts in ``adata.X``.
     perturbations
-        ``Dict[str, float]`` mapping gene → logFC (global) when ``groupby=None``.
-        ``Dict[str, pd.Series]`` mapping cell-type label → gene-indexed logFC
-        Series when ``groupby`` is set. ``None`` copies ``adata.X`` unchanged.
+        ``Dict[str, float]`` mapping gene → perturbation value (:math:`\delta_g`, global)
+        when ``groupby=None``.
+        ``Dict[str, pd.Series]`` mapping cell-type label → gene-indexed perturbation
+        value (:math:`\delta_g`) Series when ``groupby`` is set.
+        Values are interpreted as additive shifts when ``add_shift=True``
+        (:math:`T_g(x) = x + \delta_g`) or as logFCs when ``add_shift=False``
+        (:math:`T_g(x) = x \cdot e^{\delta_g}`). ``None`` copies ``adata.X`` unchanged.
     groupby
         Column in ``adata.obs`` for cell-type-specific perturbations.
     layer_key
@@ -615,10 +583,10 @@ def make_perturbed_expression(
         X_cf = X.copy()
     else:
         labels = adata.obs[groupby].values if groupby is not None else None
-        X_cf = _node_perturbation_graph(
+        X_cf = _node_perturbation(
             X, var_idx=var_idx, perturbations=perturbations,
             groupby=groupby, labels=labels, base=base,
-            add_shift=add_shift, renormalize=renormalize,
+            add_shift=add_shift, renormalize=renormalize, pseudocount=True,
         )
 
     if add_shift:

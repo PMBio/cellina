@@ -6,8 +6,8 @@ from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
 
-from cellina import CellinaGraph, make_perturbed_expression
-from cellina._cellina_graph_module import CellinaGraphModule
+from cellina import CellinaGCN, make_perturbed_expression
+from cellina._cellina_gcn_module import CellinaGCNModule
 
 
 def _add_spatial_connectivity(adata, max_neighbors=5):
@@ -44,17 +44,17 @@ def adata_with_spatial():
 
 
 def test_cellina_model(adata_with_spatial):
-    """Test basic CellinaGraph functionality."""
+    """Test basic CellinaGCN functionality."""
     n_latent = 5
 
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=n_latent)
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent)
 
     assert model.module.n_latent == n_latent
 
@@ -68,14 +68,14 @@ def test_cellina_s_encoder_architecture(adata_with_spatial):
     """Test that s_encoder is a GCN (GraphEncoder)."""
     n_latent = 5
 
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=n_latent)
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent)
 
     from cellina._spatial_encoder import GraphEncoder
     assert isinstance(model.module.s_encoder, GraphEncoder)
@@ -99,14 +99,14 @@ def test_cellina_losses(adata_with_spatial):
     """Test that loss includes KL divergence for both z and s, and classifier loss when enabled."""
     n_latent = 5
 
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent, classifier_lambda=1.0)
 
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
@@ -141,38 +141,38 @@ def test_cellina_losses(adata_with_spatial):
 
 def test_classifier_disabled(adata_with_spatial):
     """Test that classifier is disabled when classifier_lambda=0."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=5, classifier_lambda=0.0)
     assert model.module.classifier is None
     assert model.module.classifier_lambda == 0.0
 
 
 def test_discriminator_disabled_by(adata_with_spatial):
     """Test that discriminator is disabled when discriminator_lambda=0."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model.module.domain_discriminator is None
     assert model.module.discriminator_lambda == 0.0
 
-    model2 = CellinaGraph(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
+    model2 = CellinaGCN(adata_with_spatial, n_latent=5, discriminator_lambda=0.0)
     assert model2.module.domain_discriminator is None
     assert model2.module.discriminator_lambda == 0.0
 
 
 def test_discriminator_enabled(adata_with_spatial):
     """Test that discriminator works when discriminator_lambda > 0."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         domains_key="domain",
@@ -180,7 +180,7 @@ def test_discriminator_enabled(adata_with_spatial):
     )
 
     n_latent = 5
-    model = CellinaGraph(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0, classifier_lambda=0.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent, discriminator_lambda=1.0, classifier_lambda=0.0)
 
     assert model.module.domain_discriminator is not None
     assert model.module.discriminator_lambda == 1.0
@@ -315,7 +315,7 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
     n_latent = 5
     n_vars = adata_with_spatial.n_vars
 
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
@@ -323,10 +323,10 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
         spatial_connectivities_key="spatial_connectivities",
     )
 
-    model_true = CellinaGraph(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
+    model_true = CellinaGCN(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
     assert model_true.module.condition_on_intrinsic == True
 
-    model_false = CellinaGraph(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
+    model_false = CellinaGCN(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
     assert model_false.module.condition_on_intrinsic == False
 
     first_gcn_true = model_true.module.s_encoder.encoder.gcn_layers[0]
@@ -351,7 +351,7 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
 
 def test_normalize_losses_true(adata_with_spatial):
     """Test normalize_losses parameter in adversarial training plan."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
@@ -361,7 +361,7 @@ def test_normalize_losses_true(adata_with_spatial):
 
     classifier_lambda    = 0.5
     discriminator_lambda = 2.0
-    model = CellinaGraph(adata_with_spatial, n_latent=5,
+    model = CellinaGCN(adata_with_spatial, n_latent=5,
                          discriminator_lambda=discriminator_lambda,
                          classifier_lambda=classifier_lambda)
 
@@ -421,7 +421,7 @@ def test_normalize_losses_true(adata_with_spatial):
 # ── SupCon unit tests ─────────────────────────────────────────────────────────
 
 def _supcon_module():
-    return CellinaGraphModule(
+    return CellinaGCNModule(
         n_input=10,
         library_log_means=np.zeros((1, 1)),
         library_log_vars=np.ones((1, 1)),
@@ -465,14 +465,14 @@ def test_supcon_loss():
 
 def test_supcon_model(adata_with_spatial):
     """spatial_loss_raw > 0 when link_prediction_weight > 0 and domains differ (supcon)."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=5, link_prediction_weight=1.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=5, link_prediction_weight=1.0)
 
     dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
@@ -487,14 +487,14 @@ def test_supcon_model(adata_with_spatial):
 
 def test_domain_clf_model(adata_with_spatial):
     """spatial_loss_raw > 0 when spatial_loss_type='domain_clf' and link_prediction_weight > 0."""
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(
+    model = CellinaGCN(
         adata_with_spatial, n_latent=5,
         link_prediction_weight=1.0,
         spatial_loss_type="domain_clf",
@@ -515,7 +515,7 @@ def test_domain_clf_model(adata_with_spatial):
 def test_normalize_losses_spatial_scale(adata_with_spatial):
     """spatial_loss is scaled by _scale_spatial when normalize_losses=True, for both loss types."""
     for spatial_loss_type in ("supcon", "domain_clf"):
-        CellinaGraph.setup_anndata(
+        CellinaGCN.setup_anndata(
             adata_with_spatial,
             batch_key="batch",
             labels_key="cell_labels",
@@ -523,7 +523,7 @@ def test_normalize_losses_spatial_scale(adata_with_spatial):
             spatial_connectivities_key="spatial_connectivities",
         )
         link_prediction_weight = 1.0
-        model = CellinaGraph(
+        model = CellinaGCN(
             adata_with_spatial, n_latent=5,
             discriminator_lambda=1.0,
             link_prediction_weight=link_prediction_weight,
@@ -562,14 +562,14 @@ def test_normalize_losses_spatial_scale(adata_with_spatial):
 
 @pytest.fixture
 def trained_model(adata_with_spatial):
-    CellinaGraph.setup_anndata(
+    CellinaGCN.setup_anndata(
         adata_with_spatial,
         batch_key="batch",
         labels_key="cell_labels",
         domains_key="domain",
         spatial_connectivities_key="spatial_connectivities",
     )
-    model = CellinaGraph(adata_with_spatial, n_latent=5, discriminator_lambda=0.0, classifier_lambda=0.0)
+    model = CellinaGCN(adata_with_spatial, n_latent=5, discriminator_lambda=0.0, classifier_lambda=0.0)
     model.train(max_epochs=1, train_size=0.8, check_val_every_n_epoch=1)
     return model, adata_with_spatial
 
@@ -579,16 +579,17 @@ def test_make_perturbed_expression():
     adata = AnnData(X=X.copy())
     adata.var_names = ["G0", "G1", "G2"]
 
-    # multiplicative (default)
-    make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf", base=np.e)
+    # multiplicative with pseudocount (GCN path: add_shift=False, renormalize=False)
+    make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf", base=np.e,
+                              add_shift=False, renormalize=False)
     expected = (X + 1).copy()
     expected[:, 0] *= np.e ** 1.5
     expected[:, 2] *= np.e ** -0.5
-    np.testing.assert_allclose(np.asarray(adata.layers["cf"].todense()), expected, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(adata.layers["cf"].toarray()), expected, rtol=1e-6)
 
-    # additive shift
+    # additive shift (no renormalize so expected values are exact)
     make_perturbed_expression(adata, perturbations={"G0": 1.5, "G2": -0.5}, layer_key="cf_shift",
-                              add_shift=True)
+                              add_shift=True, renormalize=False)
     expected_shift = X.copy()
     expected_shift[:, 0] += 1.5
     expected_shift[:, 2] += -0.5

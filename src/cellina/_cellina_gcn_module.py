@@ -17,9 +17,9 @@ from ._spatial_encoder import GraphEncoder
 TensorDict = Dict[str, torch.Tensor]
 
 
-class CellinaGraphModule(BaseModuleClass):
+class CellinaGCNModule(BaseModuleClass):
     """
-    CellinaGraph module with dual encoders (z from counts MLP, s from spatial GCN).
+    CellinaGCN module with dual encoders (z from counts MLP, s from spatial GCN).
 
     Parameters
     ----------
@@ -91,7 +91,7 @@ class CellinaGraphModule(BaseModuleClass):
         super().__init__()
         if not use_observed_lib_size:
             raise NotImplementedError(
-                "CellinaGraphModule only supports use_observed_lib_size=True."
+                "CellinaGCNModule only supports use_observed_lib_size=True."
             )
         self.n_input = n_input
         self.n_latent = n_latent
@@ -202,7 +202,7 @@ class CellinaGraphModule(BaseModuleClass):
     def _get_inference_input(self, tensors):
         if 'node_batch' not in tensors:
             raise ValueError(
-                "CellinaGraphModule requires graph-aware batches with 'node_batch' key."
+                "CellinaGCNModule requires graph-aware batches with 'node_batch' key."
             )
         node_batch = tensors['node_batch']
         return dict(
