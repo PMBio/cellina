@@ -19,7 +19,7 @@ In tissues, a cell's transcriptional state is shaped by its local neighborhood: 
 **Supervised disentanglement.** Optimizing the ELBO alone does not prevent $z$ from absorbing spatially-driven variation. Cellina adds auxiliary objectives:
 - A **cell-type classifier** on $z$ anchors it to transcriptional identity.
 - An **adversarial discriminator** is trained to predict spatial domain from $z$; the encoder is then trained to fool it, routing microenvironmental variation to $s$ by elimination.
-- *(CellinaGCN only, optional)* A **graph-supervised contrastive loss** $\mathcal{L}_{\mathrm{spatial}}$ on $s$, as a biologically grounded inductive bias that promotes similarity within local neighbourhoods. Enabled by setting `link_prediction_weight > 0`.
+- A **graph-supervised contrastive loss** $s$ *(CellinaGCN only, optional)*, as a biologically grounded inductive bias that promotes similarity within local neighbourhoods. Enabled by setting `link_prediction_weight > 0`.
 
 **Training** alternates between a discriminator step (encoder frozen) and a VAE step (discriminator frozen), following a standard adversarial schedule.
 
