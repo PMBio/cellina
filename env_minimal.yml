@@ -1,0 +1,20 @@
+name: cellina
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    # GPU users: replace with the CUDA-enabled wheel from pytorch.org, e.g.
+    #   pip install torch>=2.4 --index-url https://download.pytorch.org/whl/cu121
+    - torch>=2.4
+    - torch-geometric>=2.6
+    - torch-sparse>=0.6.18
+    - torch-scatter>=2.1
+    - scvi-tools>=1.2.0
+    - rich
+    - session-info
+    # test dependencies
+    - pytest
+    - pandas
+    - -e .

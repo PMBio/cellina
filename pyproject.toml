@@ -5,7 +5,7 @@ requires = ["hatchling"]
 
 [project]
 name = "cellina"
-version = "0.7.3"
+version = "0.99.0"
 description = "Cellina: Dual-encoder VAE for spatial transcriptomics with adversarial domain forgetting"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,11 +23,16 @@ urls.Source = "https://github.com/PMBio/cellina"
 urls.Home-page = "https://github.com/PMBio/cellina"
 dependencies = [
     "anndata",
+    "scipy",
+    "scikit-learn",
     # for debug logging (referenced from the issue template)
     "session-info",
     "rich",
-    "scvi-tools>=0.20.1",
-    "torch",
+    "torch>=2.4",
+    "torch-geometric>=2.6",
+    "torch-sparse>=0.6.18",
+    "torch-scatter>=2.1",
+    "scvi-tools>=1.2.0",
 ]
 
 [project.optional-dependencies]

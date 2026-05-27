@@ -7,6 +7,7 @@
 # -- Path setup --------------------------------------------------------------
 import sys
 from datetime import datetime
+from email.utils import getaddresses
 from importlib.metadata import metadata
 from pathlib import Path
 
@@ -18,7 +19,9 @@ sys.path.insert(0, str(HERE / "extensions"))
 
 info = metadata("cellina")
 project_name = info["Name"]
-author = info["Author"]
+_author_field = info["Author"] or info["Author-email"] or ""
+_parsed = getaddresses([_author_field])
+author = ", ".join(name for name, _ in _parsed if name) or _author_field
 copyright = f"{datetime.now():%Y}, {author}."
 version = info["Version"]
 repository_url = f"https://github.com/PMBio/{project_name}"
@@ -33,7 +36,7 @@ needs_sphinx = "4.0"
 
 html_context = {
     "display_github": True,  # Integrate GitHub
-    "github_user": "adamgayoso",  # Username
+    "github_user": "PMBio",  # Username
     "github_repo": project_name,  # Repo name
     "github_version": "main",  # Version
     "conf_py_path": "/docs/",  # Path in the checkout to the docs root

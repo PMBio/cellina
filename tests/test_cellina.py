@@ -254,6 +254,33 @@ def test_spatial_neighbors(adata_with_spatial):
     assert conn_matrix.shape == (n_obs, n_obs)
 
 
+def test_spatial_neighbors_test_indices(adata_with_spatial):
+    """Test that test_indices cells have zero connectivity (no edges in or out)."""
+    from cellina._spatial_utils import spatial_neighbors
+    import numpy as np
+
+    test_idx = [0, 1, 2]
+    conn = spatial_neighbors(
+        adata_with_spatial,
+        bandwidth=50.0,
+        cutoff=0.1,
+        max_neighbours=10,
+        kernel='gaussian',
+        spatial_key='spatial',
+        test_indices=test_idx,
+        inplace=False,
+    )
+
+    conn_dense = conn.toarray()
+    # Test cells must not be selected as neighbors of anyone
+    assert conn_dense[:, test_idx].sum() == 0, "test cells appear as neighbors of other cells"
+    # Test cells must not have any neighbors themselves
+    assert conn_dense[test_idx, :].sum() == 0, "test cells have outgoing edges"
+    # Non-test cells must still have neighbors
+    non_test = [i for i in range(adata_with_spatial.n_obs) if i not in test_idx]
+    assert conn_dense[non_test, :].sum() > 0, "non-test cells lost all connectivity"
+
+
 def test_compute_spatial_features(adata_with_spatial):
     """Test compute_spatial_features function (pseudobulk mode)."""
     from cellina._spatial_utils import compute_spatial_features, spatial_neighbors

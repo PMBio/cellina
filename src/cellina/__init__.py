@@ -6,10 +6,13 @@ from rich.logging import RichHandler
 
 from ._cellina_model import CellinaModel
 from ._cellina_module import CellinaModule
+from ._cellina_graph_model import CellinaGraph
+from ._cellina_graph_module import CellinaGraphModule
 from ._training_plan import CellinaAdversarialTrainingPlan
 from ._spatial_utils import (
     compute_spatial_features,
     make_neighbor_perturbation,
+    make_perturbed_expression,
 )
 
 # Configure logger
@@ -31,9 +34,12 @@ logger.propagate = False
 __all__ = [
     "CellinaModel",
     "CellinaModule",
+    "CellinaGraph",
+    "CellinaGraphModule",
     "CellinaAdversarialTrainingPlan",
     "compute_spatial_features",
     "make_neighbor_perturbation",
+    "make_perturbed_expression",
 ]
 
 __version__ = version("cellina")

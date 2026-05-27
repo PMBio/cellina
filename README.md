@@ -1,130 +1,62 @@
 # Cellina
 
 [![Tests][badge-tests]][link-tests]
-[![Documentation][badge-docs]][link-docs]
 
 [badge-tests]: https://img.shields.io/github/actions/workflow/status/PMBio/cellina/test.yaml?branch=main
 [link-tests]: https://github.com/PMBio/cellina/actions/workflows/test.yml
-[badge-docs]: https://img.shields.io/readthedocs/cellina
 
-Cellina: A spatial-aware variational autoencoder for spatial RNA-seq data with dual encoders.
+Cellina is a dual-encoder variational autoencoder for predicting how a cell's gene expression changes under altered spatial contexts — a class of queries we call *tissue graph counterfactuals*.
 
-This package extends [scVI-tools](https://www.nature.com/articles/s41592-018-0229-2) with a spatial encoder that processes spatial features alongside the standard count encoder. The model uses dual latent representations (z from counts, s from spatial+z) that are combined to reconstruct count data while preserving both biological identity and spatial context.
+In tissues, a cell's transcriptional state is shaped by its local neighborhood: the composition of nearby cells and the signals they emit. Existing perturbation methods typically treat cells as independent and apply perturbations uniformly. Cellina addresses this gap by explicitly separating a cell's **intrinsic state** (*z*, encoding cell identity) from its **spatial context** (*s*, encoding microenvironmental influence), then uses *s* as a conditioning input to render counterfactual predictions under two types of intervention:
 
-## Key Features
+- **Edge perturbation** — rewire a cell's neighborhood (replace neighbors with those from a different domain)
+- **Node perturbation** — modify the expression of existing neighbors (e.g. pathway activation or knockout)
 
-- **Dual Encoder Architecture**: Separate encoders for count data (z) and spatial features (s)
-- **Spatial Integration**: Learns spatial context through weighted pseudobulk features
-- **Optional Cell Type Classifier**: Supervised classification head for cell type prediction
-- **Adversarial Domain Forgetting**: Optional discriminator for removing unwanted domain effects from latent representations
-- **Built on scvi-tools**: Leverages the robust scvi-tools framework for scalability and reliability
+## How it works
 
-## Getting started
+**Generative model.** Cellina is a VAE with two latent variables. An MLP encoder $\text{Enc}_z$ maps raw counts to $z \sim q(z \mid x)$; a spatial encoder maps the cell's neighborhood to $s \sim q(s \mid \mathcal{N}(v))$. A shared decoder reconstructs counts from $[z;\, s]$ under a Negative Binomial likelihood. Both latents have standard normal priors.
 
-Please refer to the [documentation][link-docs]. In particular, the
+**Supervised disentanglement.** Optimizing the ELBO alone does not prevent $z$ from absorbing spatially-driven variation. Cellina adds two auxiliary objectives:
+- A **cell-type classifier** on $z$ anchors it to transcriptional identity.
+- An **adversarial discriminator** is trained to predict spatial domain from $z$; the encoder is then trained to fool it, routing microenvironmental variation to $s$ by elimination.
 
--   [API documentation][link-api].
+**Training** alternates between a discriminator step (encoder frozen) and a VAE step (discriminator frozen), following a standard adversarial schedule.
 
-## Installation
+**Two variants** differ in how the spatial encoder is implemented:
 
-You need to have Python 3.10 or newer installed on your system. If you don't have
-Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
+| Code class | Paper name | Spatial encoder |
+|---|---|---|
+| `CellinaModel` | *Cellina* | Degree-normalized weighted pseudobulk aggregation of neighbor expression → MLP |
+| `CellinaGraph` | *Cellina-GAT* | Multi-layer GATv2 on the local subgraph; self-loops excluded so $v$'s own expression is captured by $z$ alone; modified contrastive loss on $s$ |
 
-There are several alternative options to install cellina:
+The two variants perform on par. `CellinaModel` decouples neighborhood construction from training and scales similarly to non-spatial baselines; `CellinaGraph` learns attention over each subgraph at additional cost per step.
 
-<!--
-1) Install the latest release of `cellina` from `PyPI <https://pypi.org/project/cellina/>`_:
+## Repository contents
 
-```bash
-pip install cellina
 ```
--->
-
-1. Install the latest development version:
-
-```bash
-pip install git+https://github.com/PMBio/cellina.git@main
+src/cellina/
+  _cellina_model.py          # CellinaModel (Cellina)
+  _cellina_module.py
+  _cellina_graph_model.py    # CellinaGraph (Cellina-GAT)
+  _cellina_graph_module.py
+  _spatial_encoder.py        # GATv2-based GraphEncoder
+  _edge_data_splitter.py     # Graph-aware data loading (NeighborLoader / LinkNeighborLoader)
+  _training_plan.py          # Shared adversarial training plan
+  _spatial_utils.py          # spatial_neighbors, compute_spatial_features, perturbation utilities
+demo.ipynb                   # End-to-end demo
+perturb_utils.py             # Perturbation evaluation helpers
 ```
-
-2. Install from local directory (for development):
-
-```bash
-pip install -e .
-```
-
-## Quick Start
-
-```python
-import scanpy as sc
-import numpy as np
-from cellina import CellinaModel
-from cellina._spatial_utils import spatial_neighbors, weighted_pseudobulks
-
-# Load your data
-adata = sc.read_h5ad("your_data.h5ad")
-
-# Compute spatial features
-spatial_neighbors(adata, bandwidth=np.inf, max_neighbours=50, standardize=True)
-weighted_pseudobulks(
-    adata,
-    sp=adata.obsp['spatial_connectivities'],
-    groupby="cell_type",
-    obsm_key='spatial_x',
-)
-
-# Setup and train model
-CellinaModel.setup_anndata(
-    adata, 
-    batch_key="batch", 
-    labels_key="cell_type",
-    domains_key="niche",
-    spatial_obsm_key="spatial_x"
-)
-
-model = CellinaModel(
-    adata, 
-    n_latent=20,
-    classifier_lambda=1e4,  # Optional: enable cell type classifier
-    discriminator_lambda=1e4  # Optional: enable domain forgetting
-)
-
-model.train(max_epochs=200)
-
-# Get latent representations
-adata.obsm['X_cellina'] = model.get_latent_representation()  # z + s
-adata.obsm['X_cellina_z'] = model.get_latent_representation(latent_key='z')
-adata.obsm['X_cellina_s'] = model.get_latent_representation(latent_key='s')
-```
-
-## Model Architecture
-
-Cellina implements a dual-encoder VAE:
-- **z encoder**: Processes count data to capture biological identity
-- **s encoder**: Processes spatial features (concatenated with z) to capture spatial context
-- **Decoder**: Reconstructs counts from shifted = concat(z, s)
-
-Optional components:
-- **Cell type classifier**: Supervised head on z for cell type prediction
-- **Domain discriminator**: Adversarial training to remove domain effects from z
 
 ## Release notes
 
-See the [changelog][changelog].
-
-## Contact
-
-For questions and help requests, you can reach out in the [scverse discourse][scverse-discourse].
-If you found a bug, please use the [issue tracker][issue-tracker].
+See the [changelog](CHANGELOG.md).
 
 ## Citation
 
-If you use Cellina in your research, please cite:
+> Citation coming soon.
 
-```
-# Citation to be added
-```
+Built on [scvi-tools](https://scvi-tools.org):
 
-Built with [scvi-tools](https://scvi-tools.org):
 ```
 @article{gayoso2022python,
   title={A Python library for probabilistic analysis of single-cell omics data},
@@ -138,24 +70,10 @@ Built with [scvi-tools](https://scvi-tools.org):
 }
 ```
 
-[scverse-discourse]: https://discourse.scverse.org/
+## Contact
+
+If you found a bug, please use the [issue tracker][issue-tracker].
+
 [issue-tracker]: https://github.com/PMBio/cellina/issues
-[changelog]: https://cellina.readthedocs.io/latest/changelog.html
-[link-docs]: https://cellina.readthedocs.io
-[link-api]: https://cellina.readthedocs.io/latest/api.html
 
-[//]: # (numfocus-fiscal-sponsor-attribution)
-
-Cellina is part of the scverse® project ([website](https://scverse.org), [governance](https://scverse.org/about/roles)) and is fiscally sponsored by [NumFOCUS](https://numfocus.org/).
-If you like scverse® and want to support our mission, please consider making a tax-deductible [donation](https://numfocus.org/donate-to-scverse) to help the project pay for developer time, professional services, travel, workshops, and a variety of other needs.
-
-<div align="center">
-<a href="https://numfocus.org/project/scverse">
-  <img
-    src="https://raw.githubusercontent.com/numfocus/templates/master/images/numfocus-logo.png"
-    width="200"
-  >
-</a>
-</div>
-
-Copyright (c) 2025, PMBio
+Copyright (c) 2026, PMBio
