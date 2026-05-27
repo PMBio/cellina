@@ -35,7 +35,11 @@ The two variants perform on par. `CellinaModel` decouples neighborhood construct
 
 Cellina supports two post-training interventions on the spatial graph $\mathcal{G}$:
 
-**Edge perturbation** rewires $\mathcal{N}(v) := \mathcal{N}'$, replacing a cell's spatial neighbours with donors sampled from a target tissue domain while keeping the cell's own expression fixed. Both variants share the same call:
+**Edge perturbation** replaces a cell's spatial neighbourhood with donors sampled from a target tissue domain, while keeping the cell's own expression fixed:
+
+$$\mathcal{N}(v) := \mathcal{N}'$$
+
+Both variants share the same call:
 
 ```python
 expr_cf = model.get_counterfactual_expression(
