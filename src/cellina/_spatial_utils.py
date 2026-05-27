@@ -226,7 +226,7 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, bas
                     transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
 
     if add_shift:
-        X = np.asarray(X + transform)
+        X = np.clip(np.asarray(X + transform), 0, None)
     else:
         X = X.multiply(transform) if issparse(X) else X * transform
 
@@ -542,7 +542,7 @@ def make_perturbed_expression(
     groupby: Optional[str] = None,
     layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = False,
+    add_shift: bool = True,
     renormalize: bool = True,
     inplace: bool = True,
 ):

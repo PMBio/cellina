@@ -31,6 +31,45 @@ In tissues, a cell's transcriptional state is shaped by its local neighborhood: 
 
 The two variants perform on par. `CellinaModel` decouples neighborhood construction from training and scales similarly to non-spatial baselines; `CellinaGraph` learns attention over each subgraph at additional cost per step.
 
+## Tissue graph counterfactuals
+
+Cellina supports two post-training interventions on the spatial graph $\mathcal{G}$:
+
+**Edge perturbation** rewires $\mathcal{N}(v) := \mathcal{N}'$, replacing a cell's spatial neighbours with donors sampled from a target tissue domain while keeping the cell's own expression fixed. Both variants share the same call:
+
+```python
+expr_cf = model.get_counterfactual_expression(
+    indices=ref_idx,              # focal cells (source domain)
+    neighbour_indices=donor_idx,  # donor pool (target domain)
+)
+```
+
+**Node perturbation** modifies the feature vectors of $v$'s neighbours while preserving graph topology. For a target gene set $\mathcal{S}$ and a gene-specific transformation $T_g$:
+
+$$x_{u,g}^{\mathrm{cf}} = \begin{cases} T_g(x_{u,g}) & g \in \mathcal{S} \\ x_{u,g} & g \notin \mathcal{S} \end{cases}$$
+
+$T_g$ can encode any intervention (additive shift, knockout, overexpression, or learned counterfactual values). The two variants differ in both how $T_g$ is instantiated and when the perturbed features are consumed:
+
+*CellinaModel* — $T_g(x_{u,g}) = x_{u,g} + \delta_g$ applied to log-normalised neighbour expression (`add_shift=True`); pre-aggregate into pseudobulk spatial features, then run inference:
+
+```python
+from cellina import make_neighbor_perturbation
+
+make_neighbor_perturbation(adata, {"VEGFA": 2.0, "MYC": -1.5}, add_shift=True)  # values are logFCs
+expr_cf = model.get_perturbed_expression(adata)
+```
+
+*CellinaGraph* — $T_g(x_{u,g}) = x_{u,g} \cdot e^{\delta_g}$ applied to raw counts (`add_shift=False`); store perturbed counts as a layer and let the GCN aggregate them on the fly at inference:
+
+```python
+from cellina import make_perturbed_expression
+
+make_perturbed_expression(adata, {"VEGFA": 2.0, "MYC": -1.5}, layer_key="counts_cf", add_shift=False)  # values are logFCs
+expr_cf = gcn_model.get_perturbed_expression(adata, cf_layer="counts_cf")
+```
+
+Both perturbation types also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly. See `demo.ipynb` for a full worked example.
+
 ## Repository contents
 
 ```
