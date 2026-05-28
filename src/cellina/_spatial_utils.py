@@ -361,6 +361,9 @@ def make_neighbor_perturbation(
         base=base, add_shift=add_shift, renormalize=renormalize,
     )
 
+    # Convert to csr matrix
+    adata.layers[layer_key] = adata.layers[layer_key].tocsr()
+
     compute_spatial_features(
         adata,
         connectivity_key=connectivity_key,
