@@ -356,13 +356,11 @@ def make_neighbor_perturbation(
                 f"adata.obs['{groupby}']: {unknown}"
             )
 
-    adata.layers[layer_key] = _make_perturbed_expression(
+    perturbed_expr = _make_perturbed_expression(
         adata, perturbations=perturbations, groupby=groupby,
         base=base, add_shift=add_shift, renormalize=renormalize,
     )
-
-    # Convert to csr matrix
-    adata.layers[layer_key] = adata.layers[layer_key].tocsr()
+    adata.layers[layer_key] = perturbed_expr.tocsr()
 
     compute_spatial_features(
         adata,
