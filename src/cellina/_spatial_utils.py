@@ -206,7 +206,7 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False, pseudocount=False):
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False):
     n_vars = len(var_idx)
     if renormalize:
         row_sums_before = np.asarray(X.sum(axis=1)).ravel()
@@ -225,15 +225,15 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, bas
                 if gene in var_idx:
                     transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
 
-    if add_shift:
+    if add_shift: # NOTE: for log1p data + logFC shift
         X_arr = X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)
         X = np.clip(X_arr + transform, 0, None)
-    elif pseudocount:
-        # +1 pseudocount so zero-expressed genes can be activated by a positive logFC
-        X_arr = (X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)) + 1
+    else: # NOTE: for counts and exp on logFC (see above)
+        X_arr = np.asarray(X.toarray() if issparse(X) else X, dtype=np.float32)
+        # NOTE: not exactly the original unperturbed counts, but close enough and avoids zeroing out genes that are multiplied by zero
+        X_arr += 1.0
         X = X_arr * transform
-    else:
-        X = X.multiply(transform) if issparse(X) else X * transform
+        X = X - 1.0
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()
@@ -323,7 +323,7 @@ def make_neighbor_perturbation(
     obsm_key_out: str = "spatial_x_cf",
     layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = True,
+    add_shift: bool = False,
     renormalize: bool = True,
 ) -> None:
     """
@@ -506,7 +506,7 @@ def make_perturbed_expression(
     groupby: Optional[str] = None,
     layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = True,
+    add_shift: bool = False,
     renormalize: bool = True,
     inplace: bool = True,
 ):
@@ -586,7 +586,7 @@ def make_perturbed_expression(
         X_cf = _node_perturbation(
             X, var_idx=var_idx, perturbations=perturbations,
             groupby=groupby, labels=labels, base=base,
-            add_shift=add_shift, renormalize=renormalize, pseudocount=True,
+            add_shift=add_shift, renormalize=renormalize,
         )
 
     if add_shift:
