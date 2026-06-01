@@ -218,7 +218,9 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, bas
     if add_shift:
         X = np.asarray(X + transform)
     else:
-        X = X.multiply(transform) if issparse(X) else X * transform
+        # +1 pseudocount so zero-expressed genes can be activated by positive logFC
+        X_arr = (X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)) + 1
+        X = X_arr * transform
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()
