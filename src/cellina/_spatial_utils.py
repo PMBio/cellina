@@ -362,7 +362,11 @@ def make_neighbor_perturbation(
         adata, perturbations=perturbations, groupby=groupby,
         base=base, add_shift=add_shift, renormalize=renormalize,
     )
-    adata.layers[layer_key] = perturbed_expr.tocsr()
+    # If numpy.ndarray then skip csr conversion
+    if isinstance(perturbed_expr, np.ndarray):
+        adata.layers[layer_key] = perturbed_expr
+    else:
+        adata.layers[layer_key] = perturbed_expr.tocsr()
 
     compute_spatial_features(
         adata,
