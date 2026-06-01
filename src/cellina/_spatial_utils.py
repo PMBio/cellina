@@ -206,40 +206,47 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False):
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
+                       base=np.e, add_shift=False, renormalize=False):
     n_vars = len(var_idx)
+    neutral = 0.0 if add_shift else 1.0
+
+    def _encode(logfc):
+        return logfc if add_shift else base ** logfc
+
     if renormalize:
         row_sums_before = np.asarray(X.sum(axis=1)).ravel()
 
-    neutral = 0.0 if add_shift else 1.0
+    # Build the per-gene (optionally per-cell-type) transform
     if groupby is None:
         transform = np.full(n_vars, neutral, dtype=np.float32)
         for gene, logfc in perturbations.items():
             if gene in var_idx:
-                transform[var_idx[gene]] = logfc if add_shift else base ** logfc
+                transform[var_idx[gene]] = _encode(logfc)
     else:
         transform = np.full((X.shape[0], n_vars), neutral, dtype=np.float32)
         for ct, logfc_series in perturbations.items():
             ct_mask = labels == ct
             for gene, logfc in logfc_series.items():
                 if gene in var_idx:
-                    transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
+                    transform[ct_mask, var_idx[gene]] = _encode(logfc)
 
-    if add_shift: # NOTE: for log1p data + logFC shift
-        X_arr = X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)
-        X = np.clip(X_arr + transform, 0, None)
-    else: # NOTE: for counts and exp on logFC (see above)
-        X_arr = np.asarray(X.toarray() if issparse(X) else X, dtype=np.float32)
-        # NOTE: not exactly the original unperturbed counts, but close enough and avoids zeroing out genes that are multiplied by zero
-        X_arr += 1.0
-        X = X_arr * transform
-        X = X - 1.0
+    # Densify once
+    X = np.asarray(X.toarray() if issparse(X) else X, dtype=np.float32)
+
+    if add_shift:  # log1p data + logFC shift
+        X = X + transform
+    else:          # counts; exp(logFC) applied multiplicatively
+        # +1 / -1 avoids zeroing out genes multiplied by zero
+        X = (X + 1.0) * transform - 1.0
+    X = np.clip(X, 0, None)
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()
         scale_rows = np.where(row_sums_after == 0, 1.0, row_sums_before / row_sums_after)
-        X = X.multiply(scale_rows[:, np.newaxis]) if issparse(X) else X * scale_rows[:, np.newaxis]
-    return X
+        X = X * scale_rows[:, np.newaxis]
+
+    return csr_matrix(X)
 
 
 def _make_perturbed_expression(

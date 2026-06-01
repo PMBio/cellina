@@ -585,6 +585,7 @@ def test_make_perturbed_expression():
     expected = (X + 1).copy()
     expected[:, 0] *= np.e ** 1.5
     expected[:, 2] *= np.e ** -0.5
+    expected -= 1.0
     np.testing.assert_allclose(np.asarray(adata.layers["cf"].toarray()), expected, rtol=1e-6)
 
     # additive shift (no renormalize so expected values are exact)
