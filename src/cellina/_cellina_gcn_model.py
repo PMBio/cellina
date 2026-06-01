@@ -166,7 +166,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int,
         batch_size: int = 128,
         seed: int = 0,
     ):
@@ -183,20 +183,21 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         filtered_edges = edge_index[:, keep_mask]
 
         rng = np.random.default_rng(seed)
-        n_seeds = len(indices)
         neighbour_indices = np.asarray(neighbour_indices)
 
-        if n_neighbors_per_seed is None or n_neighbors_per_seed >= len(neighbour_indices):
-            cf_src = np.repeat(indices, len(neighbour_indices))
-            cf_dst = np.tile(neighbour_indices, n_seeds)
-        else:
-            cf_src_parts, cf_dst_parts = [], []
-            for s in indices:
-                chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
-                cf_src_parts.append(np.full(n_neighbors_per_seed, s))
-                cf_dst_parts.append(chosen)
-            cf_src = np.concatenate(cf_src_parts)
-            cf_dst = np.concatenate(cf_dst_parts)
+        if n_neighbors_per_seed >= len(neighbour_indices):
+            raise ValueError(
+                f"n_neighbors_per_seed ({n_neighbors_per_seed}) must be less than "
+                f"len(neighbour_indices) ({len(neighbour_indices)})"
+            )
+
+        cf_src_parts, cf_dst_parts = [], []
+        for s in indices:
+            chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
+            cf_src_parts.append(np.full(n_neighbors_per_seed, s))
+            cf_dst_parts.append(chosen)
+        cf_src = np.concatenate(cf_src_parts)
+        cf_dst = np.concatenate(cf_dst_parts)
 
         cf_edges = np.stack([
             np.concatenate([cf_src, cf_dst]),
@@ -231,7 +232,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int = 50,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "s",
@@ -247,7 +248,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         neighbour_indices
             Donor neighbourhood pool indices.
         n_neighbors_per_seed
-            Donors per seed (None = all).
+            Donors per seed. Raises ValueError if >= len(neighbour_indices).
         give_mean
             Return posterior mean rather than a sample.
         batch_size
@@ -293,7 +294,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int = 50,
         batch_size: Optional[int] = None,
         seed: int = 0,
         library_size: Union[float, str] = "latent",
