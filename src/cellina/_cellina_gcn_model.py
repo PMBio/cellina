@@ -105,6 +105,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             'num_neighbors': self._num_neighbors,
             'x_spatial_layer': x_spatial_layer,
         }
+        # Lazily-built, reused across inference calls so the spatial graph / sparse X
+        # store is constructed once instead of per call (avoids loop RAM creep).
+        self._cached_splitter = None
 
         library_log_means, library_log_vars = _init_library_size(
             self.adata_manager, self.summary_stats["n_batch"]
@@ -140,8 +143,25 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self.init_params_ = self._get_init_params(locals())
         logger.info(f"The CellinaGCN model has been initialized{adv_str}{edge_str}")
 
+    def _get_cached_splitter(self, batch_size):
+        """Build (once) and reuse the splitter for the model's own adata.
+
+        The splitter holds the spatial graph and a sparse-resident X store; rebuilding it
+        per inference call is what made host RAM climb across perturbation loops. The
+        per-call ``batch_size`` is supplied to ``create_inference_loader``, so a stale
+        cached ``batch_size`` is harmless.
+        """
+        if self._cached_splitter is None:
+            self._cached_splitter = GraphJointDataSplitter(
+                self.adata_manager,
+                num_neighbors=self._num_neighbors,
+                batch_size=batch_size,
+                x_spatial_layer=self._x_spatial_layer,
+            )
+        return self._cached_splitter
+
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
-                          data_splitter_kwargs=None, x_spatial_layer=None):
+                          x_spatial_layer=None):
         adata = self._validate_anndata(adata) if adata is not None else self.adata
 
         if batch_size is None:
@@ -150,16 +170,20 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             indices = np.arange(adata.n_obs)
 
         spatial_layer = x_spatial_layer if x_spatial_layer is not None else self._x_spatial_layer
-        splitter = GraphJointDataSplitter(
-            self.adata_manager,
-            num_neighbors=self._num_neighbors,
-            batch_size=batch_size,
-            x_spatial_layer=spatial_layer,
+        splitter = self._get_cached_splitter(batch_size)
+
+        # Perturbation cf_layer: reuse the cached graph + base X store, swapping only the
+        # spatial feature store instead of rebuilding the whole splitter.
+        override = (
+            splitter.load_spatial_store(spatial_layer)
+            if spatial_layer != self._x_spatial_layer
+            else None
         )
         return splitter.create_inference_loader(
             indices=indices,
             batch_size=batch_size,
             shuffle=shuffle,
+            x_spatial_override=override,
         )
 
     def _make_counterfactual_loader(
@@ -170,11 +194,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         batch_size: int = 128,
         seed: int = 0,
     ):
-        splitter = GraphJointDataSplitter(
-            self.adata_manager,
-            num_neighbors=self._num_neighbors,
-            batch_size=batch_size,
-        )
+        # Reuse the cached graph + sparse X store; only the edges are rewired below.
+        splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
         edge_index = pyg_data.edge_index.numpy()
 
@@ -207,8 +228,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         new_edge_index = np.concatenate([filtered_edges, cf_edges], axis=1)
         new_edge_index = torch.tensor(new_edge_index, dtype=torch.long)
 
+        # Features are gathered lazily from the splitter's sparse store; only edges are
+        # rewired for the counterfactual, so no dense x is attached here.
         cf_data = Data(
-            x=pyg_data.x,
             edge_index=new_edge_index,
             batch_labels=pyg_data.batch_labels,
             labels=pyg_data.labels,
@@ -225,7 +247,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             drop_last=False,
             directed=False,
         )
-        return GraphBatchLoader(node_loader)
+        # Counterfactual latents use base X features over the rewired graph (no spatial
+        # layer), matching the original behaviour before splitter caching.
+        return GraphBatchLoader(node_loader, splitter._x_sparse, None)
 
     @torch.inference_mode()
     def get_counterfactual_latents(

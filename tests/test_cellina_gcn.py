@@ -35,6 +35,7 @@ def _add_spatial_connectivity(adata, max_neighbors=5):
 def adata_with_spatial():
     """Create synthetic AnnData with spatial connectivity."""
     adata = synthetic_iid()
+    adata.X = sp.csr_matrix(adata.X)
     _add_spatial_connectivity(adata)
     n_labels = 3
     adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
@@ -606,7 +607,7 @@ def test_make_perturbed_expression():
 
 def test_perturbed_latents(trained_model):
     model, adata = trained_model
-    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    adata.layers["cf_zero"] = sp.csr_matrix(np.zeros(adata.shape, dtype=np.float32))
     z_base = model.get_latent_representation(latent_key="z", give_mean=True)
     s_base = model.get_latent_representation(latent_key="s", give_mean=True)
     z_cf = model.get_perturbed_latents(cf_layer="cf_zero", latent_key="z", give_mean=True)
@@ -617,7 +618,7 @@ def test_perturbed_latents(trained_model):
 
 def test_perturbed_expression(trained_model):
     model, adata = trained_model
-    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    adata.layers["cf_zero"] = sp.csr_matrix(np.zeros(adata.shape, dtype=np.float32))
     expr_base = model.get_normalized_expression(library_size=1e4)
     expr_cf = model.get_perturbed_expression(cf_layer="cf_zero", library_size=1e4)
     assert expr_cf.shape == adata.shape

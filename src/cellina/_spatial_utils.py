@@ -464,7 +464,6 @@ def make_counterfactual_adata(
     # precomputed=False: rewire connectivity graph, recompute spatial features
     indices_basal = np.asarray(indices_basal)
     indices_counterfactual = np.asarray(indices_counterfactual)
-    n_basal = len(indices_basal)
     n_cf = len(indices_counterfactual)
     rng = np.random.default_rng(random_state)
 
@@ -476,16 +475,17 @@ def make_counterfactual_adata(
 
     # Build counterfactual edges: seed <-> counterfactual pool
     if n_neighbours is None or n_neighbours >= n_cf:
-        cf_src = np.repeat(indices_basal, n_cf)
-        cf_dst = np.tile(indices_counterfactual, n_basal)
-    else:
-        cf_src_parts, cf_dst_parts = [], []
-        for s in indices_basal:
-            chosen = rng.choice(indices_counterfactual, size=n_neighbours, replace=False)
-            cf_src_parts.append(np.full(n_neighbours, s, dtype=indices_basal.dtype))
-            cf_dst_parts.append(chosen)
-        cf_src = np.concatenate(cf_src_parts)
-        cf_dst = np.concatenate(cf_dst_parts)
+        raise ValueError(
+            f"n_neighbours must be a finite value < n_cf ({n_cf}); got {n_neighbours}. "
+            f"Connecting every basal cell to the full counterfactual pool is not supported."
+        )
+    cf_src_parts, cf_dst_parts = [], []
+    for s in indices_basal:
+        chosen = rng.choice(indices_counterfactual, size=n_neighbours, replace=False)
+        cf_src_parts.append(np.full(n_neighbours, s, dtype=indices_basal.dtype))
+        cf_dst_parts.append(chosen)
+    cf_src = np.concatenate(cf_src_parts)
+    cf_dst = np.concatenate(cf_dst_parts)
 
     # Make bidirectional and merge with filtered original edges
     cf_src_bi = np.concatenate([cf_src, cf_dst])
