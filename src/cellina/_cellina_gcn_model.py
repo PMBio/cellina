@@ -1,4 +1,5 @@
 import logging
+import warnings
 from typing import List, Optional, Union
 
 import numpy as np
@@ -58,9 +59,10 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     supcon_temperature
         SupCon temperature.
     num_neighbors
-        Neighbors sampled per GCN layer; its length is the number of sampled hops and must
-        equal ``n_layers``. A length-1 list is broadcast to ``n_layers``. Default: ``None``
-        -> ``[-1] * n_layers`` (all neighbors at every hop).
+        Neighbors sampled per GCN layer; its length is the number of sampled hops and should
+        equal ``n_layers``. Default: ``None`` -> ``[-1] * n_layers`` (all neighbors at every
+        hop). Any length other than ``n_layers`` (including length 1) emits a ``UserWarning``
+        and is used as-is, sampling that many hops.
     x_spatial_layer
         Optional ``adata.layers`` key for alternative spatial features.
     use_observed_lib_size
@@ -669,23 +671,22 @@ def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) ->
     """Resolve ``num_neighbors`` to one fan-out per GCN layer.
 
     ``NeighborLoader`` derives the number of sampled hops from ``len(num_neighbors)``, so it
-    must match the GCN's message-passing depth (``n_layers``). A shorter list silently
-    truncates the receptive field. Contract:
+    should match the GCN's message-passing depth (``n_layers``); a mismatched length truncates
+    or pads the receptive field. Contract:
 
-    - ``None``           -> ``[-1] * n_layers`` (all neighbours at every hop)
-    - length 1           -> broadcast to ``n_layers``
-    - length ``n_layers``-> used as-is
-    - any other length   -> ``ValueError``
+    - ``None``            -> ``[-1] * n_layers`` (all neighbours at every hop)
+    - length ``n_layers`` -> used as-is
+    - any other length    -> ``UserWarning``
     """
     if num_neighbors is None:
         return [-1] * n_layers
     num_neighbors = list(num_neighbors)
-    if len(num_neighbors) == 1:
-        return num_neighbors * n_layers
     if len(num_neighbors) != n_layers:
-        raise ValueError(
-            f"len(num_neighbors)={len(num_neighbors)} must equal n_layers={n_layers} "
-            f"(the GCN's hop depth), or be length 1 to broadcast. Got {num_neighbors}."
+        warnings.warn(
+            f"len(num_neighbors)={len(num_neighbors)} != n_layers={n_layers}; NeighborLoader "
+            f"samples len(num_neighbors) hops differing from the GCN depth."
+            f"Pass a length-{n_layers} list to silence. Got {num_neighbors}.",
+            UserWarning,
         )
     return num_neighbors
 

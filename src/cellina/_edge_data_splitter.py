@@ -71,7 +71,8 @@ class GraphJointDataSplitter(DataSplitter):
     adata_manager
         AnnData manager.
     num_neighbors
-        Number of neighbors to sample per node per layer. Default: [-1] (all neighbors).
+        Fan-out sampled per GCN hop; its length should equal the model's ``n_layers``.
+        ``CellinaGCN`` passes a resolved list (see ``_resolve_num_neighbors``). 
     x_spatial_layer
         Optional key in ``adata.layers`` for alternative spatial features.
     **kwargs
@@ -87,7 +88,7 @@ class GraphJointDataSplitter(DataSplitter):
     ):
         super().__init__(adata_manager, **kwargs)
 
-        self.num_neighbors = num_neighbors or [-1]
+        self.num_neighbors = num_neighbors
         self.batch_size = kwargs.get('batch_size', 128)
         self.x_spatial_layer = x_spatial_layer
 

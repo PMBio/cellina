@@ -65,6 +65,39 @@ def test_cellina_model(adata_with_spatial):
     print(model)
 
 
+def test_num_neighbors_resolution(adata_with_spatial):
+    """num_neighbors contract: None -> [-1]*n_layers; mismatched length warns and is used as-is."""
+    import warnings
+
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+
+    # Default: None -> [-1] * n_layers, no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        model_default = CellinaGCN(adata_with_spatial, n_latent=5, n_layers=3)
+    assert model_default._num_neighbors == [-1, -1, -1]
+
+    # Length 1 != n_layers -> warns, used as-is (no broadcast).
+    with pytest.warns(UserWarning):
+        model_short = CellinaGCN(adata_with_spatial, n_latent=5, n_layers=3, num_neighbors=[-1])
+    assert model_short._num_neighbors == [-1]
+
+    # Length == n_layers -> no warning, trains.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        model_full = CellinaGCN(
+            adata_with_spatial, n_latent=5, n_layers=3, num_neighbors=[-1, -1, -1]
+        )
+    assert model_full._num_neighbors == [-1, -1, -1]
+    model_full.train(max_epochs=1, train_size=0.5)
+
+
 def test_cellina_s_encoder_architecture(adata_with_spatial):
     """Test that s_encoder is a GCN (GraphEncoder)."""
     n_latent = 5
