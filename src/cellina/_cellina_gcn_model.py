@@ -26,7 +26,6 @@ from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
 
-
 class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
     Cellina model with dual encoders for counts (MLP) and spatial context (GCN).
@@ -59,7 +58,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     supcon_temperature
         SupCon temperature.
     num_neighbors
-        Neighbors per GCN layer. Default: ``[-1]`` (all).
+        Neighbors sampled per GCN layer; its length is the number of sampled hops and must
+        equal ``n_layers``. A length-1 list is broadcast to ``n_layers``. Default: ``None``
+        -> ``[-1] * n_layers`` (all neighbors at every hop).
     x_spatial_layer
         Optional ``adata.layers`` key for alternative spatial features.
     use_observed_lib_size
@@ -99,12 +100,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         super().__init__(adata)
 
         self._data_splitter_cls = GraphJointDataSplitter
-        self._num_neighbors = num_neighbors or [-1]
+        self.n_layers = n_layers
+        self._num_neighbors = _resolve_num_neighbors(num_neighbors, n_layers)
         self._x_spatial_layer = x_spatial_layer
-        self._data_splitter_kwargs = {
-            'num_neighbors': self._num_neighbors,
-            'x_spatial_layer': x_spatial_layer,
-        }
         # Lazily-built, reused across inference calls so the spatial graph / sparse X
         # store is constructed once instead of per call (avoids loop RAM creep).
         self._cached_splitter = None
@@ -509,9 +507,19 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         self._training_plan_cls = CellinaAdversarialTrainingPlan
 
-        if datasplitter_kwargs is None:
-            datasplitter_kwargs = {}
-        datasplitter_kwargs = {**self._data_splitter_kwargs, **datasplitter_kwargs}
+        datasplitter_kwargs = dict(datasplitter_kwargs or {})
+        
+        forbidden = {"num_neighbors", "x_spatial_layer"} & datasplitter_kwargs.keys()
+        if forbidden:
+            raise ValueError(
+                f"{sorted(forbidden)} must be set on the CellinaGCN(...) constructor."
+            )
+
+        datasplitter_kwargs = {
+            **datasplitter_kwargs,
+            "num_neighbors": self._num_neighbors,
+            "x_spatial_layer": self._x_spatial_layer,
+        }
 
         super().train(
             max_epochs=max_epochs,
@@ -655,3 +663,29 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
         return self._compute_expression(scdl, library_size, return_numpy)
+
+
+def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) -> List[int]:
+    """Resolve ``num_neighbors`` to one fan-out per GCN layer.
+
+    ``NeighborLoader`` derives the number of sampled hops from ``len(num_neighbors)``, so it
+    must match the GCN's message-passing depth (``n_layers``). A shorter list silently
+    truncates the receptive field. Contract:
+
+    - ``None``           -> ``[-1] * n_layers`` (all neighbours at every hop)
+    - length 1           -> broadcast to ``n_layers``
+    - length ``n_layers``-> used as-is
+    - any other length   -> ``ValueError``
+    """
+    if num_neighbors is None:
+        return [-1] * n_layers
+    num_neighbors = list(num_neighbors)
+    if len(num_neighbors) == 1:
+        return num_neighbors * n_layers
+    if len(num_neighbors) != n_layers:
+        raise ValueError(
+            f"len(num_neighbors)={len(num_neighbors)} must equal n_layers={n_layers} "
+            f"(the GCN's hop depth), or be length 1 to broadcast. Got {num_neighbors}."
+        )
+    return num_neighbors
+

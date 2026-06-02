@@ -72,6 +72,8 @@ def _spatial_neighbors_core(adata: AnnData,
         dist.setdiag(0)
     if cutoff is not None:
         dist.data = dist.data * (dist.data > cutoff)
+    # Drop the explicit zeros just introduced
+    dist.eliminate_zeros()
     if standardize:
         dist = normalize(dist, axis=1, norm='l1')
 
