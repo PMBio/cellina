@@ -464,6 +464,98 @@ def test_supcon_loss():
     ).item() == 0.0
 
 
+def _supcon_loss_reference(qsm, neighbor_means, edge_index, domains_all,
+                           batch_size, temperature):
+    """Original per-anchor loop, kept as the parity reference for the vectorized form."""
+    batch_size = int(batch_size)
+    s_all = torch.cat([qsm, neighbor_means], dim=0)
+    s_all = torch.nn.functional.normalize(s_all, p=2, dim=1)
+
+    src, dst = edge_index[0], edge_index[1]
+    loss_total = torch.tensor(0.0, device=qsm.device)
+    n_valid = 0
+    for i in range(batch_size):
+        neighbor_idx = dst[src == i]
+        if len(neighbor_idx) == 0:
+            continue
+        pos_idx = neighbor_idx
+        neighbor_set = torch.zeros(s_all.size(0), dtype=torch.bool, device=qsm.device)
+        neighbor_set[neighbor_idx] = True
+        neg_mask = (domains_all != domains_all[i]) & ~neighbor_set
+        neg_mask[i] = False
+        if neg_mask.sum() == 0:
+            continue
+        sim_i = (s_all[i].unsqueeze(0) * s_all).sum(dim=-1) / temperature
+        sim_i[i] = float('-inf')
+        denom_mask = neighbor_set | neg_mask
+        denom_mask[i] = False
+        log_denom = torch.logsumexp(sim_i[denom_mask], dim=0)
+        log_pos = sim_i[pos_idx] - log_denom
+        loss_total = loss_total + (-log_pos.mean())
+        n_valid += 1
+    if n_valid == 0:
+        return torch.tensor(0.0, device=qsm.device)
+    return loss_total / n_valid
+
+
+def test_supcon_loss_vectorized_parity():
+    """Vectorized _compute_supcon_loss matches the reference loop in value and gradient."""
+    module = _supcon_module()
+    n_latent = 6
+    temperature = 0.2
+
+    rng = np.random.default_rng(0)
+    torch.manual_seed(0)
+
+    # A few randomized subgraphs, plus the two degenerate cases (no negatives, no edges).
+    cases = []
+    for batch_size, n_nbr, n_domains in [(8, 12, 3), (5, 20, 2), (16, 30, 4), (3, 0, 2)]:
+        n_all = batch_size + n_nbr
+        # random edges from seed anchors to any node (no self-loops)
+        n_edges = max(0, n_nbr)
+        if n_edges > 0:
+            edge_src = rng.integers(0, batch_size, size=n_edges)
+            edge_dst = rng.integers(0, n_all, size=n_edges)
+            # No self-loops and unique (src, dst) pairs — the real spatial graph is a
+            # simple graph; the boolean-mask vectorization assumes edge uniqueness.
+            keep = edge_src != edge_dst
+            pairs = np.unique(np.stack([edge_src[keep], edge_dst[keep]], axis=1), axis=0)
+            ei = torch.from_numpy(pairs.T).long()
+        else:
+            ei = torch.zeros(2, 0, dtype=torch.long)
+        domains = torch.from_numpy(rng.integers(0, n_domains, size=n_all)).long()
+        cases.append((batch_size, n_nbr, ei, domains))
+    # explicit all-same-domain case (no negatives anywhere → loss 0)
+    cases.append((4, 4, torch.stack([torch.arange(4), torch.arange(4, 8)]),
+                  torch.zeros(8, dtype=torch.long)))
+
+    for batch_size, n_nbr, ei, domains in cases:
+        base_qsm = torch.randn(batch_size, n_latent)
+        base_nbr = torch.randn(n_nbr, n_latent)
+
+        qsm_v = base_qsm.clone().requires_grad_(True)
+        nbr_v = base_nbr.clone().requires_grad_(True)
+        out_v = module._compute_supcon_loss(
+            qsm=qsm_v, neighbor_means=nbr_v, edge_index=ei,
+            domains_all=domains, batch_size=batch_size, temperature=temperature,
+        )
+
+        qsm_r = base_qsm.clone().requires_grad_(True)
+        nbr_r = base_nbr.clone().requires_grad_(True)
+        out_r = _supcon_loss_reference(
+            qsm=qsm_r, neighbor_means=nbr_r, edge_index=ei,
+            domains_all=domains, batch_size=batch_size, temperature=temperature,
+        )
+
+        assert torch.allclose(out_v, out_r, atol=1e-5), (out_v.item(), out_r.item())
+
+        if out_r.requires_grad and out_r.item() != 0.0:
+            out_v.backward()
+            out_r.backward()
+            assert torch.allclose(qsm_v.grad, qsm_r.grad, atol=1e-5)
+            assert torch.allclose(nbr_v.grad, nbr_r.grad, atol=1e-5)
+
+
 def test_supcon_model(adata_with_spatial):
     """spatial_loss_raw > 0 when link_prediction_weight > 0 and domains differ (supcon)."""
     CellinaGCN.setup_anndata(
