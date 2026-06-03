@@ -239,7 +239,7 @@ class CellinaGCNModule(BaseModuleClass):
 
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        x_spatial_ = x_spatial if x_spatial is not None else x_
+        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
 
         if self.condition_on_intrinsic:
             spatial_input = torch.cat([x_spatial_, z.detach()], dim=-1)

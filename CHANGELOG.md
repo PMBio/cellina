@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [0.99.3] — 2026-06-01 - Pre-prerelease
+## [0.99.3] — 2026-06-02 - Pre-prerelease
 - Vectorized SupCon loss for improved training speed; updated tests accordingly.
-- Hops now correctly handled by default w.r.t. n_layers; will raise a warning if a mismatched num_neighbors list is passed. From tests, this has a negligable effect if batch_size or the number of neighbors is large enough.
+- Hops and layer mismatches will raise a warning. From tests, this has a negligable effect if batch_size or the number of neighbors is large enough.
+- Added log1p for spatial_x in case not normalized.
 
 ## [0.99.2] — 2026-06-01
 
