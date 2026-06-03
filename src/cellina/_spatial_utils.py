@@ -72,6 +72,8 @@ def _spatial_neighbors_core(adata: AnnData,
         dist.setdiag(0)
     if cutoff is not None:
         dist.data = dist.data * (dist.data > cutoff)
+    # Drop the explicit zeros just introduced
+    dist.eliminate_zeros()
     if standardize:
         dist = normalize(dist, axis=1, norm='l1')
 
@@ -206,40 +208,47 @@ def spatial_neighbors(adata: AnnData,
     else:
         return dist
 
-def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None, base=np.e, add_shift=False, renormalize=False, pseudocount=False):
+def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
+                       base=np.e, add_shift=False, renormalize=False):
     n_vars = len(var_idx)
+    neutral = 0.0 if add_shift else 1.0
+
+    def _encode(logfc):
+        return logfc if add_shift else base ** logfc
+
     if renormalize:
         row_sums_before = np.asarray(X.sum(axis=1)).ravel()
 
-    neutral = 0.0 if add_shift else 1.0
+    # Build the per-gene (optionally per-cell-type) transform
     if groupby is None:
         transform = np.full(n_vars, neutral, dtype=np.float32)
         for gene, logfc in perturbations.items():
             if gene in var_idx:
-                transform[var_idx[gene]] = logfc if add_shift else base ** logfc
+                transform[var_idx[gene]] = _encode(logfc)
     else:
         transform = np.full((X.shape[0], n_vars), neutral, dtype=np.float32)
         for ct, logfc_series in perturbations.items():
             ct_mask = labels == ct
             for gene, logfc in logfc_series.items():
                 if gene in var_idx:
-                    transform[ct_mask, var_idx[gene]] = logfc if add_shift else base ** logfc
+                    transform[ct_mask, var_idx[gene]] = _encode(logfc)
 
-    if add_shift:
-        X_arr = X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)
-        X = np.clip(X_arr + transform, 0, None)
-    elif pseudocount:
-        # +1 pseudocount so zero-expressed genes can be activated by a positive logFC
-        X_arr = (X.toarray() if issparse(X) else np.asarray(X, dtype=np.float32)) + 1
-        X = X_arr * transform
-    else:
-        X = X.multiply(transform) if issparse(X) else X * transform
+    # Densify once
+    X = np.asarray(X.toarray() if issparse(X) else X, dtype=np.float32)
+
+    if add_shift:  # log1p data + logFC shift
+        X = X + transform
+    else:          # counts; exp(logFC) applied multiplicatively
+        # +1 / -1 avoids zeroing out genes multiplied by zero
+        X = (X + 1.0) * transform - 1.0
+    X = np.clip(X, 0, None)
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()
         scale_rows = np.where(row_sums_after == 0, 1.0, row_sums_before / row_sums_after)
-        X = X.multiply(scale_rows[:, np.newaxis]) if issparse(X) else X * scale_rows[:, np.newaxis]
-    return X
+        X = X * scale_rows[:, np.newaxis]
+
+    return csr_matrix(X)
 
 
 def _make_perturbed_expression(
@@ -323,7 +332,7 @@ def make_neighbor_perturbation(
     obsm_key_out: str = "spatial_x_cf",
     layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = True,
+    add_shift: bool = False,
     renormalize: bool = True,
 ) -> None:
     """
@@ -457,7 +466,6 @@ def make_counterfactual_adata(
     # precomputed=False: rewire connectivity graph, recompute spatial features
     indices_basal = np.asarray(indices_basal)
     indices_counterfactual = np.asarray(indices_counterfactual)
-    n_basal = len(indices_basal)
     n_cf = len(indices_counterfactual)
     rng = np.random.default_rng(random_state)
 
@@ -469,16 +477,17 @@ def make_counterfactual_adata(
 
     # Build counterfactual edges: seed <-> counterfactual pool
     if n_neighbours is None or n_neighbours >= n_cf:
-        cf_src = np.repeat(indices_basal, n_cf)
-        cf_dst = np.tile(indices_counterfactual, n_basal)
-    else:
-        cf_src_parts, cf_dst_parts = [], []
-        for s in indices_basal:
-            chosen = rng.choice(indices_counterfactual, size=n_neighbours, replace=False)
-            cf_src_parts.append(np.full(n_neighbours, s, dtype=indices_basal.dtype))
-            cf_dst_parts.append(chosen)
-        cf_src = np.concatenate(cf_src_parts)
-        cf_dst = np.concatenate(cf_dst_parts)
+        raise ValueError(
+            f"n_neighbours must be a finite value < n_cf ({n_cf}); got {n_neighbours}. "
+            f"Connecting every basal cell to the full counterfactual pool is not supported."
+        )
+    cf_src_parts, cf_dst_parts = [], []
+    for s in indices_basal:
+        chosen = rng.choice(indices_counterfactual, size=n_neighbours, replace=False)
+        cf_src_parts.append(np.full(n_neighbours, s, dtype=indices_basal.dtype))
+        cf_dst_parts.append(chosen)
+    cf_src = np.concatenate(cf_src_parts)
+    cf_dst = np.concatenate(cf_dst_parts)
 
     # Make bidirectional and merge with filtered original edges
     cf_src_bi = np.concatenate([cf_src, cf_dst])
@@ -506,7 +515,7 @@ def make_perturbed_expression(
     groupby: Optional[str] = None,
     layer_key: str = "counts_cf",
     base: float = np.e,
-    add_shift: bool = True,
+    add_shift: bool = False,
     renormalize: bool = True,
     inplace: bool = True,
 ):
@@ -586,7 +595,7 @@ def make_perturbed_expression(
         X_cf = _node_perturbation(
             X, var_idx=var_idx, perturbations=perturbations,
             groupby=groupby, labels=labels, base=base,
-            add_shift=add_shift, renormalize=renormalize, pseudocount=True,
+            add_shift=add_shift, renormalize=renormalize,
         )
 
     if add_shift:

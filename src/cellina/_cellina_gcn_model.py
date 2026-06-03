@@ -1,4 +1,5 @@
 import logging
+import warnings
 from typing import List, Optional, Union
 
 import numpy as np
@@ -25,7 +26,6 @@ from ._edge_data_splitter import GraphBatchLoader, GraphJointDataSplitter
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
-
 
 class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
@@ -59,7 +59,10 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     supcon_temperature
         SupCon temperature.
     num_neighbors
-        Neighbors per GCN layer. Default: ``[-1]`` (all).
+        Neighbors sampled per GCN layer; its length is the number of sampled hops and should
+        equal ``n_layers``. Default: ``None`` -> ``[-1] * n_layers`` (all neighbors at every
+        hop). Any length other than ``n_layers`` (including length 1) emits a ``UserWarning``
+        and is used as-is, sampling that many hops.
     x_spatial_layer
         Optional ``adata.layers`` key for alternative spatial features.
     use_observed_lib_size
@@ -99,12 +102,12 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         super().__init__(adata)
 
         self._data_splitter_cls = GraphJointDataSplitter
-        self._num_neighbors = num_neighbors or [-1]
+        self.n_layers = n_layers
+        self._num_neighbors = _resolve_num_neighbors(num_neighbors, n_layers)
         self._x_spatial_layer = x_spatial_layer
-        self._data_splitter_kwargs = {
-            'num_neighbors': self._num_neighbors,
-            'x_spatial_layer': x_spatial_layer,
-        }
+        # Lazily-built, reused across inference calls so the spatial graph / sparse X
+        # store is constructed once instead of per call (avoids loop RAM creep).
+        self._cached_splitter = None
 
         library_log_means, library_log_vars = _init_library_size(
             self.adata_manager, self.summary_stats["n_batch"]
@@ -140,8 +143,25 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self.init_params_ = self._get_init_params(locals())
         logger.info(f"The CellinaGCN model has been initialized{adv_str}{edge_str}")
 
+    def _get_cached_splitter(self, batch_size):
+        """Build (once) and reuse the splitter for the model's own adata.
+
+        The splitter holds the spatial graph and a sparse-resident X store; rebuilding it
+        per inference call is what made host RAM climb across perturbation loops. The
+        per-call ``batch_size`` is supplied to ``create_inference_loader``, so a stale
+        cached ``batch_size`` is harmless.
+        """
+        if self._cached_splitter is None:
+            self._cached_splitter = GraphJointDataSplitter(
+                self.adata_manager,
+                num_neighbors=self._num_neighbors,
+                batch_size=batch_size,
+                x_spatial_layer=self._x_spatial_layer,
+            )
+        return self._cached_splitter
+
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
-                          data_splitter_kwargs=None, x_spatial_layer=None):
+                          x_spatial_layer=None):
         adata = self._validate_anndata(adata) if adata is not None else self.adata
 
         if batch_size is None:
@@ -150,31 +170,32 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             indices = np.arange(adata.n_obs)
 
         spatial_layer = x_spatial_layer if x_spatial_layer is not None else self._x_spatial_layer
-        splitter = GraphJointDataSplitter(
-            self.adata_manager,
-            num_neighbors=self._num_neighbors,
-            batch_size=batch_size,
-            x_spatial_layer=spatial_layer,
+        splitter = self._get_cached_splitter(batch_size)
+
+        # Perturbation cf_layer: reuse the cached graph + base X store, swapping only the
+        # spatial feature store instead of rebuilding the whole splitter.
+        override = (
+            splitter.load_spatial_store(spatial_layer)
+            if spatial_layer != self._x_spatial_layer
+            else None
         )
         return splitter.create_inference_loader(
             indices=indices,
             batch_size=batch_size,
             shuffle=shuffle,
+            x_spatial_override=override,
         )
 
     def _make_counterfactual_loader(
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int,
         batch_size: int = 128,
         seed: int = 0,
     ):
-        splitter = GraphJointDataSplitter(
-            self.adata_manager,
-            num_neighbors=self._num_neighbors,
-            batch_size=batch_size,
-        )
+        # Reuse the cached graph + sparse X store; only the edges are rewired below.
+        splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
         edge_index = pyg_data.edge_index.numpy()
 
@@ -183,20 +204,21 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         filtered_edges = edge_index[:, keep_mask]
 
         rng = np.random.default_rng(seed)
-        n_seeds = len(indices)
         neighbour_indices = np.asarray(neighbour_indices)
 
-        if n_neighbors_per_seed is None or n_neighbors_per_seed >= len(neighbour_indices):
-            cf_src = np.repeat(indices, len(neighbour_indices))
-            cf_dst = np.tile(neighbour_indices, n_seeds)
-        else:
-            cf_src_parts, cf_dst_parts = [], []
-            for s in indices:
-                chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
-                cf_src_parts.append(np.full(n_neighbors_per_seed, s))
-                cf_dst_parts.append(chosen)
-            cf_src = np.concatenate(cf_src_parts)
-            cf_dst = np.concatenate(cf_dst_parts)
+        if n_neighbors_per_seed >= len(neighbour_indices):
+            raise ValueError(
+                f"n_neighbors_per_seed ({n_neighbors_per_seed}) must be less than "
+                f"len(neighbour_indices) ({len(neighbour_indices)})"
+            )
+
+        cf_src_parts, cf_dst_parts = [], []
+        for s in indices:
+            chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
+            cf_src_parts.append(np.full(n_neighbors_per_seed, s))
+            cf_dst_parts.append(chosen)
+        cf_src = np.concatenate(cf_src_parts)
+        cf_dst = np.concatenate(cf_dst_parts)
 
         cf_edges = np.stack([
             np.concatenate([cf_src, cf_dst]),
@@ -206,8 +228,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         new_edge_index = np.concatenate([filtered_edges, cf_edges], axis=1)
         new_edge_index = torch.tensor(new_edge_index, dtype=torch.long)
 
+        # Features are gathered lazily from the splitter's sparse store; only edges are
+        # rewired for the counterfactual, so no dense x is attached here.
         cf_data = Data(
-            x=pyg_data.x,
             edge_index=new_edge_index,
             batch_labels=pyg_data.batch_labels,
             labels=pyg_data.labels,
@@ -224,14 +247,16 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             drop_last=False,
             directed=False,
         )
-        return GraphBatchLoader(node_loader)
+        # Counterfactual latents use base X features over the rewired graph (no spatial
+        # layer), matching the original behaviour before splitter caching.
+        return GraphBatchLoader(node_loader, splitter._x_sparse, None)
 
     @torch.inference_mode()
     def get_counterfactual_latents(
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int = 20,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "s",
@@ -247,7 +272,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         neighbour_indices
             Donor neighbourhood pool indices.
         n_neighbors_per_seed
-            Donors per seed (None = all).
+            Donors per seed. Raises ValueError if >= len(neighbour_indices).
         give_mean
             Return posterior mean rather than a sample.
         batch_size
@@ -293,7 +318,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: Optional[int] = None,
+        n_neighbors_per_seed: int = 20,
         batch_size: Optional[int] = None,
         seed: int = 0,
         library_size: Union[float, str] = "latent",
@@ -484,9 +509,19 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         self._training_plan_cls = CellinaAdversarialTrainingPlan
 
-        if datasplitter_kwargs is None:
-            datasplitter_kwargs = {}
-        datasplitter_kwargs = {**self._data_splitter_kwargs, **datasplitter_kwargs}
+        datasplitter_kwargs = dict(datasplitter_kwargs or {})
+        
+        forbidden = {"num_neighbors", "x_spatial_layer"} & datasplitter_kwargs.keys()
+        if forbidden:
+            raise ValueError(
+                f"{sorted(forbidden)} must be set on the CellinaGCN(...) constructor."
+            )
+
+        datasplitter_kwargs = {
+            **datasplitter_kwargs,
+            "num_neighbors": self._num_neighbors,
+            "x_spatial_layer": self._x_spatial_layer,
+        }
 
         super().train(
             max_epochs=max_epochs,
@@ -630,3 +665,28 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
         return self._compute_expression(scdl, library_size, return_numpy)
+
+
+def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) -> List[int]:
+    """Resolve ``num_neighbors`` to one fan-out per GCN layer.
+
+    ``NeighborLoader`` derives the number of sampled hops from ``len(num_neighbors)``, so it
+    should match the GCN's message-passing depth (``n_layers``); a mismatched length truncates
+    or pads the receptive field. Contract:
+
+    - ``None``            -> ``[-1] * n_layers`` (all neighbours at every hop)
+    - length ``n_layers`` -> used as-is
+    - any other length    -> ``UserWarning``
+    """
+    if num_neighbors is None:
+        return [-1] * n_layers
+    num_neighbors = list(num_neighbors)
+    if len(num_neighbors) != n_layers:
+        warnings.warn(
+            f"len(num_neighbors)={len(num_neighbors)} != n_layers={n_layers}; NeighborLoader "
+            f"samples len(num_neighbors) hops differing from the GCN depth."
+            f"Pass a length-{n_layers} list to silence. Got {num_neighbors}.",
+            UserWarning,
+        )
+    return num_neighbors
+

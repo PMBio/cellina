@@ -1,10 +1,5 @@
 # Cellina
 
-[![Tests][badge-tests]][link-tests]
-
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/PMBio/cellina/test.yaml?branch=main
-[link-tests]: https://github.com/PMBio/cellina/actions/workflows/test.yml
-
 Cellina is a dual-encoder variational autoencoder for predicting how a cell's gene expression changes under altered spatial contexts — a class of queries we call *tissue graph counterfactuals*.
 
 In tissues, a cell's transcriptional state is shaped by its local neighborhood: the composition of nearby cells and the signals they emit. Existing perturbation methods typically treat cells as independent and apply perturbations uniformly. Cellina addresses this gap by explicitly separating a cell's **intrinsic state** (*z*, encoding cell identity) from its **spatial context** (*s*, encoding microenvironmental influence), then uses *s* as a conditioning input to render counterfactual predictions under two types of intervention:

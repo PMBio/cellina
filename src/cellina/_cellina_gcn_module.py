@@ -239,7 +239,7 @@ class CellinaGCNModule(BaseModuleClass):
 
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        x_spatial_ = x_spatial if x_spatial is not None else x_
+        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
 
         if self.condition_on_intrinsic:
             spatial_input = torch.cat([x_spatial_, z.detach()], dim=-1)
@@ -335,46 +335,45 @@ class CellinaGCNModule(BaseModuleClass):
         temperature: float,
     ) -> torch.Tensor:
         batch_size = int(batch_size)
-        s_all = torch.cat([qsm, neighbor_means], dim=0)
-        s_all = F.normalize(s_all, p=2, dim=1)
+        s_all = F.normalize(torch.cat([qsm, neighbor_means], dim=0), p=2, dim=1)
+        n_all = s_all.size(0)
+        device = qsm.device
 
+        # Anchors are the first `batch_size` rows of s_all; similarity is anchor-to-all.
+        S = (s_all[:batch_size] @ s_all.t()) / temperature              # [B, N]
+
+        # Positive mask from edges with src < batch_size (seed anchors only).
         src, dst = edge_index[0], edge_index[1]
+        keep = src < batch_size
+        pos_mask = torch.zeros(batch_size, n_all, dtype=torch.bool, device=device)
+        pos_mask[src[keep], dst[keep]] = True
 
-        loss_total = torch.tensor(0.0, device=qsm.device)
-        n_valid = 0
+        # Exclude self (diagonal block) — defensive; self-loops are already removed.
+        diag = torch.arange(batch_size, device=device)
+        pos_mask[diag, diag] = False
 
-        for i in range(batch_size):
-            edge_mask = src == i
-            neighbor_idx = dst[edge_mask]
-            if len(neighbor_idx) == 0:
-                continue
+        # Negatives: different domain, not a positive, not self.
+        dom_anchor = domains_all[:batch_size].view(-1, 1)              # [B, 1]
+        neg_mask = (domains_all.view(1, -1) != dom_anchor) & ~pos_mask  # [B, N]
+        neg_mask[diag, diag] = False
 
-            pos_idx = neighbor_idx
+        denom_mask = pos_mask | neg_mask                               # self already excluded
 
-            neighbor_set = torch.zeros(s_all.size(0), dtype=torch.bool, device=qsm.device)
-            neighbor_set[neighbor_idx] = True
+        pos_count = pos_mask.sum(dim=1)
+        neg_count = neg_mask.sum(dim=1)
+        valid = (pos_count > 0) & (neg_count > 0)
+        if not valid.any():
+            return torch.tensor(0.0, device=device)
 
-            neg_mask = (domains_all != domains_all[i]) & ~neighbor_set
-            neg_mask[i] = False
+        # Per-anchor loss = log_denom - mean_{p in pos}(sim[p]). Invalid rows may carry
+        # -inf/nan (empty denom or zero positives) but are dropped before the mean, so
+        # they never reach the value or the backward graph.
+        log_denom = torch.logsumexp(S.masked_fill(~denom_mask, float('-inf')), dim=1)  # [B]
+        pos_sum = (S * pos_mask).sum(dim=1)
+        safe_count = pos_count.clamp(min=1)                            # avoid 0/0 in dropped rows
+        per_anchor = log_denom - pos_sum / safe_count                  # [B]
 
-            if neg_mask.sum() == 0:
-                continue
-
-            sim_i = (s_all[i].unsqueeze(0) * s_all).sum(dim=-1) / temperature
-            sim_i[i] = float('-inf')
-
-            denom_mask = neighbor_set | neg_mask
-            denom_mask[i] = False
-
-            log_denom = torch.logsumexp(sim_i[denom_mask], dim=0)
-            log_pos   = sim_i[pos_idx] - log_denom
-
-            loss_total = loss_total + (-log_pos.mean())
-            n_valid += 1
-
-        if n_valid == 0:
-            return torch.tensor(0.0, device=qsm.device)
-        return loss_total / n_valid
+        return per_anchor[valid].mean()
 
     def loss(
         self,
