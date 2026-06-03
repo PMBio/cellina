@@ -35,6 +35,7 @@ def _add_spatial_connectivity(adata, max_neighbors=5):
 def adata_with_spatial():
     """Create synthetic AnnData with spatial connectivity."""
     adata = synthetic_iid()
+    adata.X = sp.csr_matrix(adata.X)
     _add_spatial_connectivity(adata)
     n_labels = 3
     adata.obs["cell_labels"] = np.random.randint(0, n_labels, size=adata.n_obs).astype(str)
@@ -62,6 +63,39 @@ def test_cellina_model(adata_with_spatial):
     model.history
 
     print(model)
+
+
+def test_num_neighbors_resolution(adata_with_spatial):
+    """num_neighbors contract: None -> [-1]*n_layers; mismatched length warns and is used as-is."""
+    import warnings
+
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+
+    # Default: None -> [-1] * n_layers, no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        model_default = CellinaGCN(adata_with_spatial, n_latent=5, n_layers=3)
+    assert model_default._num_neighbors == [-1, -1, -1]
+
+    # Length 1 != n_layers -> warns, used as-is (no broadcast).
+    with pytest.warns(UserWarning):
+        model_short = CellinaGCN(adata_with_spatial, n_latent=5, n_layers=3, num_neighbors=[-1])
+    assert model_short._num_neighbors == [-1]
+
+    # Length == n_layers -> no warning, trains.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        model_full = CellinaGCN(
+            adata_with_spatial, n_latent=5, n_layers=3, num_neighbors=[-1, -1, -1]
+        )
+    assert model_full._num_neighbors == [-1, -1, -1]
+    model_full.train(max_epochs=1, train_size=0.5)
 
 
 def test_cellina_s_encoder_architecture(adata_with_spatial):
@@ -463,6 +497,98 @@ def test_supcon_loss():
     ).item() == 0.0
 
 
+def _supcon_loss_reference(qsm, neighbor_means, edge_index, domains_all,
+                           batch_size, temperature):
+    """Original per-anchor loop, kept as the parity reference for the vectorized form."""
+    batch_size = int(batch_size)
+    s_all = torch.cat([qsm, neighbor_means], dim=0)
+    s_all = torch.nn.functional.normalize(s_all, p=2, dim=1)
+
+    src, dst = edge_index[0], edge_index[1]
+    loss_total = torch.tensor(0.0, device=qsm.device)
+    n_valid = 0
+    for i in range(batch_size):
+        neighbor_idx = dst[src == i]
+        if len(neighbor_idx) == 0:
+            continue
+        pos_idx = neighbor_idx
+        neighbor_set = torch.zeros(s_all.size(0), dtype=torch.bool, device=qsm.device)
+        neighbor_set[neighbor_idx] = True
+        neg_mask = (domains_all != domains_all[i]) & ~neighbor_set
+        neg_mask[i] = False
+        if neg_mask.sum() == 0:
+            continue
+        sim_i = (s_all[i].unsqueeze(0) * s_all).sum(dim=-1) / temperature
+        sim_i[i] = float('-inf')
+        denom_mask = neighbor_set | neg_mask
+        denom_mask[i] = False
+        log_denom = torch.logsumexp(sim_i[denom_mask], dim=0)
+        log_pos = sim_i[pos_idx] - log_denom
+        loss_total = loss_total + (-log_pos.mean())
+        n_valid += 1
+    if n_valid == 0:
+        return torch.tensor(0.0, device=qsm.device)
+    return loss_total / n_valid
+
+
+def test_supcon_loss_vectorized_parity():
+    """Vectorized _compute_supcon_loss matches the reference loop in value and gradient."""
+    module = _supcon_module()
+    n_latent = 6
+    temperature = 0.2
+
+    rng = np.random.default_rng(0)
+    torch.manual_seed(0)
+
+    # A few randomized subgraphs, plus the two degenerate cases (no negatives, no edges).
+    cases = []
+    for batch_size, n_nbr, n_domains in [(8, 12, 3), (5, 20, 2), (16, 30, 4), (3, 0, 2)]:
+        n_all = batch_size + n_nbr
+        # random edges from seed anchors to any node (no self-loops)
+        n_edges = max(0, n_nbr)
+        if n_edges > 0:
+            edge_src = rng.integers(0, batch_size, size=n_edges)
+            edge_dst = rng.integers(0, n_all, size=n_edges)
+            # No self-loops and unique (src, dst) pairs — the real spatial graph is a
+            # simple graph; the boolean-mask vectorization assumes edge uniqueness.
+            keep = edge_src != edge_dst
+            pairs = np.unique(np.stack([edge_src[keep], edge_dst[keep]], axis=1), axis=0)
+            ei = torch.from_numpy(pairs.T).long()
+        else:
+            ei = torch.zeros(2, 0, dtype=torch.long)
+        domains = torch.from_numpy(rng.integers(0, n_domains, size=n_all)).long()
+        cases.append((batch_size, n_nbr, ei, domains))
+    # explicit all-same-domain case (no negatives anywhere → loss 0)
+    cases.append((4, 4, torch.stack([torch.arange(4), torch.arange(4, 8)]),
+                  torch.zeros(8, dtype=torch.long)))
+
+    for batch_size, n_nbr, ei, domains in cases:
+        base_qsm = torch.randn(batch_size, n_latent)
+        base_nbr = torch.randn(n_nbr, n_latent)
+
+        qsm_v = base_qsm.clone().requires_grad_(True)
+        nbr_v = base_nbr.clone().requires_grad_(True)
+        out_v = module._compute_supcon_loss(
+            qsm=qsm_v, neighbor_means=nbr_v, edge_index=ei,
+            domains_all=domains, batch_size=batch_size, temperature=temperature,
+        )
+
+        qsm_r = base_qsm.clone().requires_grad_(True)
+        nbr_r = base_nbr.clone().requires_grad_(True)
+        out_r = _supcon_loss_reference(
+            qsm=qsm_r, neighbor_means=nbr_r, edge_index=ei,
+            domains_all=domains, batch_size=batch_size, temperature=temperature,
+        )
+
+        assert torch.allclose(out_v, out_r, atol=1e-5), (out_v.item(), out_r.item())
+
+        if out_r.requires_grad and out_r.item() != 0.0:
+            out_v.backward()
+            out_r.backward()
+            assert torch.allclose(qsm_v.grad, qsm_r.grad, atol=1e-5)
+            assert torch.allclose(nbr_v.grad, nbr_r.grad, atol=1e-5)
+
+
 def test_supcon_model(adata_with_spatial):
     """spatial_loss_raw > 0 when link_prediction_weight > 0 and domains differ (supcon)."""
     CellinaGCN.setup_anndata(
@@ -606,7 +732,7 @@ def test_make_perturbed_expression():
 
 def test_perturbed_latents(trained_model):
     model, adata = trained_model
-    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    adata.layers["cf_zero"] = sp.csr_matrix(np.zeros(adata.shape, dtype=np.float32))
     z_base = model.get_latent_representation(latent_key="z", give_mean=True)
     s_base = model.get_latent_representation(latent_key="s", give_mean=True)
     z_cf = model.get_perturbed_latents(cf_layer="cf_zero", latent_key="z", give_mean=True)
@@ -617,7 +743,7 @@ def test_perturbed_latents(trained_model):
 
 def test_perturbed_expression(trained_model):
     model, adata = trained_model
-    adata.layers["cf_zero"] = np.zeros(adata.shape, dtype=np.float32)
+    adata.layers["cf_zero"] = sp.csr_matrix(np.zeros(adata.shape, dtype=np.float32))
     expr_base = model.get_normalized_expression(library_size=1e4)
     expr_cf = model.get_perturbed_expression(cf_layer="cf_zero", library_size=1e4)
     assert expr_cf.shape == adata.shape

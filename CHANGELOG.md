@@ -2,20 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog][],
-and this project adheres to [Semantic Versioning][].
-
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [0.99.1] — 2026-06-01 — Pre-prerelease
+## [0.99.3] — 2026-06-01 - Pre-prerelease
+- Vectorized SupCon loss for improved training speed; updated tests accordingly.
+- Hops now correctly handled by default w.r.t. n_layers; will raise a warning if a mismatched num_neighbors list is passed. From tests, this has a negligable effect if batch_size or the number of neighbors is large enough.
 
-## Change log
+## [0.99.2] — 2026-06-01
+
+- Sparse matrix only for GCN-based module; updated tests accordingly.
+
+
+## [0.99.1] — 2026-06-01
+
 
 - Added minus 1.0 back to multiplicative perturbation to avoid zeroing out genes with large negative logFCs; updated tests accordingly.
 
 
-## [0.99.0] — 2026-05-27 — Initial public release
+## [0.99.0] — 2026-05-27
 
 This is the first public version of Cellina: a dual-encoder variational autoencoder
 for spatial transcriptomics with adversarial domain forgetting.
