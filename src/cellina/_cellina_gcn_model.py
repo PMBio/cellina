@@ -312,6 +312,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed: int = 0,
         cf_subgraph: str = "directional",
         cf_max_neighbors: Optional[int] = None,
+        free_cache: bool = True,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -368,7 +369,12 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                     lat = outputs["shifted"]
             latent.append(lat.cpu())
 
-        return torch.cat(latent).numpy()
+        out = torch.cat(latent).numpy()
+        if free_cache and torch.cuda.is_available():
+            # Release this call's cached blocks so the allocator's reserved pool does not
+            # ratchet up across a counterfactual loop (the cross-call VRAM build-up).
+            torch.cuda.empty_cache()
+        return out
 
     @torch.inference_mode()
     def get_counterfactual_expression(
@@ -382,13 +388,17 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return_numpy: bool = True,
         cf_subgraph: str = "directional",
         cf_max_neighbors: Optional[int] = None,
+        free_cache: bool = True,
     ) -> np.ndarray:
         """Predict gene expression under a counterfactual spatial neighbourhood.
 
         ``cf_subgraph`` (``'induced'`` | ``'directional'`` (default) | ``'star'``) and
         ``cf_max_neighbors`` control the counterfactual subgraph; see
         ``_make_counterfactual_loader``. ``'directional'`` avoids the induced donor-donor
-        edge blow-up that OOMs on dense tumour regions.
+        edge blow-up that OOMs on dense tumour regions. ``free_cache`` empties the CUDA
+        cache after the call so the allocator's reserved pool does not ratchet up across a
+        counterfactual loop (the cross-call VRAM build-up); set False if you batch many
+        small calls and want to keep the cache warm.
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
@@ -398,7 +408,10 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_neighbors_per_seed, batch_size, seed,
             cf_subgraph=cf_subgraph, cf_max_neighbors=cf_max_neighbors,
         )
-        return self._compute_expression(scdl, library_size, return_numpy)
+        out = self._compute_expression(scdl, library_size, return_numpy)
+        if free_cache and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return out
 
     def _make_perturbed_loader(self, adata, indices, batch_size: int, cf_layer: str):
         adata = self._validate_anndata(adata) if adata is not None else self.adata
