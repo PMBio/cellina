@@ -1,4 +1,5 @@
 import logging
+import warnings
 from typing import List, Optional, Union
 
 import numpy as np
@@ -25,7 +26,6 @@ from ._edge_data_splitter import GraphBatchLoader, GraphJointDataSplitter
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
-
 
 class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     """
@@ -59,7 +59,10 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     supcon_temperature
         SupCon temperature.
     num_neighbors
-        Neighbors per GCN layer. Default: ``[-1]`` (all).
+        Neighbors sampled per GCN layer; its length is the number of sampled hops and should
+        equal ``n_layers``. Default: ``None`` -> ``[-1] * n_layers`` (all neighbors at every
+        hop). Any length other than ``n_layers`` (including length 1) emits a ``UserWarning``
+        and is used as-is, sampling that many hops.
     x_spatial_layer
         Optional ``adata.layers`` key for alternative spatial features.
     use_observed_lib_size
@@ -94,17 +97,19 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         x_spatial_layer: Optional[str] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gat",
+        sparse_features: bool = True,
         **model_kwargs,
     ):
         super().__init__(adata)
 
         self._data_splitter_cls = GraphJointDataSplitter
-        self._num_neighbors = num_neighbors or [-1]
+        self.n_layers = n_layers
+        self._num_neighbors = _resolve_num_neighbors(num_neighbors, n_layers)
         self._x_spatial_layer = x_spatial_layer
-        self._data_splitter_kwargs = {
-            'num_neighbors': self._num_neighbors,
-            'x_spatial_layer': x_spatial_layer,
-        }
+        # When False, the splitter materialises a dense ``Data.x`` (pre-sparsification
+        # behaviour). Dense vs sparse is VRAM-neutral; it only trades host RAM. Exposed
+        # mainly so the dense baseline can be benchmarked without a code revert.
+        self._sparse_features = sparse_features
         # Lazily-built, reused across inference calls so the spatial graph / sparse X
         # store is constructed once instead of per call (avoids loop RAM creep).
         self._cached_splitter = None
@@ -157,6 +162,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 num_neighbors=self._num_neighbors,
                 batch_size=batch_size,
                 x_spatial_layer=self._x_spatial_layer,
+                sparse_features=self._sparse_features,
             )
         return self._cached_splitter
 
@@ -193,15 +199,39 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_neighbors_per_seed: int,
         batch_size: int = 128,
         seed: int = 0,
+        cf_subgraph: str = "directional",
+        cf_max_neighbors: Optional[int] = None,
     ):
-        # Reuse the cached graph + sparse X store; only the edges are rewired below.
+        """Build the rewired-graph loader for an edge-swapping counterfactual.
+
+        Each control seed in ``indices`` has its original spatial edges removed and is
+        instead wired to ``n_neighbors_per_seed`` random donors drawn from
+        ``neighbour_indices``. ``cf_subgraph`` controls how much of the donors' own
+        connectivity the message passing sees — and is the main lever on peak VRAM,
+        because the GAT/GCN cost scales with the number of edges in the sampled subgraph:
+
+        - ``'induced'``     : ``directed=False``. The sampled subgraph keeps *every* edge
+          among co-sampled nodes, so the dense donor-donor connectivity of a tumour region
+          is materialised in full. Faithful to the original behaviour but the cause of the
+          VRAM blow-up; kept for benchmarking / back-compat.
+        - ``'directional'`` : ``directed=True`` (default). Keeps only sampling-path edges
+          (seed->donor, donor->sampled-neighbour). Drops the induced donor-donor edge set,
+          which is both far cheaper and independent of batch composition.
+        - ``'star'``        : the rewired graph contains *only* the seed->donor edges, so
+          donors are leaves (pure "inject these donor cells" semantics). Strongest bound.
+
+        ``cf_max_neighbors`` optionally caps the per-hop fan-out to ``[-1] + [cap]*(n_layers-1)``
+        so donor->neighbour expansion at hops >= 2 stays bounded for multi-layer encoders.
+        """
+        if cf_subgraph not in ("induced", "directional", "star"):
+            raise ValueError(
+                f"cf_subgraph must be 'induced', 'directional', or 'star', got {cf_subgraph}"
+            )
+
+        # Reuse the cached graph + X store; only the edges are rewired below.
         splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
         edge_index = pyg_data.edge_index.numpy()
-
-        src, dst = edge_index[0], edge_index[1]
-        keep_mask = ~(np.isin(src, indices) | np.isin(dst, indices))
-        filtered_edges = edge_index[:, keep_mask]
 
         rng = np.random.default_rng(seed)
         neighbour_indices = np.asarray(neighbour_indices)
@@ -225,42 +255,63 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             np.concatenate([cf_dst, cf_src]),
         ], axis=0)
 
-        new_edge_index = np.concatenate([filtered_edges, cf_edges], axis=1)
+        if cf_subgraph == "star":
+            # Donors carry their features into the seed but bring no edges of their own.
+            new_edge_index = cf_edges
+        else:
+            # Drop only the seeds' original edges; donors keep their connectivity. Whether
+            # the dense donor-donor edges are materialised is decided by ``directed`` below.
+            src, dst = edge_index[0], edge_index[1]
+            keep_mask = ~(np.isin(src, indices) | np.isin(dst, indices))
+            new_edge_index = np.concatenate([edge_index[:, keep_mask], cf_edges], axis=1)
+
         new_edge_index = torch.tensor(new_edge_index, dtype=torch.long)
 
-        # Features are gathered lazily from the splitter's sparse store; only edges are
-        # rewired for the counterfactual, so no dense x is attached here.
-        cf_data = Data(
+        # Sparse store: features gathered lazily by node id (no dense x on Data). Dense
+        # store: attach the dense Data.x so the loader can slice it per batch.
+        x_sparse = splitter._x_sparse
+        cf_data_kwargs = dict(
             edge_index=new_edge_index,
             batch_labels=pyg_data.batch_labels,
             labels=pyg_data.labels,
             domains=pyg_data.domains,
             num_nodes=pyg_data.num_nodes,
         )
+        if x_sparse is None:
+            cf_data_kwargs["x"] = pyg_data.x
+        cf_data = Data(**cf_data_kwargs)
+
+        num_neighbors = self._num_neighbors
+        if cf_max_neighbors is not None:
+            num_neighbors = [-1] + [cf_max_neighbors] * (self.n_layers - 1)
 
         node_loader = NeighborLoader(
             cf_data,
-            num_neighbors=self._num_neighbors,
+            num_neighbors=num_neighbors,
             input_nodes=torch.tensor(indices, dtype=torch.long),
             batch_size=batch_size,
             shuffle=False,
             drop_last=False,
-            directed=False,
+            # induced -> directed=False (full induced subgraph, incl. donor-donor edges);
+            # directional/star -> directed=True (sampling-path edges only).
+            directed=(cf_subgraph != "induced"),
         )
         # Counterfactual latents use base X features over the rewired graph (no spatial
         # layer), matching the original behaviour before splitter caching.
-        return GraphBatchLoader(node_loader, splitter._x_sparse, None)
+        return GraphBatchLoader(node_loader, x_sparse, None)
 
     @torch.inference_mode()
     def get_counterfactual_latents(
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: int = 50,
+        n_neighbors_per_seed: int = 20,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "s",
         seed: int = 0,
+        cf_subgraph: str = "directional",
+        cf_max_neighbors: Optional[int] = None,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -281,6 +332,11 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             ``'shifted'``, ``'z'``, or ``'s'``.
         seed
             Random seed.
+        cf_subgraph
+            ``'induced'`` | ``'directional'`` (default) | ``'star'``. See
+            ``_make_counterfactual_loader``; controls peak VRAM via induced-edge handling.
+        cf_max_neighbors
+            Optional per-hop fan-out cap for hops >= 2 in the counterfactual loader.
         """
         if latent_key not in ['shifted', 'z', 's']:
             raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
@@ -292,7 +348,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 128
 
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed
+            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed,
+            cf_subgraph=cf_subgraph, cf_max_neighbors=cf_max_neighbors,
         )
 
         latent = []
@@ -318,19 +375,28 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
-        n_neighbors_per_seed: int = 50,
+        n_neighbors_per_seed: int = 20,
         batch_size: Optional[int] = None,
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
+        cf_subgraph: str = "directional",
+        cf_max_neighbors: Optional[int] = None,
     ) -> np.ndarray:
-        """Predict gene expression under a counterfactual spatial neighbourhood."""
+        """Predict gene expression under a counterfactual spatial neighbourhood.
+
+        ``cf_subgraph`` (``'induced'`` | ``'directional'`` (default) | ``'star'``) and
+        ``cf_max_neighbors`` control the counterfactual subgraph; see
+        ``_make_counterfactual_loader``. ``'directional'`` avoids the induced donor-donor
+        edge blow-up that OOMs on dense tumour regions.
+        """
         self._check_if_trained(warn=False)
         if batch_size is None:
             batch_size = 128
         scdl = self._make_counterfactual_loader(
             np.asarray(indices), np.asarray(neighbour_indices),
             n_neighbors_per_seed, batch_size, seed,
+            cf_subgraph=cf_subgraph, cf_max_neighbors=cf_max_neighbors,
         )
         return self._compute_expression(scdl, library_size, return_numpy)
 
@@ -509,9 +575,20 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         self._training_plan_cls = CellinaAdversarialTrainingPlan
 
-        if datasplitter_kwargs is None:
-            datasplitter_kwargs = {}
-        datasplitter_kwargs = {**self._data_splitter_kwargs, **datasplitter_kwargs}
+        datasplitter_kwargs = dict(datasplitter_kwargs or {})
+        
+        forbidden = {"num_neighbors", "x_spatial_layer", "sparse_features"} & datasplitter_kwargs.keys()
+        if forbidden:
+            raise ValueError(
+                f"{sorted(forbidden)} must be set on the CellinaGCN(...) constructor."
+            )
+
+        datasplitter_kwargs = {
+            **datasplitter_kwargs,
+            "num_neighbors": self._num_neighbors,
+            "x_spatial_layer": self._x_spatial_layer,
+            "sparse_features": self._sparse_features,
+        }
 
         super().train(
             max_epochs=max_epochs,
@@ -655,3 +732,28 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
         return self._compute_expression(scdl, library_size, return_numpy)
+
+
+def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) -> List[int]:
+    """Resolve ``num_neighbors`` to one fan-out per GCN layer.
+
+    ``NeighborLoader`` derives the number of sampled hops from ``len(num_neighbors)``, so it
+    should match the GCN's message-passing depth (``n_layers``); a mismatched length truncates
+    or pads the receptive field. Contract:
+
+    - ``None``            -> ``[-1] * n_layers`` (all neighbours at every hop)
+    - length ``n_layers`` -> used as-is
+    - any other length    -> ``UserWarning``
+    """
+    if num_neighbors is None:
+        return [-1] * n_layers
+    num_neighbors = list(num_neighbors)
+    if len(num_neighbors) != n_layers:
+        warnings.warn(
+            f"len(num_neighbors)={len(num_neighbors)} != n_layers={n_layers}; NeighborLoader "
+            f"samples len(num_neighbors) hops differing from the GCN depth."
+            f"Pass a length-{n_layers} list to silence. Got {num_neighbors}.",
+            UserWarning,
+        )
+    return num_neighbors
+

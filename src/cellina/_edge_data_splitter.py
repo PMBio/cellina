@@ -22,13 +22,25 @@ def _gather_dense_rows(store, node_ids):
     return torch.from_numpy(store[node_ids].toarray()).float()
 
 
+def _to_dense_tensor(x):
+    """Densify a (possibly sparse) feature matrix to a float32 tensor for ``Data.x``.
+
+    Used only by the dense feature-store path (``sparse_features=False``), which holds the
+    full matrix in host RAM; the sparse path never calls this.
+    """
+    arr = x.toarray() if sp.issparse(x) else np.asarray(x)
+    return torch.tensor(arr, dtype=torch.float32)
+
+
 class GraphBatchLoader:
     """
     Iterator for graph-aware batches.
 
     Wraps a NeighborLoader and yields dicts in the format CellinaGCNModule expects.
     Node features are kept sparse-resident in ``x_sparse``/``x_spatial_sparse`` and only
-    the sampled subgraph's rows are densified per batch (via ``node_batch.n_id``).
+    the sampled subgraph's rows are densified per batch (via ``node_batch.n_id``). When
+    ``x_sparse`` is ``None`` the loader instead reads a dense ``node_batch.x`` that PyG
+    sliced from ``Data.x`` (the pre-sparsification path; VRAM-neutral, more host RAM).
     """
 
     def __init__(self, node_loader, x_sparse, x_spatial_sparse=None):
@@ -37,9 +49,13 @@ class GraphBatchLoader:
         self.x_spatial_sparse = x_spatial_sparse
 
     def _node_batch_to_dict(self, node_batch):
-        nid = node_batch.n_id.cpu().numpy()
+        if self.x_sparse is not None:
+            nid = node_batch.n_id.cpu().numpy()
+            X = _gather_dense_rows(self.x_sparse, nid)
+        else:
+            X = node_batch.x
         d = {
-            'X': _gather_dense_rows(self.x_sparse, nid),
+            'X': X,
             'edge_index': node_batch.edge_index,
             'node_indices': node_batch.input_id,
             'batch_size': node_batch.batch_size,
@@ -48,7 +64,10 @@ class GraphBatchLoader:
             DOMAINS_KEY: node_batch.domains,
         }
         if self.x_spatial_sparse is not None:
+            nid = node_batch.n_id.cpu().numpy()
             d['x_spatial'] = _gather_dense_rows(self.x_spatial_sparse, nid)
+        elif hasattr(node_batch, 'x_spatial'):
+            d['x_spatial'] = node_batch.x_spatial
         return d
 
     def __iter__(self):
@@ -71,7 +90,8 @@ class GraphJointDataSplitter(DataSplitter):
     adata_manager
         AnnData manager.
     num_neighbors
-        Number of neighbors to sample per node per layer. Default: [-1] (all neighbors).
+        Fan-out sampled per GCN hop; its length should equal the model's ``n_layers``.
+        ``CellinaGCN`` passes a resolved list (see ``_resolve_num_neighbors``). 
     x_spatial_layer
         Optional key in ``adata.layers`` for alternative spatial features.
     **kwargs
@@ -83,13 +103,18 @@ class GraphJointDataSplitter(DataSplitter):
         adata_manager,
         num_neighbors=None,
         x_spatial_layer: Optional[str] = None,
+        sparse_features: bool = True,
         **kwargs,
     ):
         super().__init__(adata_manager, **kwargs)
 
-        self.num_neighbors = num_neighbors or [-1]
+        self.num_neighbors = num_neighbors
         self.batch_size = kwargs.get('batch_size', 128)
         self.x_spatial_layer = x_spatial_layer
+        # When False, attach a dense ``Data.x`` instead of a sparse-resident store. This
+        # is the pre-sparsification path: VRAM-neutral (PyG slices the same subgraph rows
+        # onto the GPU either way) but holds the full n_cells x n_genes matrix in host RAM.
+        self.sparse_features = sparse_features
 
         self.pyg_data = self._adata_to_pyg_data()
 
@@ -98,10 +123,10 @@ class GraphJointDataSplitter(DataSplitter):
         # Keep features sparse-resident; only sampled subgraph rows are densified per
         # batch (see GraphBatchLoader). Avoids materialising the full n_cells x n_genes
         # dense matrix, which otherwise dominates host RAM on large datasets.
-        self._x_sparse = x.tocsr()
+        self._x_sparse = x.tocsr() if self.sparse_features else None
         self._x_spatial_sparse = None
 
-        n_cells = self._x_sparse.shape[0]
+        n_cells = (self._x_sparse.shape[0] if self.sparse_features else x.shape[0])
 
         batch_data = self.adata_manager.get_from_registry(REGISTRY_KEYS.BATCH_KEY)
         batch_labels = torch.from_numpy(np.asarray(batch_data)).long()
@@ -127,18 +152,26 @@ class GraphJointDataSplitter(DataSplitter):
         edge_index = torch.tensor(np.vstack([adj_coo.row, adj_coo.col]), dtype=torch.long)
         edge_index, _ = remove_self_loops(edge_index)
 
-        # NeighborLoader expands the subgraph from edge_index + num_nodes alone; features
-        # are gathered lazily by node id, so no dense x is attached to Data here.
-        data = Data(
+        # Sparse path: NeighborLoader expands the subgraph from edge_index + num_nodes
+        # alone and features are gathered lazily by node id, so no dense x is attached.
+        # Dense path: attach the full Data.x and let PyG slice subgraph rows per batch.
+        data_kwargs = dict(
             edge_index=edge_index,
             batch_labels=batch_labels,
             labels=labels,
             domains=domains,
             num_nodes=n_cells,
         )
+        if not self.sparse_features:
+            data_kwargs['x'] = _to_dense_tensor(x)
+        data = Data(**data_kwargs)
 
         if self.x_spatial_layer is not None:
-            self._x_spatial_sparse = self.load_spatial_store(self.x_spatial_layer)
+            if self.sparse_features:
+                self._x_spatial_sparse = self.load_spatial_store(self.x_spatial_layer)
+            else:
+                x_sp = self.load_spatial_store(self.x_spatial_layer)
+                data.x_spatial = _to_dense_tensor(x_sp)
 
         return data
 
@@ -155,12 +188,13 @@ class GraphJointDataSplitter(DataSplitter):
                 f"Available: {list(adata.layers.keys())}"
             )
         x_sp = adata.layers[layer]
-        if x_sp.shape != self._x_sparse.shape:
+        x_ref = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+        if x_sp.shape != x_ref.shape:
             raise ValueError(
                 f"x_spatial_layer shape {x_sp.shape} does not match X shape "
-                f"{self._x_sparse.shape}"
+                f"{x_ref.shape}"
             )
-        return x_sp.tocsr()
+        return x_sp.tocsr() if sp.issparse(x_sp) else x_sp
 
     def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last):
         return NeighborLoader(
