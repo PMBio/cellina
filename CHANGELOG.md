@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [1.0.0] — 2026-06-04 - Release
+
+This is the first stable release of Cellina, graduating from the 0.99.x pre-release series.
+
+### Added
+- `subgraph_type` parameter on `CellinaGCN` and `GraphJointDataSplitter`
+  (`"induced"` | `"directional"`); directional mode cuts counterfactual-inference
+  VRAM by ~40% compared to the induced default.
+- End-to-end tutorial notebook shipped in the repository at `docs/tutorial.ipynb`,
+  covering a full CRC counterfactual workflow from data loading to perturbation
+  analysis.
+
+### Changed
+- `__version__` is now resilient to missing package metadata (returns `"unknown"`
+  instead of raising `PackageNotFoundError`).
+- README updated to reference `docs/tutorial.ipynb` as the primary getting-started
+  resource.
+
+### Fixed
+- ReadTheDocs output path and `attrs` mock in `docs/conf.py`.
+
 ## [0.99.3] — 2026-06-02 - Pre-prerelease
 - Vectorized SupCon loss for improved training speed; updated tests accordingly.
 - Hops and layer mismatches will raise a warning. From tests, this has a negligable effect if batch_size or the number of neighbors is large enough.
