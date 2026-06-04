@@ -132,6 +132,12 @@ templates_path = ["_templates"]
 nitpicky = False
 needs_sphinx = "4.0"
 
+# The tutorial renders a page-local bibliography ({bibliography} filtered by
+# docname) while references.md renders the global ``:cited:`` list, so each key
+# is intentionally emitted by two bibliography directives — silence the
+# resulting duplicate-citation warnings.
+suppress_warnings = ["bibtex.duplicate_citation"]
+
 html_context = {
     "display_github": True,  # Integrate GitHub
     "github_user": "PMBio",  # Username

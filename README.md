@@ -68,7 +68,7 @@ make_perturbed_expression(adata, {"VEGFA": 2.0, "MYC": -1.5}, layer_key="counts_
 expr_cf = gcn_model.get_perturbed_expression(adata, cf_layer="counts_cf")
 ```
 
-Both perturbation types also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly. See `demo.ipynb` for a full worked example.
+Both perturbation types also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly. See the [tutorial](docs/tutorial.ipynb) for a full worked example on colorectal cancer tissue.
 
 ## Repository contents
 
@@ -82,8 +82,7 @@ src/cellina/
   _edge_data_splitter.py     # Graph-aware data loading (NeighborLoader / LinkNeighborLoader)
   _training_plan.py          # Shared adversarial training plan
   _spatial_utils.py          # spatial_neighbors, compute_spatial_features, perturbation utilities
-demo.ipynb                   # End-to-end demo
-perturb_utils.py             # Perturbation evaluation helpers
+docs/tutorial.ipynb          # End-to-end tutorial (CRC counterfactuals)
 ```
 
 ## Release notes

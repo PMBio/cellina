@@ -84,6 +84,7 @@ class GraphJointDataSplitter(DataSplitter):
         adata_manager,
         num_neighbors=None,
         x_spatial_layer: Optional[str] = None,
+        subgraph_type: str = "induced",
         **kwargs,
     ):
         super().__init__(adata_manager, **kwargs)
@@ -91,6 +92,11 @@ class GraphJointDataSplitter(DataSplitter):
         self.num_neighbors = num_neighbors
         self.batch_size = kwargs.get('batch_size', 128)
         self.x_spatial_layer = x_spatial_layer
+        # NeighborLoader subgraph_type for train/val/test/inference loaders.
+        # 'induced' keeps all edges among sampled nodes; 'directional' keeps only
+        # sampling-path edges (lower VRAM, but changes message passing since real
+        # spatial neighbours are densely interconnected). See _make_neighbor_loader.
+        self.subgraph_type = subgraph_type
 
         self.pyg_data = self._adata_to_pyg_data()
 
@@ -171,7 +177,7 @@ class GraphJointDataSplitter(DataSplitter):
             batch_size=batch_size,
             shuffle=shuffle,
             drop_last=drop_last,
-            directed=False,
+            subgraph_type=self.subgraph_type,
         )
 
     def _create_loader(self, node_indices, shuffle=False):

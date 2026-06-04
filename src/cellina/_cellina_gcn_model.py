@@ -97,6 +97,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         x_spatial_layer: Optional[str] = None,
         use_observed_lib_size: bool = True,
         convolution_type: str = "gat",
+        subgraph_type: str = "induced",
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -105,6 +106,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self.n_layers = n_layers
         self._num_neighbors = _resolve_num_neighbors(num_neighbors, n_layers)
         self._x_spatial_layer = x_spatial_layer
+        self._subgraph_type = _validate_subgraph_type(subgraph_type)
         # Lazily-built, reused across inference calls so the spatial graph / sparse X
         # store is constructed once instead of per call (avoids loop RAM creep).
         self._cached_splitter = None
@@ -157,6 +159,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 num_neighbors=self._num_neighbors,
                 batch_size=batch_size,
                 x_spatial_layer=self._x_spatial_layer,
+                subgraph_type=self._subgraph_type,
             )
         return self._cached_splitter
 
@@ -193,7 +196,11 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_neighbors_per_seed: int,
         batch_size: int = 128,
         seed: int = 0,
+        subgraph_type: Optional[str] = None,
     ):
+        # None inherits the model's subgraph_type (single source of truth); an explicit
+        # value overrides per call. Validated against the shared allowed set either way.
+        subgraph_type = _validate_subgraph_type(subgraph_type or self._subgraph_type)
         # Reuse the cached graph + sparse X store; only the edges are rewired below.
         splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
@@ -245,7 +252,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size=batch_size,
             shuffle=False,
             drop_last=False,
-            directed=False,
+            subgraph_type=subgraph_type,
         )
         # Counterfactual latents use base X features over the rewired graph (no spatial
         # layer), matching the original behaviour before splitter caching.
@@ -261,6 +268,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         latent_key: str = "s",
         seed: int = 0,
+        subgraph_type: Optional[str] = None,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -281,6 +289,11 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             ``'shifted'``, ``'z'``, or ``'s'``.
         seed
             Random seed.
+        subgraph_type
+            Counterfactual subgraph sampling mode. ``None`` (default) inherits the model's
+            ``subgraph_type``; pass ``'directional'`` to keep only sampling-path edges
+            (lower VRAM, output-equivalent for counterfactuals) or ``'induced'`` to
+            materialise the full induced subgraph.
         """
         if latent_key not in ['shifted', 'z', 's']:
             raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
@@ -292,7 +305,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 128
 
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed
+            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed,
+            subgraph_type=subgraph_type,
         )
 
         latent = []
@@ -323,14 +337,22 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
+        subgraph_type: Optional[str] = None,
     ) -> np.ndarray:
-        """Predict gene expression under a counterfactual spatial neighbourhood."""
+        """Predict gene expression under a counterfactual spatial neighbourhood.
+
+        ``subgraph_type`` selects the counterfactual graph construction: ``None`` (default)
+        inherits the model's ``subgraph_type``; ``'directional'`` keeps only sampling-path
+        edges (lower VRAM, output-equivalent for counterfactuals); ``'induced'`` materialises
+        the full induced subgraph (higher VRAM).
+        """
         self._check_if_trained(warn=False)
         if batch_size is None:
             batch_size = 128
         scdl = self._make_counterfactual_loader(
             np.asarray(indices), np.asarray(neighbour_indices),
             n_neighbors_per_seed, batch_size, seed,
+            subgraph_type=subgraph_type,
         )
         return self._compute_expression(scdl, library_size, return_numpy)
 
@@ -511,7 +533,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         datasplitter_kwargs = dict(datasplitter_kwargs or {})
         
-        forbidden = {"num_neighbors", "x_spatial_layer"} & datasplitter_kwargs.keys()
+        forbidden = {"num_neighbors", "x_spatial_layer", "subgraph_type"} & datasplitter_kwargs.keys()
         if forbidden:
             raise ValueError(
                 f"{sorted(forbidden)} must be set on the CellinaGCN(...) constructor."
@@ -521,6 +543,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             **datasplitter_kwargs,
             "num_neighbors": self._num_neighbors,
             "x_spatial_layer": self._x_spatial_layer,
+            "subgraph_type": self._subgraph_type,
         }
 
         super().train(
@@ -665,6 +688,22 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
         return self._compute_expression(scdl, library_size, return_numpy)
+
+
+# NOTE: Resolve this, should be only one place where this can be passed...
+_VALID_SUBGRAPH_TYPES = ("induced", "directional")
+
+def _validate_subgraph_type(subgraph_type: str) -> str:
+    """Validate a PyG ``NeighborLoader`` ``subgraph_type`` against the supported set.
+
+    Single source of truth for the allowed values, shared by the constructor and the
+    counterfactual inference methods so the two cannot drift.
+    """
+    if subgraph_type not in _VALID_SUBGRAPH_TYPES:
+        raise ValueError(
+            f"subgraph_type must be one of {_VALID_SUBGRAPH_TYPES}, got {subgraph_type!r}"
+        )
+    return subgraph_type
 
 
 def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) -> List[int]:
