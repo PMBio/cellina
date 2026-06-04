@@ -7,6 +7,18 @@ In tissues, a cell's transcriptional state is shaped by its local neighborhood: 
 - **Edge perturbation** — rewire a cell's neighborhood (replace neighbors with those from a different domain)
 - **Node perturbation** — modify the expression of existing neighbors (e.g. pathway activation or knockout)
 
+## Getting started
+
+Set up the conda environment:
+
+```bash
+conda env create -f environment.yml    # full environment (GPU / CUDA)
+# or
+conda env create -f env_minimal.yml   # CPU-only / lightweight
+```
+
+Then follow the [online tutorial](https://cellina.readthedocs.io/en/latest/tutorial.html) or run it locally from [`docs/tutorial.ipynb`](docs/tutorial.ipynb).
+
 ## How it works
 
 **Generative model.** Cellina is a VAE with two latent variables. An MLP encoder $\text{Enc}_z$ maps raw counts to $z \sim q(z \mid x)$; a spatial encoder maps the cell's neighborhood to $s \sim q(s \mid \mathcal{N}(v))$. A shared decoder reconstructs counts from $[z;\, s]$ under a Negative Binomial likelihood. Both latents have standard normal priors.
@@ -68,7 +80,7 @@ make_perturbed_expression(adata, {"VEGFA": 2.0, "MYC": -1.5}, layer_key="counts_
 expr_cf = gcn_model.get_perturbed_expression(adata, cf_layer="counts_cf")
 ```
 
-Both perturbation types also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly. See the [tutorial](docs/tutorial.ipynb) for a full worked example on colorectal cancer tissue.
+Both perturbation types also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly. See the [tutorial](https://cellina.readthedocs.io/en/latest/tutorial.html) (or [`docs/tutorial.ipynb`](docs/tutorial.ipynb)) for a full worked example on colorectal cancer tissue.
 
 ## Repository contents
 
@@ -83,6 +95,8 @@ src/cellina/
   _training_plan.py          # Shared adversarial training plan
   _spatial_utils.py          # spatial_neighbors, compute_spatial_features, perturbation utilities
 docs/tutorial.ipynb          # End-to-end tutorial (CRC counterfactuals)
+environment.yml              # Full conda environment (GPU / CUDA)
+env_minimal.yml              # Minimal conda environment (CPU-only)
 ```
 
 ## Release notes
