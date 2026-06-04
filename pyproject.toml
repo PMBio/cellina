@@ -118,6 +118,28 @@ skip = [
     "docs/notebooks/example.ipynb"
 ]
 
+[tool.hatch.envs.docs]
+skip-install = true
+dependencies = [
+    "sphinx>=4",
+    "sphinx-book-theme>=0.3.3",
+    "myst-nb",
+    "sphinxcontrib-bibtex>=1.0.0",
+    "sphinx-autodoc-typehints",
+    "ipykernel",
+    "ipython",
+    "sphinx-copybutton",
+    "anndata",
+    "scipy",
+    "scikit-learn",
+    "numpy",
+    "rich",
+    "session-info",
+]
+
+[tool.hatch.envs.docs.scripts]
+build = "PYTHONPATH=src sphinx-build -b html docs docs/_build/html"
+
 [tool.hatch.build.targets.wheel]
 packages = [
     "src/cellina"

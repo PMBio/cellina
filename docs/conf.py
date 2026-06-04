@@ -5,7 +5,9 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 # -- Path setup --------------------------------------------------------------
+import importlib.machinery
 import sys
+import types
 from datetime import datetime
 
 try:
@@ -14,8 +16,74 @@ except ImportError:
     import tomli as tomllib
 from pathlib import Path
 
+
+class _MockModule(types.ModuleType):
+    """Mock module that satisfies Python's import system for doc builds.
+
+    Auto-registers child _MockModules in sys.modules so submodule imports
+    (e.g. torch.utils.data from inside anndata) don't raise ModuleNotFoundError.
+    Supports __mro_entries__ so instances can appear in class bases lists.
+    """
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        self.__path__ = []
+        self.__package__ = name.rpartition(".")[0]
+
+    def _child(self, name):
+        child_name = f"{self.__name__}.{name}"
+        if child_name not in sys.modules:
+            sys.modules[child_name] = _MockModule(child_name)
+        child = sys.modules[child_name]
+        self.__dict__[name] = child
+        return child
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return self._child(name)
+
+    def __mro_entries__(self, bases):
+        return (object,)
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __or__(self, other):
+        return self
+
+    def __ror__(self, other):
+        return self
+
+    def __getitem__(self, item):
+        return self
+
+    def __class_getitem__(cls, item):
+        return cls
+
+
+# Pre-populate sys.modules so both autosummary and autodoc see mocked deps
+# before any import can trigger them.
+_MOCKED_MODULES = [
+    "torch", "torch.nn", "torch.nn.functional",
+    "torch.distributions", "torch.optim", "torch.optim.lr_scheduler",
+    "torch.utils", "torch.utils.data",  # anndata 0.11+ imports these unconditionally
+    "torch_geometric", "torch_geometric.data", "torch_geometric.loader",
+    "torch_geometric.nn", "torch_geometric.utils",
+    "torch_sparse",
+    "torch_scatter",
+    "scvi", "scvi.data", "scvi.data.fields", "scvi.dataloaders",
+    "scvi.distributions", "scvi.model", "scvi.model._utils",
+    "scvi.model.base", "scvi.module", "scvi.module._classifier",
+    "scvi.module.base", "scvi.nn", "scvi.train", "scvi.utils",
+]
+for _mod_name in _MOCKED_MODULES:
+    sys.modules[_mod_name] = _MockModule(_mod_name)
+
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE / "extensions"))
+sys.path.insert(0, str(HERE.parent / "src"))
 
 
 # -- Project information -----------------------------------------------------
