@@ -62,6 +62,14 @@ extensions = [
 ]
 
 
+autodoc_mock_imports = [
+    "torch",
+    "torch_geometric",
+    "torch_sparse",
+    "torch_scatter",
+    "scvi",
+]
+
 autosummary_generate = True
 autodoc_member_order = "groupwise"
 default_role = "literal"
