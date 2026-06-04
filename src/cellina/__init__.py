@@ -1,5 +1,5 @@
 import logging
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -46,4 +46,9 @@ __all__ = [
     "spatial_neighbors",
 ]
 
-__version__ = version("cellina")
+try:
+    __version__ = version("cellina")
+except PackageNotFoundError:
+    # Package not installed (e.g. running from source on a docs build where
+    # only PYTHONPATH=src is set). Fall back to a placeholder version.
+    __version__ = "0.0.0"
