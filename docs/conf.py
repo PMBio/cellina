@@ -17,50 +17,78 @@ except ImportError:
 from pathlib import Path
 
 
+class _MockMeta(type):
+    """Metaclass for mock classes — supports the operations doc-time code
+    performs on classes: ``X | Y`` unions, subscripting, attribute access,
+    and decorator-style calls."""
+
+    def __or__(cls, other):
+        return cls
+
+    def __ror__(cls, other):
+        return cls
+
+    def __getitem__(cls, item):
+        return cls
+
+    def __getattr__(cls, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return _mock_attr(f"{cls.__name__}.{name}")
+
+    def __call__(cls, *args, **kwargs):
+        # Decorator usage (@mock) → return the decorated object unchanged.
+        if len(args) == 1 and not kwargs and callable(args[0]):
+            return args[0]
+        return cls
+
+
+_attr_cache = {}
+
+
+def _mock_attr(qualname):
+    """Return a cached mock *class* standing in for an attribute (a class,
+    function, or constant) of a mocked module.
+
+    Returning a real class is what keeps ``issubclass``/``isinstance`` checks
+    working — e.g. scipy's ``issubclass(x, torch.Tensor)`` torch-detection at
+    import time, and use of ``torch.nn.Module`` as a base class.
+    """
+    if qualname not in _attr_cache:
+        _attr_cache[qualname] = _MockMeta(qualname, (), {})
+    return _attr_cache[qualname]
+
+
 class _MockModule(types.ModuleType):
     """Mock module that satisfies Python's import system for doc builds.
 
-    Auto-registers child _MockModules in sys.modules so submodule imports
-    (e.g. torch.utils.data from inside anndata) don't raise ModuleNotFoundError.
-    Supports __mro_entries__ so instances can appear in class bases lists.
+    Registered submodules (see ``_MOCKED_MODULES``) resolve to their module
+    objects so submodule imports (e.g. ``torch.utils.data`` from inside
+    anndata) work; any other attribute resolves to a mock *class* via
+    ``_mock_attr``.
     """
 
     def __init__(self, name):
         super().__init__(name)
         self.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
         self.__path__ = []
-        self.__package__ = name.rpartition(".")[0]
-
-    def _child(self, name):
-        child_name = f"{self.__name__}.{name}"
-        if child_name not in sys.modules:
-            sys.modules[child_name] = _MockModule(child_name)
-        child = sys.modules[child_name]
-        self.__dict__[name] = child
-        return child
+        self.__package__ = name
 
     def __getattr__(self, name):
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
-        return self._child(name)
-
-    def __mro_entries__(self, bases):
-        return (object,)
+        child_name = f"{self.__name__}.{name}"
+        if child_name in sys.modules:
+            value = sys.modules[child_name]
+        else:
+            value = _mock_attr(child_name)
+        self.__dict__[name] = value
+        return value
 
     def __call__(self, *args, **kwargs):
-        return self
-
-    def __or__(self, other):
-        return self
-
-    def __ror__(self, other):
-        return self
-
-    def __getitem__(self, item):
-        return self
-
-    def __class_getitem__(cls, item):
-        return cls
+        if len(args) == 1 and not kwargs and callable(args[0]):
+            return args[0]
+        return _mock_attr(self.__name__)
 
 
 # Pre-populate sys.modules so both autosummary and autodoc see mocked deps

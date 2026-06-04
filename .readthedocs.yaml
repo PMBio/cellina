@@ -12,4 +12,5 @@ build:
     build:
       html:
         - uvx hatch run docs:build
-        - mv docs/_build $READTHEDOCS_OUTPUT
+        - mkdir -p $READTHEDOCS_OUTPUT
+        - mv docs/_build/html $READTHEDOCS_OUTPUT/html
