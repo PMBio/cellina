@@ -6,8 +6,8 @@ build:
     python: "3.11"
   jobs:
     pre_build:
-      - pip install --no-deps -e .
-      - pip install -r docs/requirements.txt
+      - python -m pip install --no-deps -e .
+      - python -m pip install -r docs/requirements.txt
 
 sphinx:
   configuration: docs/conf.py

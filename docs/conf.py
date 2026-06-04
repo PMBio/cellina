@@ -7,8 +7,11 @@
 # -- Path setup --------------------------------------------------------------
 import sys
 from datetime import datetime
-from email.utils import getaddresses
-from importlib.metadata import metadata
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -17,18 +20,16 @@ sys.path.insert(0, str(HERE / "extensions"))
 
 # -- Project information -----------------------------------------------------
 
-info = metadata("cellina")
-project_name = info["Name"]
-if info["Author-email"]:
-    author = ", ".join(name for name, _ in getaddresses([info["Author-email"]]) if name)
-else:
-    author = info["Author"] or ""
+with open(HERE.parent / "pyproject.toml", "rb") as f:
+    _pyproject = tomllib.load(f)
+project_name = _pyproject["project"]["name"]
+version = _pyproject["project"]["version"]
+author = ", ".join(a.get("name", "") for a in _pyproject["project"].get("authors", []))
 copyright = f"{datetime.now():%Y}, {author}."
-version = info["Version"]
 repository_url = f"https://github.com/PMBio/{project_name}"
 
 # The full version, including alpha/beta/rc tags
-release = info["Version"]
+release = version
 
 bibtex_bibfiles = ["references.bib"]
 templates_path = ["_templates"]

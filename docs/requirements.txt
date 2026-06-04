@@ -1,3 +1,4 @@
+tomli; python_version < "3.11"
 sphinx>=4
 sphinx-book-theme>=0.3.3
 myst-nb
