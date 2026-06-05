@@ -1,4 +1,5 @@
-<img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/logo.svg" alt="Cellina" align="right" width="110">
+<img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/logo.svg" alt="Cellina" align="right" width="75">
+<!-- docs-readme-start -->
 
 # Cellina
 
