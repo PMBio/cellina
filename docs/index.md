@@ -6,8 +6,8 @@
 :hidden: true
 :maxdepth: 1
 
-tutorial.ipynb
-tutorial_gat.ipynb
+Tutorial — Cellina <tutorial.ipynb>
+Tutorial — Cellina-GAT <tutorial_gat.ipynb>
 api.md
 changelog.md
 contributing.md
