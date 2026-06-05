@@ -13,7 +13,7 @@ This is the first stable release of Cellina, graduating from the 0.99.x pre-rele
 - `subgraph_type` parameter on `CellinaGCN` and `GraphJointDataSplitter`
   (`"induced"` | `"directional"`); directional mode cuts counterfactual-inference
   VRAM by ~40% compared to the induced default.
-- End-to-end tutorial notebook shipped in the repository at `docs/tutorial.ipynb`,
+- End-to-end tutorial notebook shipped in the repository at `docs/tutorial.ipynb` and `docs/tutorial_gat.ipynb`,
   covering a full CRC counterfactual workflow from data loading to perturbation
   analysis.
 

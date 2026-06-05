@@ -7,9 +7,9 @@
 :maxdepth: 1
 
 tutorial.ipynb
+tutorial_gat.ipynb
 api.md
 changelog.md
-template_usage.md
 contributing.md
 references.md
 ```
