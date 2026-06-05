@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      TORCH: "2.4.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install CPU PyTorch
+        run: pip install "torch==${TORCH}" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install PyG compiled deps (CPU wheels)
+        run: pip install torch-scatter torch-sparse -f "https://data.pyg.org/whl/torch-${TORCH}+cpu.html"
+
+      - name: Install cellina with test extras
+        run: pip install -e ".[test]"
+
+      - name: Run tests
+        run: pytest --cov=cellina --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
