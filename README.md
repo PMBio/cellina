@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/logo.svg" alt="Cellina" width="200">
-</p>
+<img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/logo.svg" alt="Cellina" align="right" width="110">
 
 # Cellina
 
