@@ -46,13 +46,12 @@ Cellina supports two post-training interventions on the spatial graph $\mathcal{
 
 $$\mathcal{N}(v) := \mathcal{N}'$$
 
-Both variants expose this through a single `get_counterfactual_expression` call.
 
 **Node perturbation** modifies the feature vectors of $v$'s neighbours while preserving graph topology. For a target gene set $\mathcal{S}$ and a gene-specific transformation $T_g$:
 
 $$x_{u,g}^{\mathrm{cf}} = \begin{cases} T_g(x_{u,g}) & g \in \mathcal{S} \\ x_{u,g} & g \notin \mathcal{S} \end{cases}$$
 
-$T_g$ can encode any intervention (additive shift, knockout, overexpression, or learned counterfactual values). The two variants differ in how $T_g$ is instantiated and when the perturbed features are consumed: *Cellina* applies an additive shift to log-normalised neighbour expression and pre-aggregates into pseudobulk spatial features before inference, while *CellinaGCN* applies a multiplicative factor to raw counts and lets the GCN aggregate the perturbed counts on the fly. Both also expose `get_*_latents` counterparts for inspecting the spatial latent $s$ directly.
+$T_g$ can encode any intervention (additive shift, knockout, overexpression, or learned counterfactual values). 
 
 See the [Cellina](https://cellina.readthedocs.io/en/latest/tutorial.html) and [Cellina-GAT](https://cellina.readthedocs.io/en/latest/tutorial_gat.html) tutorials for full worked examples.
 
