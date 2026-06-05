@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/logo.svg" alt="Cellina" width="200">
+</p>
+
 # Cellina
 
 [![Tests](https://github.com/PMBio/cellina/actions/workflows/test.yml/badge.svg)](https://github.com/PMBio/cellina/actions/workflows/test.yml)
