@@ -209,7 +209,10 @@ def spatial_neighbors(adata: AnnData,
         return dist
 
 def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
-                       base=np.e, add_shift=False, renormalize=False):
+                       base=np.e, add_shift=False, renormalize=False,
+                       perturb_fraction=1.0, random_state=0):
+    if not 0.0 <= perturb_fraction <= 1.0:
+        raise ValueError(f"perturb_fraction must be in [0, 1], got {perturb_fraction}")
     n_vars = len(var_idx)
     neutral = 0.0 if add_shift else 1.0
 
@@ -236,12 +239,28 @@ def _node_perturbation(X, var_idx, perturbations, groupby=None, labels=None,
     # Densify once
     X = np.asarray(X.toarray() if issparse(X) else X, dtype=np.float32)
 
+    # Keep the unperturbed expression so that, when only a fraction of cells is
+    # perturbed, the remaining cells can be restored to their original values.
+    X_orig = X.copy() if perturb_fraction < 1.0 else None
+
     if add_shift:  # log1p data + logFC shift
         X = X + transform
     else:          # counts; exp(logFC) applied multiplicatively
         # +1 / -1 avoids zeroing out genes multiplied by zero
         X = (X + 1.0) * transform - 1.0
     X = np.clip(X, 0, None)
+
+    # Fractional perturbation: only a random subset of cells keeps the shift;
+    # the rest are reverted to their original expression. Applied before
+    # renormalisation so reverted cells trivially keep their original row sums.
+    if perturb_fraction < 1.0:
+        n_cells = X.shape[0]
+        n_sel = int(round(perturb_fraction * n_cells))
+        rng = np.random.default_rng(random_state)
+        selected = np.zeros(n_cells, dtype=bool)
+        if n_sel > 0:
+            selected[rng.choice(n_cells, size=n_sel, replace=False)] = True
+        X[~selected] = X_orig[~selected]
 
     if renormalize:
         row_sums_after = np.asarray(X.sum(axis=1)).ravel()
@@ -258,6 +277,8 @@ def _make_perturbed_expression(
     base: float = np.e,
     add_shift: bool = True,
     renormalize: bool = True,
+    perturb_fraction: float = 1.0,
+    random_state: int = 0,
 ):
     """Apply Node perturbations to ``adata.X`` and return the modified expression matrix."""
     var_names = list(adata.var_names)
@@ -278,6 +299,7 @@ def _make_perturbed_expression(
     return _node_perturbation(
         X, var_idx=var_idx, perturbations=perturbations,
         groupby=groupby, labels=labels, base=base, add_shift=add_shift, renormalize=renormalize,
+        perturb_fraction=perturb_fraction, random_state=random_state,
     )
 
 
@@ -334,6 +356,8 @@ def make_neighbor_perturbation(
     base: float = np.e,
     add_shift: bool = False,
     renormalize: bool = True,
+    perturb_fraction: float = 1.0,
+    random_state: int = 0,
 ) -> None:
     """
     Apply Node perturbations to neighbour expression and re-aggregate.
@@ -365,6 +389,17 @@ def make_neighbor_perturbation(
         Key in ``adata.obsm`` for the counterfactual spatial features.
     layer_key
         Key in ``adata.layers`` where the perturbed counts are stored.
+    perturb_fraction
+        Fraction of cells (in ``[0, 1]``) that receive the perturbation before
+        re-aggregation. A random subset of this size is perturbed and the rest are
+        left at their original expression, so after the degree-normalised neighbour
+        mean each focal cell effectively sees ``~perturb_fraction`` of its neighbours
+        perturbed. ``1.0`` (default) perturbs every cell (original behaviour); ``0.0``
+        applies no change. The subset is drawn over *all* cells, so when every cell
+        type is covered by ``perturbations`` this equals the fraction of perturbed
+        neighbours.
+    random_state
+        Seed for the random subset selection when ``perturb_fraction < 1``.
 
     Raises
     ------
@@ -385,6 +420,7 @@ def make_neighbor_perturbation(
     adata.layers[layer_key] = _make_perturbed_expression(
         adata, perturbations=perturbations, groupby=groupby,
         base=base, add_shift=add_shift, renormalize=renormalize,
+        perturb_fraction=perturb_fraction, random_state=random_state,
     )
 
     compute_spatial_features(
