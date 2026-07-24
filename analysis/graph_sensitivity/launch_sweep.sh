@@ -5,31 +5,37 @@
 # CUDA_VISIBLE_DEVICES, with at most JOBS_PER_GPU processes per GPU running at
 # once. Plain-bash scheduler: fills GPU slots, waits for a free slot, repeats.
 #
+# Within-domain graph (library_key='typ' per-domain kNN): no cross-domain edges.
+# Writes to within-domain dirs by default so the old mixed-domain runs/results
+# are preserved (you can go back).
+#
 # Config via environment variables (all optional):
-#   KS            k grid                 (default: "5 10 50 100 200 2000")
+#   KS            k grid                 (default: "5 10 100 200 1000 2000 10000")
 #   SEEDS         seeds                  (default: "0 1 2")
 #   GPUS          GPU ids to use         (default: "0 1")
 #   JOBS_PER_GPU  concurrent procs/GPU   (default: 3)
-#   OUTDIR        results dir            (default: <script>/results)
-#   LOGDIR        per-run stdout/stderr  (default: <script>/logs)
+#   OUTDIR        results dir            (default: <script>/results_within_domain)
+#   CKPT_ROOT     checkpoint root        (default: <script>/runs_within_domain)
+#   LOGDIR        per-run stdout/stderr  (default: <script>/logs_within_domain)
 #   PYTHON        interpreter            (default: cellina_edge env python)
 #
 # Example:
-#   bash launch_sweep.sh                      # full 18-run sweep, 3 jobs/GPU
+#   bash launch_sweep.sh                      # full 21-run sweep, 3 jobs/GPU
 #   JOBS_PER_GPU=2 GPUS="0" bash launch_sweep.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-KS="${KS:-5 10 50 100 200 2000}"
+KS="${KS:-5 10 100 200 1000 2000 10000}"
 SEEDS="${SEEDS:-0 1 2}"
 GPUS="${GPUS:-0 1}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-3}"
-OUTDIR="${OUTDIR:-$SCRIPT_DIR/results}"
-LOGDIR="${LOGDIR:-$SCRIPT_DIR/logs}"
+OUTDIR="${OUTDIR:-$SCRIPT_DIR/results_within_domain}"
+CKPT_ROOT="${CKPT_ROOT:-$SCRIPT_DIR/runs_within_domain}"
+LOGDIR="${LOGDIR:-$SCRIPT_DIR/logs_within_domain}"
 PYTHON="${PYTHON:-/data/ddimitrov/software/miniforge3/envs/cellina_edge/bin/python}"
 
-mkdir -p "$OUTDIR" "$LOGDIR"
+mkdir -p "$OUTDIR" "$CKPT_ROOT" "$LOGDIR"
 
 # Build the flat list of GPU slots, e.g. GPUS="0 1", JOBS_PER_GPU=3 ->
 # slots = (0 0 0 1 1 1). Job i is assigned to slots[i % nslots].
@@ -39,11 +45,12 @@ for g in $GPUS; do
 done
 NSLOTS=${#SLOTS[@]}
 
-echo "== graph-sensitivity sweep =="
+echo "== graph-sensitivity sweep (within-domain) =="
 echo "  KS           : $KS"
 echo "  SEEDS        : $SEEDS"
 echo "  GPUS         : $GPUS  (x${JOBS_PER_GPU} jobs each -> $NSLOTS concurrent)"
 echo "  OUTDIR       : $OUTDIR"
+echo "  CKPT_ROOT    : $CKPT_ROOT"
 echo "  LOGDIR       : $LOGDIR"
 echo "  PYTHON       : $PYTHON"
 echo
@@ -79,7 +86,7 @@ for k in $KS; do
     gpu="${SLOTS[$FREE_SLOT]}"
     echo "[launch] $tag on GPU $gpu (slot $FREE_SLOT)"
     CUDA_VISIBLE_DEVICES="$gpu" "$PYTHON" "$SCRIPT_DIR/run_sensitivity.py" \
-      --k "$k" --seed "$seed" --outdir "$OUTDIR" \
+      --k "$k" --seed "$seed" --outdir "$OUTDIR" --ckpt-root "$CKPT_ROOT" \
       >"$LOGDIR/$tag.log" 2>&1 &
     PIDS[$FREE_SLOT]=$!
     njobs=$((njobs + 1))

@@ -15,6 +15,12 @@ Mirrors docs/tutorial.ipynb step-for-step; the only deliberate deviations are:
   * bandwidth = inf (uniform kNN, distance weighting off)
   * max_neighbours = k (swept)                       [training graph]
   * n_neighbours  = k in the edge counterfactual     [rewire size tracks k]
+  * within-domain graph: library_key=domains_key builds a separate kNN tree
+    per domain (232_CRC / 232_REF), so NO cross-domain edges exist. The two
+    domains overlap spatially, so a plain kNN would otherwise link CRC<->REF
+    cells across the tissue boundary. Applied to BOTH the training-feature graph
+    and the counterfactual donor-pool graph (train/inference stay consistent),
+    which makes the edge-perturbation donor pool CRC-only by construction.
   * seed varies model init + counterfactual sampling; the data split is fixed
     (random_state=0) so only the graph/seed change.
 """
@@ -149,20 +155,26 @@ def main():
     # bandwidth = inf  ->  Gaussian kernel gives every kept edge weight 1
     #                      => uniform kNN graph, distance weighting OFF.
     # max_neighbours = k  is the single swept graph-construction knob.
+    # library_key = domains_key  ->  per-domain kNN tree: each cell's k nearest
+    #                      neighbours are drawn ONLY from its own domain, so no
+    #                      cross-domain (CRC<->REF) edges are created. The two
+    #                      domains overlap spatially, so this drops the spurious
+    #                      boundary edges a plain global kNN would introduce.
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
 
     bandwidth = float("inf")
     adata.obsm["spatial"] = adata.obs[["CenterX_global_px", "CenterY_global_px"]].values
 
-    # full graph (used to define the counterfactual donor pool)
+    # full graph (used to define the counterfactual donor pool) — within-domain
     adata.obsp["spatial_connectivities_orig"] = spatial_neighbors(
         adata, bandwidth=bandwidth, max_neighbours=args.k,
-        standardize=False, inplace=False)
+        standardize=False, library_key=domains_key, inplace=False)
 
     # test-masked graph -> spatial features (avoids leakage of held-out cells)
     spatial_neighbors(adata, bandwidth=bandwidth, max_neighbours=args.k,
-                      standardize=False, test_indices=test_idx)
+                      standardize=False, library_key=domains_key,
+                      test_indices=test_idx)
     compute_spatial_features(adata)
 
     adata.X = adata.layers["counts"].copy()  # reset to raw counts for cellina
@@ -226,6 +238,14 @@ def main():
     neighbor_indices = np.unique(sub_conn.nonzero()[1])
     neighbor_indices = neighbor_indices[~is_holdout_ct.values[neighbor_indices]]
 
+    # within-domain sanity: the donor pool (neighbours of CRC Myeloids) must be
+    # entirely in the tumour (CRC) domain — per-domain kNN guarantees this.
+    donor_in_crc = int(is_tumor_region.values[neighbor_indices].sum())
+    n_donor = int(len(neighbor_indices))
+    assert donor_in_crc == n_donor, (
+        f"donor pool leaked {n_donor - donor_in_crc}/{n_donor} non-CRC cells "
+        f"despite within-domain graph (library_key={domains_key!r})")
+
     counterfactual_counts = model.get_counterfactual_expression(
         indices=idx_control,
         batch_size=args.batch_size,
@@ -249,10 +269,13 @@ def main():
         "pearson": float(pearson),
         "n_deg": args.n_deg,
         "bandwidth": "inf",
+        "within_domain": True,
+        "library_key": domains_key,
         "n_neighbours_cf": args.k,
         "n_control": int(len(idx_control)),
         "n_target": int(len(idx_target)),
-        "n_donor_pool": int(len(neighbor_indices)),
+        "n_donor_pool": n_donor,
+        "n_donor_in_crc": donor_in_crc,
         "best_checkpoint": ckpt_name,
         "runtime_sec": round(time.time() - t0, 1),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
