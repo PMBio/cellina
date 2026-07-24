@@ -1,10 +1,15 @@
 #!/usr/bin/env python
 """Single-run worker for the node-perturbation *fraction* experiment.
 
-Reuses a pre-trained k=200 Cellina checkpoint (bandwidth=inf uniform kNN graph)
-and applies the tutorial's node perturbation (tutorial 4.2) to the held-out CRC
-Myeloid population, but shifts only a random *fraction* of neighbour cells
-(`perturb_fraction`) before re-aggregation. This is pure inference -- no training.
+Reuses a pre-trained k=200 Cellina checkpoint (bandwidth=inf uniform kNN graph,
+within-domain, with --holdout-ct held out of training) and applies the tutorial's
+node perturbation (tutorial 4.2) to the held-out CRC population of that cell type,
+but shifts only a random *fraction* of neighbour cells (`perturb_fraction`) before
+re-aggregation. This is pure inference -- no training.
+
+The held-out cell type is excluded from the global healthy->tumour shift and its
+own perturbation row is overridden by that global shift, so the model never sees
+the true perturbation it is asked to predict (see docs/tutorial.ipynb 4.2).
 
 For each (seed, fraction) it records:
   * pearson   -- Pearson r between observed and predicted logFC over a FIXED
@@ -32,12 +37,26 @@ def parse_args():
     p.add_argument("--fraction", type=float, required=True,
                    help="perturb_fraction: fraction of neighbour cells shifted.")
     p.add_argument("--outdir", type=str, required=True)
+    p.add_argument("--holdout-ct", type=str, default="Myeloid",
+                   help="Held-out cell type. Drives BOTH the tutorial holdout AND "
+                        "the logFC definition: it is excluded from the global shift "
+                        "and its own perturbation row is overridden by that global "
+                        "shift, so the model never sees the true perturbation it "
+                        "predicts (docs/tutorial.ipynb, get_global_perturbation_logfc "
+                        "and the domain_logfc_df.loc[holdout_ct] override).")
     p.add_argument("--k", type=int, default=200,
                    help="Neighborhood size of the reused checkpoint / graph.")
     p.add_argument("--data", type=str,
                    default="/data/ddimitrov/repos/cellina/docs/data/crc_232.h5ad")
     p.add_argument("--ckpt-root", type=str,
-                   default="/data/ddimitrov/repos/cellina/analysis/graph_sensitivity/runs")
+                   default="/data/ddimitrov/repos/cellina/analysis/graph_sensitivity/runs_within_domain",
+                   help="Root holding k{k}_seed{seed}/ checkpoints, trained with "
+                        "--holdout-ct held out. Must match --library-key (the per-ct "
+                        "graph_sensitivity checkpoints are within-domain).")
+    p.add_argument("--library-key", type=str, default="typ",
+                   help="Domain key for per-domain (within-domain) kNN graph "
+                        "construction; empty string builds a cross-domain graph. "
+                        "Kept equal to the training graph of the reused checkpoint.")
     p.add_argument("--n-deg", type=int, default=50)
     p.add_argument("--n-pert-genes", type=int, default=200)
     p.add_argument("--thresholds", type=str, default="0.25 0.5 1.0",
@@ -127,7 +146,8 @@ def main():
     run_tag = f"frac{args.fraction}_seed{args.seed}"
 
     labels_key, domains_key, batch_key = "coarse_type", "typ", None
-    holdout_ct = "Myeloid"
+    holdout_ct = args.holdout_ct
+    library_key = args.library_key or None   # None -> cross-domain graph
     control_domain, target_domain = "232_REF", "232_CRC"
 
     # ---- load + preprocess (identical to the training pipeline) ----------
@@ -165,8 +185,11 @@ def main():
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
     adata.obsm["spatial"] = adata.obs[["CenterX_global_px", "CenterY_global_px"]].values
+    # library_key="typ" -> separate kNN tree per domain (within-domain graph),
+    # matching how the reused per-ct checkpoints were trained.
     spatial_neighbors(adata, bandwidth=float("inf"), max_neighbours=args.k,
-                      standardize=False, test_indices=test_idx)
+                      standardize=False, test_indices=test_idx,
+                      library_key=library_key)
     compute_spatial_features(adata)
     adata.X = adata.layers["counts"].copy()
 
@@ -238,6 +261,9 @@ def main():
         "fraction": args.fraction,
         "seed": args.seed,
         "k": args.k,
+        "holdout_ct": holdout_ct,
+        "library_key": library_key,
+        "within_domain": library_key is not None,
         "pearson": float(pearson),                         # direction (vs observed control)
         "pearson_shift": float(pearson_shift),             # direction of induced shift
         "l2_norm": float(np.linalg.norm(shift_lfc)),       # magnitude of induced shift, all genes
