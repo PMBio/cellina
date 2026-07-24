@@ -5,6 +5,19 @@ __pycache__/
 
 # C extensions
 *.so
+*.pt
+*.csv
+*.pdf
+*.tex
+*.png
+*.out
+*.pid
+*.json
+*.h5ad
+*.rst
+*.pth
+*.pkl
+application/*
 
 # Distribution / packaging
 .Python

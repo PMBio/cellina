@@ -36,6 +36,11 @@ def parse_args():
                    help="max_neighbours (neighborhood size) for graph construction.")
     p.add_argument("--seed", type=int, required=True,
                    help="Seed for model init + counterfactual neighbour sampling.")
+    p.add_argument("--holdout-ct", type=str, default="Myeloid",
+                   help="Cell type (coarse_type) held out in the tumour domain: it "
+                        "defines the model test split, is masked from the training "
+                        "spatial graph (test_indices), and is excluded from the "
+                        "edge-perturbation donor pool.")
     p.add_argument("--outdir", type=str, required=True,
                    help="Directory to write the k{k}_seed{seed}.json result.")
     p.add_argument("--data", type=str,
@@ -110,7 +115,7 @@ def main():
     labels_key = "coarse_type"
     domains_key = "typ"
     batch_key = None
-    holdout_ct = "Myeloid"
+    holdout_ct = args.holdout_ct
     control_domain = "232_REF"
     target_domain = "232_CRC"
 
@@ -266,6 +271,7 @@ def main():
     result = {
         "k": args.k,
         "seed": args.seed,
+        "holdout_ct": holdout_ct,
         "pearson": float(pearson),
         "n_deg": args.n_deg,
         "bandwidth": "inf",

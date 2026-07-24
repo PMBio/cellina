@@ -1,0 +1,6 @@
+/* Shrink the sidebar logo (sphinx-book-theme renders it as img.logo__image) */
+img.logo__image {
+    max-width: 90px;
+    height: auto;
+    margin: 0 auto;
+}
