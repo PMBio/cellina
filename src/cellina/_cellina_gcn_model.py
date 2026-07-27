@@ -636,7 +636,12 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         internally by the graph encoder. Consequences:
 
         - Rows sum to 1 for every cell that has at least one in-neighbour, and to 0 for
-          isolated cells (and for cells not covered by ``indices``).
+          isolated cells (and for cells not covered by ``indices``). Caveat: a mini-batch
+          whose sampled subgraph happens to contain *no* edges at all aborts the process
+          inside :class:`~torch_geometric.nn.GATv2Conv` (SIGFPE). This is a pre-existing
+          upstream limitation, reachable the same way via
+          :meth:`get_latent_representation`, and in practice needs ``indices`` to select
+          only isolated cells.
         - The matrix is **asymmetric** even when the connectivity graph is symmetric:
           ``alpha(j -> i)`` and ``alpha(i -> j)`` are normalised over different
           neighbourhoods.
@@ -653,9 +658,13 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Parameters
         ----------
         adata
-            AnnData; defaults to the training data.
+            Must be the AnnData the model was set up with; defaults to it. A *different*
+            object is not honoured: the loader is always rebuilt from the registered
+            training data, so passing another adata only changes the output shape and
+            where ``key_added`` writes, not which graph or counts are used.
         indices
-            Cell indices to extract attention for. Defaults to all cells. Must be unique.
+            Integer positions of the cells to extract attention for. Defaults to all
+            cells. Must be unique; boolean masks are not accepted.
         batch_size
             Seed cells per mini-batch. The default of 512 is deliberately below the usual
             inference default: with an exact ``[-1, -1]`` fan-out on a k=20 graph each
@@ -736,6 +745,12 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if indices is None:
             indices = np.arange(adata.n_obs)
         indices = np.asarray(indices)
+        if indices.dtype == bool:
+            raise ValueError(
+                "indices must be integer cell positions, not a boolean mask; convert "
+                "with np.flatnonzero(mask). A mask would otherwise be read as the "
+                "positions 0/1 and rejected as duplicated."
+            )
         if np.unique(indices).size != indices.size:
             raise ValueError(
                 "indices must be unique; duplicated seed cells would silently sum their "
@@ -749,41 +764,48 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             num_neighbors=num_neighbors,
         )
 
+        # Restore the caller's mode afterwards: `get_latent_representation` does not set
+        # eval() itself, so leaving the module in eval would silently change its output
+        # (GCNLayers carries an nn.Dropout) depending on whether this ran first.
+        was_training = self.module.training
         self.module.eval()
 
         dst_parts = [[] for _ in range(n_layers)]
         src_parts = [[] for _ in range(n_layers)]
         val_parts = [[] for _ in range(n_layers)]
 
-        for tensors in scdl:
-            node_batch = tensors["node_batch"]
-            n_id = node_batch["n_id"].cpu().numpy()
-            seed_size = int(node_batch["batch_size"])
+        try:
+            for tensors in scdl:
+                node_batch = tensors["node_batch"]
+                n_id = node_batch["n_id"].cpu().numpy()
+                seed_size = int(node_batch["batch_size"])
 
-            attentions = self.module.get_attention(
-                x=node_batch["X"],
-                batch_index=node_batch["batch_label"],
-                edge_index=node_batch["edge_index"],
-                batch_size=seed_size,
-                x_spatial=node_batch.get("x_spatial"),
-                give_mean=give_mean,
-            )
-            if len(attentions) != n_layers:
-                raise RuntimeError(
-                    f"Expected {n_layers} attention tensors, got {len(attentions)}."
+                attentions = self.module.get_attention(
+                    x=node_batch["X"],
+                    batch_index=node_batch["batch_label"],
+                    edge_index=node_batch["edge_index"],
+                    batch_size=seed_size,
+                    x_spatial=node_batch.get("x_spatial"),
+                    give_mean=give_mean,
                 )
+                if len(attentions) != n_layers:
+                    raise RuntimeError(
+                        f"Expected {n_layers} attention tensors, got {len(attentions)}."
+                    )
 
-            for layer, att in enumerate(attentions):
-                dst_local, src_local, alpha = att.coo()
-                # heads is hardcoded to 1 in _make_conv_layer, but stay defensive.
-                if alpha.dim() > 1:
-                    alpha = alpha.mean(dim=-1) if alpha.size(-1) > 1 else alpha.squeeze(-1)
-                # Seed nodes are the first `seed_size` local ids; only edges into them
-                # have a fully materialised receptive field at this depth.
-                keep = dst_local < seed_size
-                dst_parts[layer].append(n_id[dst_local[keep].cpu().numpy()])
-                src_parts[layer].append(n_id[src_local[keep].cpu().numpy()])
-                val_parts[layer].append(alpha[keep].float().cpu().numpy())
+                for layer, att in enumerate(attentions):
+                    dst_local, src_local, alpha = att.coo()
+                    # heads is hardcoded to 1 in _make_conv_layer, but stay defensive.
+                    if alpha.dim() > 1:
+                        alpha = alpha.mean(dim=-1) if alpha.size(-1) > 1 else alpha.squeeze(-1)
+                    # Seed nodes are the first `seed_size` local ids; only edges into them
+                    # have a fully materialised receptive field at this depth.
+                    keep = dst_local < seed_size
+                    dst_parts[layer].append(n_id[dst_local[keep].cpu().numpy()])
+                    src_parts[layer].append(n_id[src_local[keep].cpu().numpy()])
+                    val_parts[layer].append(alpha[keep].float().cpu().numpy())
+        finally:
+            self.module.train(was_training)
 
         n_obs = adata.n_obs
         result = {}

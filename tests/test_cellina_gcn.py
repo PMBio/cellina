@@ -928,6 +928,41 @@ def test_attention_subset_indices(trained_gat_model):
         )
 
 
+def test_attention_restores_training_mode(trained_gat_model, monkeypatch):
+    """Extraction must not leave the module in eval(): get_latent_representation does
+    not set the mode itself, so a leaked eval() silently changes its dropout behaviour."""
+    model, _ = trained_gat_model
+
+    for mode in (True, False):
+        model.module.train(mode)
+        model.get_attention_weights(batch_size=64)
+        assert model.module.training is mode
+
+    # Restored even when extraction raises inside the batch loop.
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    model.module.train(True)
+    monkeypatch.setattr(model.module, "get_attention", _boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        model.get_attention_weights(batch_size=64)
+    assert model.module.training is True
+
+
+def test_attention_rejects_boolean_mask(trained_gat_model):
+    """A boolean mask must be named as such, not misreported as duplicated indices."""
+    model, adata = trained_gat_model
+    mask = np.zeros(adata.n_obs, dtype=bool)
+    mask[:10] = True
+
+    with pytest.raises(ValueError, match="boolean mask"):
+        model.get_attention_weights(batch_size=64, indices=mask)
+
+    # The documented conversion works.
+    att = model.get_attention_weights(batch_size=64, indices=np.flatnonzero(mask))
+    assert sorted(att) == list(range(model.n_layers))
+
+
 def test_make_perturbed_expression():
     X = np.arange(1, 10, dtype=float).reshape(3, 3)
     adata = AnnData(X=X.copy())
