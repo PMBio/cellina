@@ -3,6 +3,7 @@ import warnings
 from typing import List, Optional, Union
 
 import numpy as np
+import scipy.sparse as sp
 import torch
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -164,7 +165,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return self._cached_splitter
 
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
-                          x_spatial_layer=None):
+                          x_spatial_layer=None, num_neighbors=None):
         adata = self._validate_anndata(adata) if adata is not None else self.adata
 
         if batch_size is None:
@@ -187,6 +188,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size=batch_size,
             shuffle=shuffle,
             x_spatial_override=override,
+            num_neighbors=num_neighbors,
         )
 
     def _make_counterfactual_loader(
@@ -608,6 +610,234 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             latent.append(lat.cpu())
 
         return torch.cat(latent).numpy()
+
+    @torch.inference_mode()
+    def get_attention_weights(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: int = 512,
+        num_neighbors: Optional[List[int]] = None,
+        give_mean: bool = True,
+        key_added: Optional[str] = None,
+        allow_sampling: bool = False,
+    ) -> dict:
+        """
+        Extract the learned GATv2 attention coefficients as cell-by-cell matrices.
+
+        Requires ``convolution_type="gat"``. One matrix is returned per GAT layer of the
+        spatial encoder; they are **not** averaged, because each layer attends over a
+        different representation.
+
+        Orientation
+        -----------
+        ``A[i, j] = alpha(j -> i)``, i.e. **row = destination**: the weight cell ``i``
+        places on its spatial neighbour ``j``. This follows the ``adj_t`` convention used
+        internally by the graph encoder. Consequences:
+
+        - Rows sum to 1 for every cell that has at least one in-neighbour, and to 0 for
+          isolated cells (and for cells not covered by ``indices``). Caveat: a mini-batch
+          whose sampled subgraph happens to contain *no* edges at all aborts the process
+          inside :class:`~torch_geometric.nn.GATv2Conv` (SIGFPE). This is a pre-existing
+          upstream limitation, reachable the same way via
+          :meth:`get_latent_representation`, and in practice needs ``indices`` to select
+          only isolated cells.
+        - The matrix is **asymmetric** even when the connectivity graph is symmetric:
+          ``alpha(j -> i)`` and ``alpha(i -> j)`` are normalised over different
+          neighbourhoods.
+        - Its sparsity pattern is a subset of
+          ``adata.obsp["spatial_connectivities"].T`` (self-loops excluded), *not* of the
+          connectivity matrix itself. The data loader maps a nonzero
+          ``spatial_connectivities[i, j]`` to a message ``i -> j``, so it is cell ``j``
+          that attends over cell ``i``. For a symmetric connectivity graph the two
+          patterns coincide; for the asymmetric kNN graphs produced by
+          :func:`~cellina._spatial_utils.spatial_neighbors` they do not.
+        - The shape is always ``(n_obs, n_obs)``, even when ``indices`` selects a subset;
+          unselected rows are all-zero.
+
+        Parameters
+        ----------
+        adata
+            Must be the AnnData the model was set up with; defaults to it. A *different*
+            object is not honoured: the loader is always rebuilt from the registered
+            training data, so passing another adata only changes the output shape and
+            where ``key_added`` writes, not which graph or counts are used.
+        indices
+            Integer positions of the cells to extract attention for. Defaults to all
+            cells. Must be unique; boolean masks are not accepted.
+        batch_size
+            Seed cells per mini-batch. The default of 512 is deliberately below the usual
+            inference default: with an exact ``[-1, -1]`` fan-out on a k=20 graph each
+            seed pulls in ~1 + 20 + 400 nodes before dedup and the loader densifies their
+            features, so a larger batch risks running out of memory.
+        num_neighbors
+            Fan-out per hop. Defaults to ``[-1] * n_layers`` (the exact, full
+            neighbourhood), which is what makes the coefficients equal to those a
+            full-graph forward pass would produce. Its length must equal the encoder's
+            number of layers, since layer ``i``'s attention at a seed needs an
+            ``i + 1``-hop neighbourhood.
+        give_mean
+            If True (default), the posterior mean ``qzm`` replaces the sampled ``z`` in
+            the GCN input when the model was built with ``condition_on_intrinsic=True``.
+            This makes extraction deterministic; ``give_mean=False`` reproduces the
+            sampled behaviour of :meth:`get_latent_representation` and will differ
+            between calls.
+        key_added
+            If given, additionally store each layer's matrix in
+            ``adata.obsp[f"{key_added}_l{i}"]``. ``None`` (default) never mutates
+            ``adata``.
+        allow_sampling
+            Permit a finite ``num_neighbors`` below the graph's maximum in-degree. Off by
+            default, because sampling silently yields approximate coefficients whose rows
+            still sum to 1 and therefore look correct.
+
+        Returns
+        -------
+        ``dict[int, scipy.sparse.csr_matrix]`` keyed by layer index (0-based), each of
+        shape ``(n_obs, n_obs)`` and dtype ``float32``.
+
+        Notes
+        -----
+        Under neighbour sampling only edges pointing *into* a seed node carry exact
+        attention (a 1-hop node's layer-1 coefficients would need a hop that was never
+        sampled), so non-seed destinations are dropped. Every requested cell is a seed
+        exactly once across the loader, so each edge is still emitted exactly once and
+        the result is complete.
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+
+        encoder = self.module.s_encoder.encoder
+        if encoder.convolution_type != "gat":
+            raise NotImplementedError(
+                "get_attention_weights() requires convolution_type='gat', but this model "
+                f"was built with convolution_type='{encoder.convolution_type}'. Other "
+                "graph convolutions do not learn per-edge attention coefficients."
+            )
+
+        n_layers = len(encoder.gcn_layers)
+
+        if num_neighbors is None:
+            num_neighbors = [-1] * n_layers
+        num_neighbors = list(num_neighbors)
+        if len(num_neighbors) != n_layers:
+            raise ValueError(
+                f"num_neighbors must have one entry per GAT layer (n_layers={n_layers}), "
+                f"got length {len(num_neighbors)}: {num_neighbors}. Layer i's attention at "
+                "a seed cell requires an (i + 1)-hop neighbourhood."
+            )
+
+        splitter = self._get_cached_splitter(batch_size)
+        graph_edge_index = splitter.pyg_data.edge_index.numpy()
+        in_degrees = np.bincount(graph_edge_index[1], minlength=adata.n_obs)
+        max_in_degree = int(in_degrees.max()) if in_degrees.size else 0
+
+        finite_fanouts = [f for f in num_neighbors if f >= 0]
+        if finite_fanouts and min(finite_fanouts) < max_in_degree and not allow_sampling:
+            raise ValueError(
+                f"num_neighbors={num_neighbors} samples fewer neighbours than the graph's "
+                f"maximum in-degree ({max_in_degree}), so the returned coefficients would "
+                "be a renormalised approximation rather than the true attention. Use "
+                "num_neighbors=None for the exact full neighbourhood, or pass "
+                "allow_sampling=True to accept the approximation."
+            )
+
+        if indices is None:
+            indices = np.arange(adata.n_obs)
+        indices = np.asarray(indices)
+        if indices.dtype == bool:
+            raise ValueError(
+                "indices must be integer cell positions, not a boolean mask; convert "
+                "with np.flatnonzero(mask). A mask would otherwise be read as the "
+                "positions 0/1 and rejected as duplicated."
+            )
+        if np.unique(indices).size != indices.size:
+            raise ValueError(
+                "indices must be unique; duplicated seed cells would silently sum their "
+                "attention coefficients in the returned matrix."
+            )
+
+        scdl = self._make_data_loader(
+            adata=adata,
+            indices=indices,
+            batch_size=batch_size,
+            num_neighbors=num_neighbors,
+        )
+
+        # Restore the caller's mode afterwards: `get_latent_representation` does not set
+        # eval() itself, so leaving the module in eval would silently change its output
+        # (GCNLayers carries an nn.Dropout) depending on whether this ran first.
+        was_training = self.module.training
+        self.module.eval()
+
+        dst_parts = [[] for _ in range(n_layers)]
+        src_parts = [[] for _ in range(n_layers)]
+        val_parts = [[] for _ in range(n_layers)]
+
+        try:
+            for tensors in scdl:
+                node_batch = tensors["node_batch"]
+                n_id = node_batch["n_id"].cpu().numpy()
+                seed_size = int(node_batch["batch_size"])
+
+                attentions = self.module.get_attention(
+                    x=node_batch["X"],
+                    batch_index=node_batch["batch_label"],
+                    edge_index=node_batch["edge_index"],
+                    batch_size=seed_size,
+                    x_spatial=node_batch.get("x_spatial"),
+                    give_mean=give_mean,
+                )
+                if len(attentions) != n_layers:
+                    raise RuntimeError(
+                        f"Expected {n_layers} attention tensors, got {len(attentions)}."
+                    )
+
+                for layer, att in enumerate(attentions):
+                    dst_local, src_local, alpha = att.coo()
+                    # heads is hardcoded to 1 in _make_conv_layer, but stay defensive.
+                    if alpha.dim() > 1:
+                        alpha = alpha.mean(dim=-1) if alpha.size(-1) > 1 else alpha.squeeze(-1)
+                    # Seed nodes are the first `seed_size` local ids; only edges into them
+                    # have a fully materialised receptive field at this depth.
+                    keep = dst_local < seed_size
+                    dst_parts[layer].append(n_id[dst_local[keep].cpu().numpy()])
+                    src_parts[layer].append(n_id[src_local[keep].cpu().numpy()])
+                    val_parts[layer].append(alpha[keep].float().cpu().numpy())
+        finally:
+            self.module.train(was_training)
+
+        n_obs = adata.n_obs
+        result = {}
+        for layer in range(n_layers):
+            if val_parts[layer]:
+                dst = np.concatenate(dst_parts[layer])
+                src = np.concatenate(src_parts[layer])
+                vals = np.concatenate(val_parts[layer]).astype(np.float32, copy=False)
+            else:
+                dst = np.zeros(0, dtype=np.int64)
+                src = np.zeros(0, dtype=np.int64)
+                vals = np.zeros(0, dtype=np.float32)
+
+            mat = sp.coo_matrix(
+                (vals, (dst, src)), shape=(n_obs, n_obs), dtype=np.float32
+            ).tocsr()
+            # coo -> csr *sums* duplicates; a mismatch here would mean an edge was
+            # emitted twice (broken seed masking or duplicated seeds) and silently
+            # inflated rather than raising.
+            if mat.nnz != vals.size:
+                raise RuntimeError(
+                    f"Layer {layer}: built {vals.size} attention entries but the matrix "
+                    f"has {mat.nnz} nonzeros; duplicate (destination, source) pairs were "
+                    "summed. This indicates a seed-masking or index-mapping bug."
+                )
+            result[layer] = mat
+
+        if key_added is not None:
+            for layer, mat in result.items():
+                adata.obsp[f"{key_added}_l{layer}"] = mat
+
+        return result
 
     def get_marginal_ll(
         self,

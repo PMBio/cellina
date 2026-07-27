@@ -700,6 +700,269 @@ def trained_model(adata_with_spatial):
     return model, adata_with_spatial
 
 
+# ── GAT attention extraction ──────────────────────────────────────────────────
+
+@pytest.fixture
+def trained_gat_model(adata_with_spatial):
+    """GAT model with condition_on_intrinsic=True (the give_mean-sensitive path)."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(
+        adata_with_spatial,
+        n_latent=5,
+        discriminator_lambda=0.0,
+        classifier_lambda=0.0,
+        convolution_type="gat",
+        condition_on_intrinsic=True,
+    )
+    model.train(max_epochs=1, train_size=0.8)
+    return model, adata_with_spatial
+
+
+def test_attention_shape_and_pattern(trained_gat_model):
+    """One matrix per GAT layer, (n_obs, n_obs), pattern within the connectivity graph."""
+    model, adata = trained_gat_model
+    obsp_before = set(adata.obsp.keys())
+
+    att = model.get_attention_weights(batch_size=64)
+
+    assert sorted(att) == list(range(model.n_layers))
+    # Cell i attends over j only where the loader created a message j -> i, i.e. where
+    # spatial_connectivities[j, i] != 0 (see test_attention_orientation).
+    conn_t = (adata.obsp["spatial_connectivities"] != 0).T.tocsr()
+    for layer, mat in att.items():
+        assert sp.issparse(mat)
+        assert mat.shape == (adata.n_obs, adata.n_obs)
+        assert mat.dtype == np.float32
+        outside = (mat != 0) > conn_t
+        assert outside.nnz == 0, f"layer {layer} attends outside the spatial graph"
+
+    # key_added=None must not touch adata.
+    assert set(adata.obsp.keys()) == obsp_before
+
+    # key_added writes one obsp entry per layer.
+    model.get_attention_weights(batch_size=64, key_added="gat_att")
+    for layer in att:
+        assert f"gat_att_l{layer}" in adata.obsp
+        assert adata.obsp[f"gat_att_l{layer}"].shape == (adata.n_obs, adata.n_obs)
+
+
+def test_attention_orientation(adata_with_spatial):
+    """On a strictly asymmetric graph, pin down which way round the matrix is.
+
+    ``adata_with_spatial`` is symmetric, so it cannot distinguish ``A`` from ``A.T``; a
+    transposed implementation would pass every other test in this section.
+    """
+    n_obs = adata_with_spatial.n_obs
+    rows, cols = [], []
+    for i in range(n_obs):
+        for k in (1, 2, 3):
+            rows.append(i)
+            cols.append((i + k) % n_obs)
+    conn = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n_obs, n_obs))
+    assert abs(conn - conn.T).nnz > 0, "graph must be asymmetric for this test to bite"
+    adata_with_spatial.obsp["spatial_connectivities"] = conn
+
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(
+        adata_with_spatial, n_latent=5, discriminator_lambda=0.0, classifier_lambda=0.0
+    )
+    model.train(max_epochs=1, train_size=0.8)
+
+    att = model.get_attention_weights(batch_size=64)
+    conn_bool = (conn != 0)
+    for layer, mat in att.items():
+        pattern = (mat != 0)
+        # spatial_connectivities[i, j] != 0 becomes a message i -> j, so j attends over i
+        # and the attention pattern is the *transpose* of the connectivity pattern.
+        assert (pattern != conn_bool.T.tocsr()).nnz == 0, (
+            f"layer {layer}: attention pattern is not the transpose of the connectivity "
+            "graph; the destination/source orientation has flipped"
+        )
+        np.testing.assert_allclose(
+            np.asarray(mat.sum(axis=1)).ravel(), 1.0, rtol=1e-4, atol=1e-4
+        )
+
+
+def test_attention_rows_sum_to_one(trained_gat_model):
+    """Row = destination, so each non-isolated cell's incoming weights sum to 1."""
+    model, adata = trained_gat_model
+    conn = adata.obsp["spatial_connectivities"]
+    in_degree = np.asarray((conn != 0).sum(axis=0)).ravel()
+    non_isolated = in_degree > 0
+    assert non_isolated.any()
+
+    att = model.get_attention_weights(batch_size=64)
+    for layer, mat in att.items():
+        row_sums = np.asarray(mat.sum(axis=1)).ravel()
+        np.testing.assert_allclose(
+            row_sums[non_isolated], 1.0, rtol=1e-4, atol=1e-4,
+            err_msg=f"layer {layer} rows do not sum to 1",
+        )
+        if (~non_isolated).any():
+            np.testing.assert_allclose(row_sums[~non_isolated], 0.0, atol=1e-6)
+
+
+def test_attention_batching_invariance(trained_gat_model):
+    """Extraction must not depend on batch size (catches n_id / seed-slice bugs)."""
+    model, adata = trained_gat_model
+
+    small = model.get_attention_weights(batch_size=8)
+    full = model.get_attention_weights(batch_size=adata.n_obs)
+
+    assert sorted(small) == sorted(full)
+    for layer in small:
+        np.testing.assert_allclose(
+            small[layer].toarray(), full[layer].toarray(), rtol=1e-4, atol=1e-6,
+            err_msg=f"layer {layer} differs between batch sizes",
+        )
+
+    # give_mean=True (default) makes repeated calls reproducible even though
+    # condition_on_intrinsic=True feeds the intrinsic latent into the GCN input; only
+    # float non-associativity (GPU scatter order) may differ. give_mean=False samples z
+    # and must therefore move the coefficients by orders of magnitude more.
+    again = model.get_attention_weights(batch_size=8)
+    sampled_a = model.get_attention_weights(batch_size=8, give_mean=False)
+    sampled_b = model.get_attention_weights(batch_size=8, give_mean=False)
+    for layer in small:
+        deterministic_drift = np.abs(
+            small[layer].toarray() - again[layer].toarray()
+        ).max()
+        sampled_drift = np.abs(
+            sampled_a[layer].toarray() - sampled_b[layer].toarray()
+        ).max()
+        assert deterministic_drift < 1e-5, (
+            f"layer {layer} is not reproducible with give_mean=True "
+            f"(max diff {deterministic_drift})"
+        )
+        assert sampled_drift > 100 * max(deterministic_drift, 1e-9), (
+            f"layer {layer}: give_mean=False was expected to vary between calls, but "
+            f"moved only {sampled_drift}"
+        )
+
+
+def test_attention_raises_for_non_gat(adata_with_spatial):
+    """Only GATv2 learns per-edge attention; anything else must refuse loudly."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(
+        adata_with_spatial,
+        n_latent=5,
+        discriminator_lambda=0.0,
+        classifier_lambda=0.0,
+        convolution_type="gcn",
+    )
+    model.train(max_epochs=1, train_size=0.8)
+
+    with pytest.raises(NotImplementedError, match="gcn"):
+        model.get_attention_weights(batch_size=64)
+
+    # The encoder-level flag guards the same way.
+    from cellina._spatial_encoder import GCNLayers
+    layers = GCNLayers(n_in=4, n_out=4, n_layers=1, convolution_type="gcn")
+    with pytest.raises(NotImplementedError, match="gcn"):
+        layers(
+            torch.zeros(3, 4),
+            torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            return_attention_weights=True,
+        )
+
+
+def test_attention_raises_on_sampling(trained_gat_model):
+    """A finite fan-out below the max in-degree is approximate: opt in explicitly."""
+    model, adata = trained_gat_model
+    conn = adata.obsp["spatial_connectivities"]
+    max_in_degree = int(np.asarray((conn != 0).sum(axis=0)).max())
+    assert max_in_degree > 1
+
+    fanout = [1] * model.n_layers
+    with pytest.raises(ValueError, match=str(max_in_degree)):
+        model.get_attention_weights(batch_size=64, num_neighbors=fanout)
+
+    att = model.get_attention_weights(
+        batch_size=64, num_neighbors=fanout, allow_sampling=True
+    )
+    assert sorted(att) == list(range(model.n_layers))
+    for mat in att.values():
+        assert mat.shape == (adata.n_obs, adata.n_obs)
+
+    # Wrong-length fan-out is an error regardless of allow_sampling.
+    with pytest.raises(ValueError, match="one entry per GAT layer"):
+        model.get_attention_weights(
+            batch_size=64, num_neighbors=[-1] * (model.n_layers + 1), allow_sampling=True
+        )
+
+
+def test_attention_subset_indices(trained_gat_model):
+    """A subset of indices keeps the full shape and matches the all-cells result."""
+    model, adata = trained_gat_model
+    subset = np.arange(0, adata.n_obs, 7)
+
+    full = model.get_attention_weights(batch_size=64)
+    partial = model.get_attention_weights(batch_size=64, indices=subset)
+
+    mask = np.zeros(adata.n_obs, dtype=bool)
+    mask[subset] = True
+    for layer, mat in partial.items():
+        assert mat.shape == (adata.n_obs, adata.n_obs)
+        row_sums = np.asarray(mat.sum(axis=1)).ravel()
+        np.testing.assert_allclose(row_sums[~mask], 0.0, atol=1e-6)
+        np.testing.assert_allclose(
+            mat[subset].toarray(), full[layer][subset].toarray(), rtol=1e-4, atol=1e-6,
+        )
+
+
+def test_attention_restores_training_mode(trained_gat_model, monkeypatch):
+    """Extraction must not leave the module in eval(): get_latent_representation does
+    not set the mode itself, so a leaked eval() silently changes its dropout behaviour."""
+    model, _ = trained_gat_model
+
+    for mode in (True, False):
+        model.module.train(mode)
+        model.get_attention_weights(batch_size=64)
+        assert model.module.training is mode
+
+    # Restored even when extraction raises inside the batch loop.
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    model.module.train(True)
+    monkeypatch.setattr(model.module, "get_attention", _boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        model.get_attention_weights(batch_size=64)
+    assert model.module.training is True
+
+
+def test_attention_rejects_boolean_mask(trained_gat_model):
+    """A boolean mask must be named as such, not misreported as duplicated indices."""
+    model, adata = trained_gat_model
+    mask = np.zeros(adata.n_obs, dtype=bool)
+    mask[:10] = True
+
+    with pytest.raises(ValueError, match="boolean mask"):
+        model.get_attention_weights(batch_size=64, indices=mask)
+
+    # The documented conversion works.
+    att = model.get_attention_weights(batch_size=64, indices=np.flatnonzero(mask))
+    assert sorted(att) == list(range(model.n_layers))
+
+
 def test_make_perturbed_expression():
     X = np.arange(1, 10, dtype=float).reshape(3, 3)
     adata = AnnData(X=X.copy())
