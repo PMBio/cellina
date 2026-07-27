@@ -225,6 +225,28 @@ class CellinaGCNModule(BaseModuleClass):
             "batch_index": batch_index,
         }
 
+    def _build_spatial_input(self, x_, x_spatial, z_like):
+        """Assemble the GCN input from log-counts and (optionally) the intrinsic latent.
+
+        Single source of truth shared by :meth:`inference` and :meth:`get_attention` so
+        the two cannot drift.
+
+        Parameters
+        ----------
+        x_
+            ``log(1 + x)`` of the count matrix; used as the spatial features when
+            ``x_spatial`` is not provided.
+        x_spatial
+            Optional raw alternative spatial features (log1p-transformed here).
+        z_like
+            Intrinsic latent to condition on when ``condition_on_intrinsic`` is True.
+            Always detached before concatenation.
+        """
+        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
+        if self.condition_on_intrinsic:
+            return torch.cat([x_spatial_, z_like.detach()], dim=-1)
+        return x_spatial_
+
     @auto_move_data
     def inference(
         self,
@@ -239,12 +261,7 @@ class CellinaGCNModule(BaseModuleClass):
 
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
-
-        if self.condition_on_intrinsic:
-            spatial_input = torch.cat([x_spatial_, z.detach()], dim=-1)
-        else:
-            spatial_input = x_spatial_
+        spatial_input = self._build_spatial_input(x_, x_spatial, z)
 
         qsm, qsv, s, neighbor_means = self.s_encoder(
             spatial_input, edge_index, batch_index,
@@ -293,6 +310,52 @@ class CellinaGCNModule(BaseModuleClass):
             outputs["s_domain_logits"] = self.s_domain_classifier(s)
 
         return outputs
+
+    @auto_move_data
+    def get_attention(
+        self,
+        x,
+        batch_index,
+        edge_index,
+        batch_size,
+        x_spatial=None,
+        give_mean: bool = True,
+    ):
+        """Return the raw per-layer GAT attention coefficients for one graph batch.
+
+        Mirrors :meth:`inference`'s input preparation exactly (``log(1 + x)``, the
+        ``x_spatial`` fallback and the ``condition_on_intrinsic`` concatenation) but runs
+        only the spatial encoder and returns attention instead of latents.
+
+        Parameters
+        ----------
+        give_mean
+            If True (default), feed the posterior mean ``qzm`` rather than the
+            reparameterised sample ``z`` into the GCN input under
+            ``condition_on_intrinsic=True``. ``module.eval()`` disables dropout but not
+            the reparameterisation draw, so ``give_mean=False`` makes attention differ
+            between two otherwise identical calls.
+
+        Returns
+        -------
+        ``list[SparseTensor]``, one per GAT layer, over the *sampled* nodes of this batch
+        (``row = destination``, ``col = source``). Only edges whose destination is one of
+        the first ``batch_size`` (seed) nodes carry exact coefficients.
+        """
+        x_ = torch.log(1 + x)
+
+        qzm, _, z = self.z_encoder(x_, batch_index)
+        z_like = qzm if give_mean else z
+
+        spatial_input = self._build_spatial_input(x_, x_spatial, z_like)
+
+        *_, attentions = self.s_encoder(
+            spatial_input, edge_index, batch_index,
+            batch_size=batch_size,
+            return_neighbor_means=False,
+            return_attention_weights=True,
+        )
+        return attentions
 
     @auto_move_data
     def generative(self, shifted, library, batch_index):
