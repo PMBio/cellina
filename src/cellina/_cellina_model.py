@@ -30,7 +30,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
     This model extends scVI with a spatial encoder that processes spatial features
     alongside the standard count encoder. The two latent representations (z from counts,
-    s from spatial+z) are concatenated (shifted = concat(z, s)) and decoded together
+    s from spatial features) are concatenated (shifted = concat(z, s)) and decoded together
     to reconstruct the count data.
 
     Parameters
@@ -67,7 +67,6 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 2,
         discriminator_lambda: float = 1.0,
-        condition_on_intrinsic: bool = False,
         use_observed_lib_size: bool = True,
         classifier_lambda: float = 1.0,
         domain_classifier_lambda: float = 0.0,
@@ -94,7 +93,6 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_labels=self.summary_stats.get("n_labels"),
             discriminator_lambda=discriminator_lambda,
             n_domains=self.summary_stats.get("n_domains"),
-            condition_on_intrinsic=condition_on_intrinsic,
             use_observed_lib_size=use_observed_lib_size,
             classifier_lambda=classifier_lambda,
             domain_classifier_lambda=domain_classifier_lambda,

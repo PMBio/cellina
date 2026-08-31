@@ -1,5 +1,7 @@
 """Graph data splitter for CellinaGCN model."""
 
+import warnings
+
 import torch
 import numpy as np
 import scipy.sparse as sp
@@ -130,6 +132,22 @@ class GraphJointDataSplitter(DataSplitter):
         if not sp.issparse(adj_matrix):
             adj_matrix = sp.csr_matrix(adj_matrix)
 
+        # NeighborLoader samples incoming edges and GCNLayers builds adj_t from them, so
+        # an asymmetric graph silently transposes the receptive field. Symmetrize and warn.
+        if (adj_matrix != adj_matrix.T).nnz > 0:
+            warnings.warn(
+                f"Spatial connectivity matrix '{spatial_key}' is not symmetric; "
+                "symmetrizing internally with adj.maximum(adj.T).",
+                UserWarning,
+            )
+            adj_matrix = adj_matrix.maximum(adj_matrix.T)
+
+        # Explicitly stored zeros (e.g. from in-place weight thresholding) are non-edges;
+        # tocoo() would otherwise turn them into message-passing edges. Copy before
+        # eliminate_zeros() so the user's adata.obsp matrix is never mutated.
+        if np.any(adj_matrix.data == 0):
+            adj_matrix = adj_matrix.copy()
+            adj_matrix.eliminate_zeros()
         adj_coo = adj_matrix.tocoo()
         edge_index = torch.tensor(np.vstack([adj_coo.row, adj_coo.col]), dtype=torch.long)
         edge_index, _ = remove_self_loops(edge_index)

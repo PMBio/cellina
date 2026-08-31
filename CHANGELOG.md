@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+
+### Removed
+- **Breaking**: `condition_on_intrinsic` parameter removed from `Cellina`,
+  `CellinaModule`, `CellinaGCN`, and `CellinaGCNModule`; behaviour is now always
+  the previous `False` (the `s_encoder` receives spatial features only, never
+  concatenated with detached `z`). Note that `CellinaModule`/`CellinaGCNModule`
+  previously defaulted to `True` when constructed directly.
+
+### Changed
+- `CellinaGCNModule.inference` now runs the count (`z_encoder`) and library
+  encoders on seed nodes only instead of the full sampled subgraph, cutting
+  their per-batch compute by the subgraph blow-up factor (~20–50x) and removing
+  the degree-weighted bias in `z_encoder` batch-norm statistics.
+- `GraphJointDataSplitter` symmetrizes an asymmetric spatial connectivity
+  matrix internally (`adj.maximum(adj.T)`) with a `UserWarning`; previously an
+  asymmetric graph silently transposed the GCN receptive field.
+
+### Fixed
+- Explicitly stored zeros in the spatial connectivity matrix (e.g. from
+  in-place weight thresholding) no longer become message-passing edges; they
+  are dropped via `eliminate_zeros()` on a copy, leaving `adata.obsp` untouched.
+
 ## [1.0.0] — 2026-06-04 - Release
 
 This is the first stable release of Cellina, graduating from the 0.99.x pre-release series.

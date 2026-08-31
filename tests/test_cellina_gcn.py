@@ -344,10 +344,9 @@ def test_marginal_ll(trained_model):
     assert torch.all(torch.isfinite(log_lkl))
 
 
-def test_condition_on_intrinsic_false(adata_with_spatial):
-    """Test s_encoder architecture changes with condition_on_intrinsic=False."""
+def test_seed_sliced_inference(adata_with_spatial):
+    """z/s are seed-sized and the s_encoder input is the raw gene dimension."""
     n_latent = 5
-    n_vars = adata_with_spatial.n_vars
 
     CellinaGCN.setup_anndata(
         adata_with_spatial,
@@ -357,30 +356,22 @@ def test_condition_on_intrinsic_false(adata_with_spatial):
         spatial_connectivities_key="spatial_connectivities",
     )
 
-    model_true = CellinaGCN(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
-    assert model_true.module.condition_on_intrinsic == True
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent)
+    first_gcn = model.module.s_encoder.encoder.gcn_layers[0]
+    assert first_gcn.in_channels == adata_with_spatial.n_vars
 
-    model_false = CellinaGCN(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
-    assert model_false.module.condition_on_intrinsic == False
+    model.train(max_epochs=2, train_size=0.5)
 
-    first_gcn_true = model_true.module.s_encoder.encoder.gcn_layers[0]
-    first_gcn_false = model_false.module.s_encoder.encoder.gcn_layers[0]
-    input_dim_true = first_gcn_true.in_channels
-    input_dim_false = first_gcn_false.in_channels
-
-    n_cov = model_true.module.s_encoder.encoder.n_cov
-    assert (input_dim_true - n_cov) - (input_dim_false - n_cov) == n_latent, \
-        f"Difference in input dims should be n_latent={n_latent}, got {(input_dim_true - n_cov) - (input_dim_false - n_cov)}"
-
-    model_false.train(max_epochs=2, train_size=0.5)
-
-    dataloader = model_false._make_data_loader(adata_with_spatial, batch_size=32)
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    model_false.module.eval()
+    batch_size = batch["node_batch"]["batch_size"]
+    assert batch["node_batch"]["X"].shape[0] >= batch_size  # subgraph includes neighbours
+    model.module.eval()
     with torch.no_grad():
-        inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
-    assert inference_outputs["z"].shape[1] == n_latent
-    assert inference_outputs["s"].shape[1] == n_latent
+        inference_outputs = model.module.inference(**model.module._get_inference_input(batch))
+    assert inference_outputs["z"].shape == (batch_size, n_latent)
+    assert inference_outputs["s"].shape == (batch_size, n_latent)
+    assert inference_outputs["shifted"].shape == (batch_size, 2 * n_latent)
 
 
 def test_normalize_losses_true(adata_with_spatial):

@@ -343,38 +343,29 @@ def test_marginal_ll(adata_with_spatial):
     assert isinstance(log_lkl, torch.Tensor) and np.isfinite(log_lkl).all()
 
 
-def test_condition_on_intrinsic_false(adata_with_spatial):
-    """Test s_encoder architecture changes with condition_on_intrinsic=False."""
+def test_s_encoder_spatial_only_input(adata_with_spatial):
+    """s_encoder input is the raw spatial feature dimension (plus injected batch covariate)."""
     n_latent = 5
     n_spatial = adata_with_spatial.obsm["spatial_x"].shape[1]
-    
+
     Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
-    
-    # Test with condition_on_intrinsic=True (default)
-    model_true = Cellina(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=True)
-    assert model_true.module.condition_on_intrinsic == True
-    
-    # Test with condition_on_intrinsic=False
-    model_false = Cellina(adata_with_spatial, n_latent=n_latent, condition_on_intrinsic=False)
-    assert model_false.module.condition_on_intrinsic == False
-    
-    # Check the difference in encoder input dimensions
-    # The encoder has inject_covariates=True, so batch info is also injected
-    # But we can verify the difference is exactly n_latent
-    input_dim_true = model_true.module.s_encoder.encoder.fc_layers[0][0].in_features
-    input_dim_false = model_false.module.s_encoder.encoder.fc_layers[0][0].in_features
-    assert input_dim_true - input_dim_false == n_latent, \
-        f"Difference in input dims should be n_latent={n_latent}, got {input_dim_true - input_dim_false}"
-    
-    # Test training works with condition_on_intrinsic=False
-    model_false.train(max_epochs=2, train_size=0.5)
-    
-    # Test inference outputs have correct shapes
-    dataloader = model_false._make_data_loader(adata_with_spatial, batch_size=32)
+
+    model = Cellina(adata_with_spatial, n_latent=n_latent)
+    n_batch = model.summary_stats["n_batch"]
+    input_dim = model.module.s_encoder.encoder.fc_layers[0][0].in_features
+    assert input_dim == n_spatial + n_batch, \
+        f"s_encoder input should be n_spatial + n_batch = {n_spatial + n_batch}, got {input_dim}"
+
+    model.train(max_epochs=2, train_size=0.5)
+
+    dataloader = model._make_data_loader(adata_with_spatial, batch_size=32)
     batch = next(iter(dataloader))
-    model_false.module.eval()
+    model.module.eval()
     with torch.no_grad():
-        inference_outputs = model_false.module.inference(**model_false.module._get_inference_input(batch))
+        inference_outputs = model.module.inference(**model.module._get_inference_input(batch))
+    assert inference_outputs["z"].shape[1] == n_latent
+    assert inference_outputs["s"].shape[1] == n_latent
+    assert inference_outputs["shifted"].shape[1] == 2 * n_latent
 
 def test_make_counterfactual_adata(adata_with_spatial):
     """Test make_counterfactual_adata with precomputed=False and precomputed=True."""

@@ -18,11 +18,11 @@ TensorDict = Dict[str, torch.Tensor]
 
 class CellinaModule(BaseModuleClass):
     """
-    Cellina module with dual encoders (z from counts, s from spatial+z).
+    Cellina module with dual encoders (z from counts, s from spatial features).
 
     This module implements a dual-encoder variational autoencoder where:
     - z_encoder processes count data to produce latent representation z
-    - s_encoder processes spatial features concatenated with z to produce latent representation s
+    - s_encoder processes spatial features to produce latent representation s
     - decoder reconstructs counts from shifted = concat(z, s)
 
     Parameters
@@ -84,7 +84,6 @@ class CellinaModule(BaseModuleClass):
         n_domains: Optional[int] = None,
         domain_classifier_lambda: float = 0.0,
         domain_classifier_kwargs: Optional[Dict[str, Any]] = None,
-        condition_on_intrinsic: bool = True,
         use_observed_lib_size: bool = True,
     ):
         super().__init__()
@@ -120,12 +119,9 @@ class CellinaModule(BaseModuleClass):
             use_layer_norm=False,
         )
 
-        # S encoder: [spatial_x, z] -> s
-        # Set whether to condition spatial encoder on intrinsic latent
-        self.condition_on_intrinsic = condition_on_intrinsic
-        n_input_s = n_spatial_input + n_latent if condition_on_intrinsic else n_spatial_input
+        # S encoder: spatial_x -> s
         self.s_encoder = Encoder(
-            n_input_s,  # spatial features + z OR spatial features only
+            n_spatial_input,
             n_latent,
             n_cat_list=cat_list,
             n_layers=n_layers,
@@ -249,12 +245,8 @@ class CellinaModule(BaseModuleClass):
         # Encode counts -> z
         qzm, qzv, z = self.z_encoder(x_, batch_index)
 
-        # (Optionally) Concatenate spatial_x and z, then encode -> s
-        if self.condition_on_intrinsic:
-            spatial_input = torch.cat([spatial_x, z.detach()], dim=-1)
-        else:
-            spatial_input = spatial_x
-        qsm, qsv, s = self.s_encoder(spatial_input, batch_index)
+        # Encode spatial_x -> s
+        qsm, qsv, s = self.s_encoder(spatial_x, batch_index)
 
         # Compute shifted = concat(z, s)
         shifted = torch.cat([z, s], dim=-1)

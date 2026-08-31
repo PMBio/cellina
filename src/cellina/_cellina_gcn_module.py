@@ -49,8 +49,6 @@ class CellinaGCNModule(BaseModuleClass):
         Weight for adversarial domain discriminator. 0 disables.
     n_domains
         Number of domain labels.
-    condition_on_intrinsic
-        If True, concatenate detached z to GCN input before message passing.
     link_prediction_weight
         Weight for spatial loss on s. 0 disables.
     spatial_loss_type
@@ -80,7 +78,6 @@ class CellinaGCNModule(BaseModuleClass):
         discriminator_lambda: float = 0.0,
         discriminator_kwargs: Optional[Dict[str, Any]] = None,
         n_domains: Optional[int] = None,
-        condition_on_intrinsic: bool = True,
         link_prediction_weight: float = 0.0,
         spatial_loss_type: str = "supcon",
         supcon_temperature: float = 0.25,
@@ -124,10 +121,8 @@ class CellinaGCNModule(BaseModuleClass):
             use_layer_norm=False,
         )
 
-        self.condition_on_intrinsic = condition_on_intrinsic
-        n_input_s = n_input + n_latent if condition_on_intrinsic else n_input
         self.s_encoder = GraphEncoder(
-            n_input=n_input_s,
+            n_input=n_input,
             n_output=n_latent,
             n_cat_list=cat_list,
             n_layers=n_layers,
@@ -236,15 +231,14 @@ class CellinaGCNModule(BaseModuleClass):
         x_spatial=None,
     ):
         x_ = torch.log(1 + x)
+        # Count/library encoders only need the seed nodes (first batch_size rows);
+        # the full sampled subgraph is only needed for GCN message passing.
+        x_seed = x_[:batch_size]
+        batch_index_seed = batch_index[:batch_size]
 
-        qzm, qzv, z = self.z_encoder(x_, batch_index)
+        qzm, qzv, z = self.z_encoder(x_seed, batch_index_seed)
 
-        x_spatial_ = torch.log(1 + x_spatial) if x_spatial is not None else x_
-
-        if self.condition_on_intrinsic:
-            spatial_input = torch.cat([x_spatial_, z.detach()], dim=-1)
-        else:
-            spatial_input = x_spatial_
+        spatial_input = torch.log(1 + x_spatial) if x_spatial is not None else x_
 
         qsm, qsv, s, neighbor_means = self.s_encoder(
             spatial_input, edge_index, batch_index,
@@ -255,21 +249,15 @@ class CellinaGCNModule(BaseModuleClass):
         )
 
         if self.use_observed_lib_size:
-            library = torch.log(x.sum(1)).unsqueeze(1)
+            library = torch.log(x[:batch_size].sum(1)).unsqueeze(1)
             qlm, qlv = None, None
         else:
-            qlm, qlv, library = self.l_encoder(x_, batch_index)
+            qlm, qlv, library = self.l_encoder(x_seed, batch_index_seed)
 
-        qzm = qzm[:batch_size, :]
-        qzv = qzv[:batch_size, :]
-        z_sliced = z[:batch_size, :]
-        shifted = torch.cat([z_sliced, s], dim=-1)
-        qlm = qlm[:batch_size, :] if qlm is not None else None
-        qlv = qlv[:batch_size, :] if qlv is not None else None
-        library = library[:batch_size, :]
+        shifted = torch.cat([z, s], dim=-1)
 
         outputs = dict(
-            z=z_sliced,
+            z=z,
             qzm=qzm,
             qzv=qzv,
             s=s,
@@ -284,10 +272,10 @@ class CellinaGCNModule(BaseModuleClass):
         )
 
         if self.classifier is not None:
-            outputs["classifier_logits"] = self.classifier(z_sliced)
+            outputs["classifier_logits"] = self.classifier(z)
 
         if self.domain_discriminator is not None:
-            outputs["discriminator_logits"] = self.domain_discriminator(z_sliced)
+            outputs["discriminator_logits"] = self.domain_discriminator(z)
 
         if self.s_domain_classifier is not None:
             outputs["s_domain_logits"] = self.s_domain_classifier(s)

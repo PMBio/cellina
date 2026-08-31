@@ -48,8 +48,6 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Hidden layers (shared by both encoders).
     discriminator_lambda
         Weight for adversarial domain forgetting. 0 disables it.
-    condition_on_intrinsic
-        If True, concatenate detached z to GCN input before message passing.
     link_prediction_weight
         Weight for spatial loss on s. 0 disables it.
     spatial_loss_type
@@ -88,7 +86,6 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         n_latent: int = 10,
         n_layers: int = 2,
         discriminator_lambda: float = 1.0,
-        condition_on_intrinsic: bool = False,
         link_prediction_weight: float = 1.0,
         spatial_loss_type: str = "supcon",
         classifier_lambda: float = 1.0,
@@ -126,7 +123,6 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             n_labels=self.summary_stats.get("n_labels"),
             discriminator_lambda=discriminator_lambda,
             n_domains=self.summary_stats.get("n_domains"),
-            condition_on_intrinsic=condition_on_intrinsic,
             link_prediction_weight=link_prediction_weight,
             spatial_loss_type=spatial_loss_type,
             classifier_lambda=classifier_lambda,
@@ -293,7 +289,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Counterfactual subgraph sampling mode. ``None`` (default) inherits the model's
             ``subgraph_type``; pass ``'directional'`` to keep only sampling-path edges
             (lower VRAM, output-equivalent for counterfactuals) or ``'induced'`` to
-            materialise the full induced subgraph.
+            materialise the full induced subgraph. "directional" has not been tested with
+            the contrastive loss and may result in undersampled negatives.
         """
         if latent_key not in ['shifted', 'z', 's']:
             raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
