@@ -739,3 +739,300 @@ def test_perturbed_expression(trained_model):
     expr_cf = model.get_perturbed_expression(cf_layer="cf_zero", library_size=1e4)
     assert expr_cf.shape == adata.shape
     assert not np.allclose(expr_cf, expr_base, atol=1e-3)
+
+
+def _setup_gcn(adata):
+    CellinaGCN.setup_anndata(
+        adata,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    return CellinaGCN(adata, n_latent=5)
+
+
+def test_asymmetric_graph_is_symmetrized(adata_with_spatial):
+    """An asymmetric graph warns and is symmetrized; adata.obsp is left alone."""
+    n_obs = adata_with_spatial.n_obs
+    rng = np.random.default_rng(0)
+    rows = np.repeat(np.arange(n_obs), 3)
+    cols = rng.integers(0, n_obs, size=rows.size)
+    keep = rows != cols
+    adj = sp.csr_matrix(
+        (np.ones(keep.sum()), (rows[keep], cols[keep])), shape=(n_obs, n_obs)
+    )
+    adj.data[:] = 1.0
+    assert (adj != adj.T).nnz > 0, "fixture graph must be asymmetric"
+    adata_with_spatial.obsp["spatial_connectivities"] = adj
+    adj_before = adj.copy()
+
+    model = _setup_gcn(adata_with_spatial)
+    with pytest.warns(UserWarning, match="not symmetric"):
+        splitter = model._get_cached_splitter(32)
+
+    edges = set(map(tuple, splitter.pyg_data.edge_index.numpy().T))
+    assert edges, "expected a non-empty edge set"
+    assert all((dst, src) in edges for src, dst in edges), \
+        "every edge must have its reverse after symmetrization"
+
+    stored = adata_with_spatial.obsp["spatial_connectivities"]
+    assert (stored != adj_before).nnz == 0, "adata.obsp must not be mutated"
+
+
+def test_stored_zeros_are_not_edges(adata_with_spatial):
+    """Explicitly stored zeros are dropped rather than becoming message-passing edges."""
+    coo = adata_with_spatial.obsp["spatial_connectivities"].tocoo()
+    # (row + col) is swap-invariant, so zeroing on it keeps the matrix symmetric
+    # and isolates this behaviour from the symmetrization path.
+    data = coo.data.copy()
+    data[(coo.row + coo.col) % 3 == 0] = 0.0
+    adj = sp.csr_matrix((data, (coo.row, coo.col)), shape=coo.shape)
+    n_stored, n_real = adj.nnz, int((adj.data != 0).sum())
+    assert n_real < n_stored, "fixture must contain explicit zeros"
+    adata_with_spatial.obsp["spatial_connectivities"] = adj
+
+    model = _setup_gcn(adata_with_spatial)
+    splitter = model._get_cached_splitter(32)
+
+    assert splitter.pyg_data.edge_index.shape[1] == n_real
+    assert adata_with_spatial.obsp["spatial_connectivities"].nnz == n_stored, \
+        "adata.obsp must not be mutated"
+
+
+def test_missing_spatial_key_raises(adata_with_spatial):
+    """A registered-but-absent connectivity matrix fails with an actionable message."""
+    model = _setup_gcn(adata_with_spatial)
+    del adata_with_spatial.obsp["spatial_connectivities"]
+    with pytest.raises(ValueError, match="not found in adata.obsp"):
+        model._get_cached_splitter(32)
+
+
+def test_count_encoder_runs_on_seed_nodes_only(adata_with_spatial):
+    """z_encoder sees only seed rows while the GCN sees the whole sampled subgraph."""
+    model = _setup_gcn(adata_with_spatial)
+    batch_size = 32
+    batch = next(iter(model._make_data_loader(adata_with_spatial, batch_size=batch_size)))
+    n_subgraph = batch["node_batch"]["X"].shape[0]
+    assert n_subgraph > batch_size, "sampled subgraph must be larger than the seed set"
+
+    seen = {}
+    model.module.z_encoder.register_forward_hook(
+        lambda m, inp, out: seen.__setitem__("z_rows", inp[0].shape[0])
+    )
+    model.module.s_encoder.register_forward_hook(
+        lambda m, inp, out: seen.__setitem__("s_rows", inp[0].shape[0])
+    )
+
+    model.module.eval()
+    with torch.no_grad():
+        model.module.inference(**model.module._get_inference_input(batch))
+
+    assert seen["z_rows"] == batch_size
+    assert seen["s_rows"] == n_subgraph
+
+
+@pytest.mark.parametrize(
+    "conv_type,expected_cls,expected_aggr",
+    [
+        ("gcn", "GCNConv", None),
+        ("gat", "GATv2Conv", None),
+        ("gin", "GINConv", None),
+        ("sg", "SGConv", None),
+        ("sum", "_LinearAggConv", "add"),
+        ("mean", "_LinearAggConv", "mean"),
+    ],
+)
+def test_convolution_types(adata_with_spatial, conv_type, expected_cls, expected_aggr):
+    """Each convolution_type builds that convolution and yields finite latents."""
+    n_latent = 5
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent, convolution_type=conv_type)
+
+    layer = model.module.s_encoder.encoder.gcn_layers[0]
+    assert type(layer).__name__ == expected_cls
+    if expected_aggr is not None:
+        assert layer.conv.aggr == expected_aggr
+
+    batch = next(iter(model._make_data_loader(adata_with_spatial, batch_size=32)))
+    batch_size = batch["node_batch"]["batch_size"]
+    model.module.eval()
+    with torch.no_grad():
+        out = model.module.inference(**model.module._get_inference_input(batch))
+
+    assert out["s"].shape == (batch_size, n_latent)
+    assert torch.isfinite(out["s"]).all()
+
+
+def test_unknown_convolution_type_raises(adata_with_spatial):
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    with pytest.raises(ValueError, match="Unknown convolution_type"):
+        CellinaGCN(adata_with_spatial, n_latent=5, convolution_type="not_a_conv")
+
+
+@pytest.mark.parametrize("subgraph_type", ["induced", "directional"])
+def test_subgraph_types(adata_with_spatial, subgraph_type):
+    """Both sampling modes train and produce one latent row per cell."""
+    n_latent = 5
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=n_latent, subgraph_type=subgraph_type)
+    model.train(max_epochs=1, train_size=0.5)
+
+    latent = model.get_latent_representation(give_mean=True)
+    assert latent.shape == (adata_with_spatial.n_obs, 2 * n_latent)
+    assert np.isfinite(latent).all()
+
+
+def test_invalid_subgraph_type_raises(adata_with_spatial):
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    with pytest.raises(ValueError, match="subgraph_type must be one of"):
+        CellinaGCN(adata_with_spatial, n_latent=5, subgraph_type="bogus")
+
+
+def test_save_load_roundtrip(trained_model, tmp_path):
+    """A reloaded model reproduces the original latents exactly."""
+    model, adata = trained_model
+    before = model.get_latent_representation(give_mean=True)
+
+    path = str(tmp_path / "model")
+    model.save(path, overwrite=True)
+    reloaded = CellinaGCN.load(path, adata=adata)
+
+    assert reloaded.is_trained_
+    np.testing.assert_allclose(
+        reloaded.get_latent_representation(give_mean=True), before, rtol=1e-5, atol=1e-6
+    )
+
+
+@pytest.mark.parametrize("gene_likelihood", ["zinb", "nb"])
+def test_gene_likelihood_variants(adata_with_spatial, gene_likelihood):
+    """Both likelihoods give a finite reconstruction loss."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=5, gene_likelihood=gene_likelihood)
+    assert model.module.gene_likelihood == gene_likelihood
+
+    batch = next(iter(model._make_data_loader(adata_with_spatial, batch_size=32)))
+    inf = model.module.inference(**model.module._get_inference_input(batch))
+    gen = model.module.generative(**model.module._get_generative_input(batch, inf))
+    loss_out = model.module.loss(batch, inf, gen)
+    assert torch.isfinite(loss_out.loss)
+
+
+def test_x_spatial_layer_feeds_the_graph_encoder(adata_with_spatial):
+    """x_spatial_layer swaps the GCN's input features while z stays on the counts."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    adata_with_spatial.layers["spatial_feats"] = sp.csr_matrix(
+        np.zeros(adata_with_spatial.shape, dtype=np.float32)
+    )
+    base = CellinaGCN(adata_with_spatial, n_latent=5)
+    with_layer = CellinaGCN(adata_with_spatial, n_latent=5, x_spatial_layer="spatial_feats")
+    with_layer.module.load_state_dict(base.module.state_dict())
+
+    for m in (base, with_layer):
+        m.module.eval()
+    outs = []
+    for m in (base, with_layer):
+        batch = next(iter(m._make_data_loader(adata_with_spatial, batch_size=32)))
+        with torch.no_grad():
+            outs.append(m.module.inference(**m.module._get_inference_input(batch)))
+
+    np.testing.assert_allclose(
+        outs[0]["qzm"].numpy(), outs[1]["qzm"].numpy(), rtol=1e-5,
+        err_msg="z must depend only on counts",
+    )
+    assert not np.allclose(outs[0]["qsm"].numpy(), outs[1]["qsm"].numpy(), atol=1e-3), \
+        "s must reflect the alternative spatial features"
+
+
+def test_x_spatial_layer_missing_raises(adata_with_spatial):
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=5, x_spatial_layer="absent")
+    with pytest.raises(ValueError, match="not in adata.layers"):
+        model._get_cached_splitter(32)
+
+
+def test_counterfactual_latents(trained_model):
+    """Rewiring the neighbourhood moves s, leaves z alone, and is seed-reproducible."""
+    model, adata = trained_model
+    indices = np.arange(40)
+    donors = np.arange(60, adata.n_obs)
+
+    z_cf = model.get_counterfactual_latents(indices, donors, latent_key="z", give_mean=True)
+    s_cf = model.get_counterfactual_latents(indices, donors, latent_key="s", give_mean=True)
+    s_again = model.get_counterfactual_latents(indices, donors, latent_key="s", give_mean=True)
+    s_other_seed = model.get_counterfactual_latents(
+        indices, donors, latent_key="s", give_mean=True, seed=1
+    )
+
+    assert z_cf.shape == (len(indices), model.module.n_latent)
+    assert s_cf.shape == (len(indices), model.module.n_latent)
+    # Tolerance is float32 GPU noise; a different donor draw moves s by ~1e-1.
+    np.testing.assert_allclose(
+        s_cf, s_again, rtol=1e-4, atol=1e-6, err_msg="same seed must reproduce"
+    )
+    assert not np.allclose(s_cf, s_other_seed, atol=1e-3), \
+        "a different seed must draw different donors"
+
+    z_obs = model.get_latent_representation(latent_key="z", give_mean=True)[indices]
+    s_obs = model.get_latent_representation(latent_key="s", give_mean=True)[indices]
+    np.testing.assert_allclose(
+        z_cf, z_obs, rtol=1e-4, atol=1e-6, err_msg="z is intrinsic to the cell"
+    )
+    assert not np.allclose(s_cf, s_obs, atol=1e-3), "s must respond to the rewired graph"
+
+
+def test_counterfactual_expression(trained_model):
+    """Counterfactual expression is per-seed, non-negative, and finite."""
+    model, adata = trained_model
+    indices = np.arange(40)
+    donors = np.arange(60, adata.n_obs)
+
+    expr = model.get_counterfactual_expression(indices, donors, library_size=1e4)
+    assert expr.shape == (len(indices), adata.n_vars)
+    assert np.isfinite(expr).all() and (expr >= 0).all()
+
+
+def test_counterfactual_rejects_oversized_neighbourhood(trained_model):
+    model, adata = trained_model
+    donors = np.arange(60, 70)
+    with pytest.raises(ValueError, match="must be less than"):
+        model.get_counterfactual_latents(np.arange(10), donors, n_neighbors_per_seed=len(donors))
