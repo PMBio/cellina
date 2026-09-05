@@ -1036,3 +1036,21 @@ def test_counterfactual_rejects_oversized_neighbourhood(trained_model):
     donors = np.arange(60, 70)
     with pytest.raises(ValueError, match="must be less than"):
         model.get_counterfactual_latents(np.arange(10), donors, n_neighbors_per_seed=len(donors))
+
+
+def test_counterfactual_edges_are_donor_to_seed_only(trained_model):
+    """Counterfactual rewiring adds donor -> seed edges only; no edge may point at a donor from a seed."""
+    model, adata = trained_model
+    indices = np.arange(10)
+    donors = np.arange(60, adata.n_obs)
+    k = 5
+    loader = model._make_counterfactual_loader(indices, donors, n_neighbors_per_seed=k, batch_size=10, seed=0)
+    src, dst = loader.node_loader.data.edge_index.numpy()
+    seed_src, seed_dst = np.isin(src, indices), np.isin(dst, indices)
+    assert not seed_src.any(), "seeds must not be message sources (all seed edges were dropped)"
+    assert seed_dst.sum() == len(indices) * k
+    assert np.isin(src[seed_dst], donors).all()
+    # seed sets are reproducible and drawn from the same stream as before the fix
+    rng = np.random.default_rng(0)
+    expected = np.concatenate([rng.choice(donors, size=k, replace=False) for _ in indices])
+    np.testing.assert_array_equal(np.sort(src[seed_dst]), np.sort(expected))

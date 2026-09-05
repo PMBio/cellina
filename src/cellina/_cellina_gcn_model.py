@@ -215,18 +215,15 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 f"len(neighbour_indices) ({len(neighbour_indices)})"
             )
 
-        cf_src_parts, cf_dst_parts = [], []
-        for s in indices:
-            chosen = rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
-            cf_src_parts.append(np.full(n_neighbors_per_seed, s))
-            cf_dst_parts.append(chosen)
-        cf_src = np.concatenate(cf_src_parts)
-        cf_dst = np.concatenate(cf_dst_parts)
+        # Same RNG stream / draw order as before, so seeds reproduce the same donor sets.
+        donors = [rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
+                  for _ in indices]
+        cf_src = np.repeat(indices, n_neighbors_per_seed)
+        cf_dst = np.concatenate(donors)
 
-        cf_edges = np.stack([
-            np.concatenate([cf_src, cf_dst]),
-            np.concatenate([cf_dst, cf_src]),
-        ], axis=0)
+        # Donor -> seed only. Bidirectional edges let donors aggregate over the (control)
+        # seeds under multi-hop sampling, pulling the counterfactual back toward control.
+        cf_edges = np.stack([cf_dst, cf_src], axis=0)
 
         new_edge_index = np.concatenate([filtered_edges, cf_edges], axis=1)
         new_edge_index = torch.tensor(new_edge_index, dtype=torch.long)
