@@ -81,7 +81,7 @@ def test_num_neighbors_resolution(adata_with_spatial):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         model_default = CellinaGCN(adata_with_spatial, n_latent=5, n_layers=3)
-    assert model_default._num_neighbors == [-1, -1, -1]
+    assert model_default._num_neighbors == [-20, -20, -20]
 
     # Length 1 != n_layers -> warns, used as-is (no broadcast).
     with pytest.warns(UserWarning):
