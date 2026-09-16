@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-09-05
 ### Removed
 - **Breaking**: `condition_on_intrinsic` parameter removed from `Cellina`,
   `CellinaModule`, `CellinaGCN`, and `CellinaGCNModule`; behaviour is now always
@@ -27,6 +28,11 @@ All notable changes to this project will be documented in this file.
 - Explicitly stored zeros in the spatial connectivity matrix (e.g. from
   in-place weight thresholding) no longer become message-passing edges; they
   are dropped via `eliminate_zeros()` on a copy, leaving `adata.obsp` untouched.
+- `CellinaGCN` counterfactual loaders now add donor -> seed edges only instead of
+  bidirectional seed <-> donor edges. With multi-hop sampling, the reverse edges let
+  donors aggregate over the (control) seeds and pulled counterfactuals back toward
+  the control state. Donor draws use the same RNG stream, so `seed` still reproduces
+  the same donor sets; predictions change.
 
 ## [1.0.0] — 2026-06-04 - Release
 
