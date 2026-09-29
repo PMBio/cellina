@@ -1,4 +1,5 @@
 import logging
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -258,8 +259,12 @@ def _make_perturbed_expression(
     base: float = np.e,
     add_shift: bool = True,
     renormalize: bool = True,
+    layer: Optional[str] = None,
 ):
-    """Apply Node perturbations to ``adata.X`` and return the modified expression matrix."""
+    """Apply Node perturbations to the source expression and return the modified matrix.
+
+    The source is ``adata.layers[layer]`` when ``layer`` is given, else ``adata.X``.
+    """
     var_names = list(adata.var_names)
     var_idx = {g: i for i, g in enumerate(var_names)}
     var_names_set = set(var_idx)
@@ -273,12 +278,51 @@ def _make_perturbed_expression(
         logger.warning("%d perturbation gene(s) not in var_names, skipped: %s",
                        len(skipped), skipped)
 
-    X = adata.X if isinstance(adata.X, csr_matrix) else csr_matrix(adata.X)
+    source = adata.layers[layer] if layer is not None else adata.X
+    X = source if isinstance(source, csr_matrix) else csr_matrix(source)
     labels = adata.obs[groupby].values if groupby is not None else None
     return _node_perturbation(
         X, var_idx=var_idx, perturbations=perturbations,
         groupby=groupby, labels=labels, base=base, add_shift=add_shift, renormalize=renormalize,
     )
+
+
+def _looks_like_raw_counts(matrix, max_sample: int = 10_000) -> bool:
+    """Cheap heuristic: are the (sampled) non-zero values integer-valued and large?
+
+    Samples up to ``max_sample`` stored non-zero entries, so no dense copy of the
+    full matrix is made.
+    """
+    try:
+        if issparse(matrix):
+            values = np.asarray(csr_matrix(matrix).data).ravel()
+        else:
+            arr = np.asarray(matrix)
+            values = arr.ravel()
+            values = values[values != 0]
+        if values.size == 0:
+            return False
+        if values.size > max_sample:
+            values = values[:: max(1, values.size // max_sample)][:max_sample]
+        values = values.astype(np.float64, copy=False)
+        if not np.isfinite(values).all():
+            return False
+        return bool(np.all(values == np.rint(values)) and values.max() > 50)
+    except Exception:  # never let the heuristic break the computation
+        return False
+
+
+def _warn_if_raw_counts(matrix) -> None:
+    if _looks_like_raw_counts(matrix):
+        warnings.warn(
+            "Spatial features are being aggregated from what looks like raw counts "
+            "(`adata.X` holds integer values with a large maximum). Cellina is usually "
+            "trained on spatial features built from a normalized representation "
+            "(e.g. log1p of CP10K). Pass `layer=` naming the normalized representation "
+            "used at training time to keep training and inference consistent.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def compute_spatial_features(
@@ -309,6 +353,8 @@ def compute_spatial_features(
     """
     C = csr_matrix(adata.obsp[connectivity_key])
     raw = adata.layers[layer] if layer is not None else adata.X
+    if layer is None:
+        _warn_if_raw_counts(raw)
     X = raw if isinstance(raw, csr_matrix) else csr_matrix(raw)
 
     if neighbor_genes is not None:
@@ -334,6 +380,7 @@ def make_neighbor_perturbation(
     base: float = np.e,
     add_shift: bool = False,
     renormalize: bool = True,
+    layer: Optional[str] = None,
 ) -> None:
     """
     Apply Node perturbations to neighbour expression and re-aggregate.
@@ -365,6 +412,13 @@ def make_neighbor_perturbation(
         Key in ``adata.obsm`` for the counterfactual spatial features.
     layer_key
         Key in ``adata.layers`` where the perturbed counts are stored.
+    layer
+        Key in ``adata.layers`` used as the *source* expression that the
+        perturbation is applied to. When ``None``, ``adata.X`` is used.
+        This must be the same representation that the training ``spatial_x``
+        was built from (e.g. a ``'lognorm'`` layer holding log1p(CP10K)),
+        otherwise perturbed spatial features are on a different scale than
+        the ones the model was trained on.
 
     Raises
     ------
@@ -385,6 +439,7 @@ def make_neighbor_perturbation(
     adata.layers[layer_key] = _make_perturbed_expression(
         adata, perturbations=perturbations, groupby=groupby,
         base=base, add_shift=add_shift, renormalize=renormalize,
+        layer=layer,
     )
 
     compute_spatial_features(
@@ -407,6 +462,7 @@ def make_counterfactual_adata(
     connectivity_key: str = "spatial_connectivities",
     cf_conn_key: str = "spatial_connectivities_cf",
     cf_obsm_key: str = "spatial_x_cf",
+    layer: Optional[str] = None,
 ):
     """
     Create a counterfactual AnnData keeping everything from the original
@@ -445,6 +501,14 @@ def make_counterfactual_adata(
     cf_obsm_key
         Key written to adata.obsm for the counterfactual spatial features.
         Written in both precomputed=True and precomputed=False.
+    layer
+        Key in ``adata.layers`` holding the expression representation that is
+        aggregated over the rewired graph when ``precomputed=False``. When
+        ``None``, ``adata.X`` is aggregated. This must match the representation
+        used to build the training ``spatial_x`` (typically log1p(CP10K), while
+        ``adata.X`` holds raw counts for the model) — otherwise counterfactual
+        spatial features are on a different scale than the ones seen at
+        training time. Ignored when ``precomputed=True``.
 
     Returns
     -------
@@ -502,7 +566,8 @@ def make_counterfactual_adata(
     C_cf.sum_duplicates()
 
     adata.obsp[cf_conn_key] = C_cf
-    compute_spatial_features(adata, connectivity_key=cf_conn_key, obsm_key=cf_obsm_key)
+    compute_spatial_features(adata, connectivity_key=cf_conn_key, obsm_key=cf_obsm_key,
+                             layer=layer)
     adata_cf = adata[indices_basal].copy()
     adata_cf.obsm[spatial_column] = adata_cf.obsm[cf_obsm_key]
 
@@ -518,6 +583,7 @@ def make_perturbed_expression(
     add_shift: bool = False,
     renormalize: bool = True,
     inplace: bool = True,
+    layer: Optional[str] = None,
 ):
     """
     Apply Node perturbations to counts and store the result as a layer.
@@ -551,6 +617,9 @@ def make_perturbed_expression(
     inplace
         If True, write to ``adata.layers[layer_key]`` and return None.
         If False, return the perturbed matrix without modifying adata.
+    layer
+        Key in ``adata.layers`` used as the *source* expression. When ``None``
+        (default), ``adata.X`` is used.
 
     Raises
     ------
@@ -586,7 +655,8 @@ def make_perturbed_expression(
                 skipped,
             )
 
-    X = adata.X if issparse(adata.X) else csr_matrix(adata.X)
+    source = adata.layers[layer] if layer is not None else adata.X
+    X = source if issparse(source) else csr_matrix(source)
 
     if not perturbations:
         X_cf = X.copy()
