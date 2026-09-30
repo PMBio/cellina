@@ -24,6 +24,15 @@ All notable changes to this project will be documented in this file.
   `adata.X` looks like raw counts (sampled non-zero entries are integer-valued
   with a maximum above 50), pointing at `layer=` for the normalized
   representation used at training time.
+- `make_neighbor_perturbation` gained `perturb_fraction` and `random_state`
+  arguments: only a random subset of cells (of the requested fraction) receives
+  the perturbation before re-aggregation, so each focal cell effectively sees
+  `~perturb_fraction` of its neighbours perturbed. `perturb_fraction=1.0`
+  (default) keeps the previous behaviour of perturbing every cell.
+- `CellinaGCN` can return GATv2 attention weights: `get_attention_weights` extracts the
+  per-edge attention of the spatial encoder's GATv2 layers and
+  `attention_by_group` aggregates them by an `adata.obs` grouping, with a new
+  section 3.1 in `docs/tutorial_gat.ipynb` showing the workflow.
 
 ### Changed
 - `docs/tutorial.ipynb` stores the normalized expression in
