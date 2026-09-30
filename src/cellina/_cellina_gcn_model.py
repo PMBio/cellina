@@ -3,6 +3,8 @@ import warnings
 from typing import List, Optional, Union
 
 import numpy as np
+import pandas as pd
+import scipy.sparse as sp
 import torch
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -160,7 +162,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return self._cached_splitter
 
     def _make_data_loader(self, adata=None, indices=None, batch_size=None, shuffle=False,
-                          x_spatial_layer=None):
+                          x_spatial_layer=None, num_neighbors=None):
         adata = self._validate_anndata(adata) if adata is not None else self.adata
 
         if batch_size is None:
@@ -183,6 +185,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size=batch_size,
             shuffle=shuffle,
             x_spatial_override=override,
+            num_neighbors=num_neighbors,
         )
 
     def _make_counterfactual_loader(
@@ -602,6 +605,218 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             latent.append(lat.cpu())
 
         return torch.cat(latent).numpy()
+
+    @torch.inference_mode()
+    def get_attention_weights(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[list] = None,
+        batch_size: int = 512,
+        num_neighbors: Optional[List[int]] = None,
+        key_added: Optional[str] = None,
+        allow_sampling: bool = False,
+    ) -> dict:
+        """
+        Extract the learned GATv2 attention coefficients as cell-by-cell matrices.
+
+        Requires ``convolution_type="gat"``. One matrix per GAT layer; layers are not
+        averaged, since each attends over a different representation.
+
+        ``A[i, j] = alpha(j -> i)``: row = destination (the attending cell), column =
+        source (its neighbour). Rows sum to 1 for cells with at least one neighbour and
+        to 0 for isolated or unselected cells. The sparsity pattern is the (symmetrised)
+        spatial connectivity graph without self-loops, but ``A`` itself is asymmetric:
+        ``alpha(j -> i)`` and ``alpha(i -> j)`` are normalised over different
+        neighbourhoods.
+
+        Parameters
+        ----------
+        adata
+            AnnData the model was set up with; defaults to it.
+        indices
+            Unique integer positions of the cells whose incoming attention to extract.
+            Defaults to all cells. The output shape stays ``(n_obs, n_obs)``.
+        batch_size
+            Seed cells per mini-batch. Smaller than the usual inference default because
+            the exact fan-out pulls in the full ``n_layers``-hop neighbourhood of every
+            seed (~1 + k + k^2 nodes on a k-NN graph), which is densified per batch.
+        num_neighbors
+            Fan-out per hop, one entry per GAT layer. Defaults to ``[-1] * n_layers``,
+            the full neighbourhood, which makes the coefficients exact.
+        key_added
+            If given, also store layer ``i`` in ``adata.obsp[f"{key_added}_l{i}"]``.
+            ``None`` (default) never mutates ``adata``.
+        allow_sampling
+            Permit a finite ``num_neighbors`` below the graph's maximum in-degree. Such
+            coefficients are a renormalised approximation whose rows still sum to 1,
+            so this is off by default.
+
+        Returns
+        -------
+        ``dict[int, scipy.sparse.csr_matrix]`` keyed by 0-based layer index, each of shape
+        ``(n_obs, n_obs)`` and dtype ``float32``.
+
+        Notes
+        -----
+        Only edges into seed cells are kept: with an ``n_layers``-hop subgraph, a seed's
+        layer-``l`` input has its full receptive field, whereas a non-seed node's may
+        not. Every requested cell is a seed exactly once, so each edge is emitted once
+        and the result equals a full-graph forward pass.
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+
+        encoder = self.module.s_encoder.encoder
+        if encoder.convolution_type != "gat":
+            raise NotImplementedError(
+                "get_attention_weights() requires convolution_type='gat', but this model "
+                f"was built with convolution_type='{encoder.convolution_type}'."
+            )
+        n_layers = len(encoder.gcn_layers)
+
+        num_neighbors = [-1] * n_layers if num_neighbors is None else list(num_neighbors)
+        if len(num_neighbors) != n_layers:
+            raise ValueError(
+                f"num_neighbors must have one entry per GAT layer (n_layers={n_layers}), "
+                f"got {num_neighbors}."
+            )
+
+        splitter = self._get_cached_splitter(batch_size)
+        in_degrees = np.bincount(splitter.pyg_data.edge_index[1].numpy(), minlength=adata.n_obs)
+        max_in_degree = int(in_degrees.max()) if in_degrees.size else 0
+        finite = [f for f in num_neighbors if f >= 0]
+        if finite and min(finite) < max_in_degree and not allow_sampling:
+            raise ValueError(
+                f"num_neighbors={num_neighbors} samples fewer neighbours than the graph's "
+                f"maximum in-degree ({max_in_degree}), so the coefficients would be an "
+                "approximation. Use num_neighbors=None, or pass allow_sampling=True."
+            )
+
+        indices = np.arange(adata.n_obs) if indices is None else np.asarray(indices)
+        if not np.issubdtype(indices.dtype, np.integer):
+            raise ValueError(
+                "indices must be integer cell positions (for a boolean mask use "
+                "np.flatnonzero(mask))."
+            )
+        if np.unique(indices).size != indices.size:
+            raise ValueError("indices must be unique.")
+
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size, num_neighbors=num_neighbors
+        )
+
+        # get_latent_representation does not set eval() itself, so restore the caller's
+        # mode rather than leaking eval() (dropout) into later calls.
+        was_training = self.module.training
+        self.module.eval()
+        parts = [([], [], []) for _ in range(n_layers)]
+        try:
+            for tensors in scdl:
+                node_batch = tensors["node_batch"]
+                n_id = node_batch["n_id"].cpu().numpy()
+                seed_size = int(node_batch["batch_size"])
+                attentions = self.module.get_attention(
+                    x=node_batch["X"],
+                    batch_index=node_batch["batch_label"],
+                    edge_index=node_batch["edge_index"],
+                    batch_size=seed_size,
+                    x_spatial=node_batch.get("x_spatial"),
+                )
+                for (dsts, srcs, vals), att in zip(parts, attentions, strict=True):
+                    dst_local, src_local, alpha = att.coo()
+                    if alpha.dim() > 1:  # heads is 1 in _make_conv_layer; stay defensive
+                        alpha = alpha.mean(dim=-1)
+                    keep = dst_local < seed_size
+                    dsts.append(n_id[dst_local[keep].cpu().numpy()])
+                    srcs.append(n_id[src_local[keep].cpu().numpy()])
+                    vals.append(alpha[keep].float().cpu().numpy())
+        finally:
+            self.module.train(was_training)
+
+        result = {}
+        for layer, (dsts, srcs, vals) in enumerate(parts):
+            vals = np.concatenate(vals) if vals else np.zeros(0, np.float32)
+            dst = np.concatenate(dsts) if dsts else np.zeros(0, np.int64)
+            src = np.concatenate(srcs) if srcs else np.zeros(0, np.int64)
+            mat = sp.csr_matrix(
+                (vals, (dst, src)), shape=(adata.n_obs, adata.n_obs), dtype=np.float32
+            )
+            # csr construction sums duplicates; a mismatch means an edge was emitted twice.
+            if mat.nnz != vals.size:
+                raise RuntimeError(
+                    f"Layer {layer}: {vals.size} attention entries collapsed to {mat.nnz} "
+                    "nonzeros; duplicate (destination, source) pairs were summed."
+                )
+            result[layer] = mat
+
+        if key_added is not None:
+            for layer, mat in result.items():
+                adata.obsp[f"{key_added}_l{layer}"] = mat
+        return result
+
+    def attention_by_group(
+        self,
+        groupby: str,
+        layer: int = -1,
+        normalize: bool = True,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """
+        Summarise GAT attention by receiver and sender group.
+
+        For every cell with neighbours, its attention row is split by the sender's group
+        (``mass``), alongside the share of its neighbours in each group (``expected``,
+        i.e. the mass under uniform attention over the same edges). Both are averaged
+        over cells of each receiver group.
+
+        Parameters
+        ----------
+        groupby
+            Categorical column in ``adata.obs`` (e.g. cell type).
+        layer
+            GAT layer index; negative values count from the end (default: last layer).
+        normalize
+            If True, return ``log2(mean mass / mean expected)``: 0 is what proximity
+            alone predicts, positive means the GAT up-weights that sender group. NaN
+            where either term is 0. If False, return the mean attention mass (rows sum
+            to 1).
+        **kwargs
+            Forwarded to :meth:`get_attention_weights` (e.g. ``adata``, ``indices``,
+            ``batch_size``).
+
+        Returns
+        -------
+        DataFrame with rows = receiver group, columns = sender group, in category order.
+        Receiver groups without selected cells that have neighbours are dropped.
+        """
+        att = self.get_attention_weights(**kwargs)
+        A = att[list(att)[layer]]
+        adata = self._validate_anndata(kwargs.get("adata"))
+
+        groups = adata.obs[groupby].astype("category")
+        codes = groups.cat.codes.to_numpy()
+        cats = groups.cat.categories
+        Y = sp.csr_matrix(
+            (np.ones(adata.n_obs), (np.arange(adata.n_obs), codes)),
+            shape=(adata.n_obs, len(cats)),
+        )
+
+        P = A.copy()
+        P.data[:] = 1.0
+        counts = (P @ Y).toarray()
+        n_nb = counts.sum(axis=1)
+        has_nb = n_nb > 0
+        mass = pd.DataFrame((A @ Y).toarray()[has_nb], columns=cats)
+        expected = pd.DataFrame(counts[has_nb] / n_nb[has_nb, None], columns=cats)
+        receiver = pd.Categorical.from_codes(codes[has_nb], categories=cats)
+        mean_mass = mass.groupby(receiver, observed=True).mean()
+        if normalize:
+            mean_exp = expected.groupby(receiver, observed=True).mean()
+            out = np.log2(mean_mass / mean_exp).where((mean_mass > 0) & (mean_exp > 0))
+        else:
+            out = mean_mass
+        out.index.name, out.columns.name = "receiver", "sender"
+        return out
 
     def get_marginal_ll(
         self,

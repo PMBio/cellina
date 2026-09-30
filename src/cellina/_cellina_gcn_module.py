@@ -283,6 +283,23 @@ class CellinaGCNModule(BaseModuleClass):
         return outputs
 
     @auto_move_data
+    def get_attention(self, x, batch_index, edge_index, batch_size, x_spatial=None):
+        """Per-layer GAT attention for one graph batch.
+
+        Uses the same spatial input as :meth:`inference` but runs only the spatial
+        encoder. Returns ``list[SparseTensor]``, one per GAT layer, over the sampled nodes
+        (``row = destination``, ``col = source``); only edges into the first
+        ``batch_size`` (seed) nodes are exact under neighbour sampling.
+        """
+        spatial_input = torch.log(1 + x_spatial) if x_spatial is not None else torch.log(1 + x)
+        *_, attentions = self.s_encoder(
+            spatial_input, edge_index, batch_index,
+            batch_size=batch_size,
+            return_attention_weights=True,
+        )
+        return attentions
+
+    @auto_move_data
     def generative(self, shifted, library, batch_index):
         px_scale, _, px_rate, px_dropout = self.decoder("gene", shifted, library, batch_index)
         px_r = torch.exp(self.px_r)

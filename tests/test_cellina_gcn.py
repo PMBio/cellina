@@ -1054,3 +1054,175 @@ def test_counterfactual_edges_are_donor_to_seed_only(trained_model):
     rng = np.random.default_rng(0)
     expected = np.concatenate([rng.choice(donors, size=k, replace=False) for _ in indices])
     np.testing.assert_array_equal(np.sort(src[seed_dst]), np.sort(expected))
+
+
+# ── GAT attention extraction ──────────────────────────────────────────────────
+
+def _train_gat(adata, **kwargs):
+    CellinaGCN.setup_anndata(
+        adata,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(
+        adata, n_latent=5, discriminator_lambda=0.0, classifier_lambda=0.0, **kwargs
+    )
+    model.train(max_epochs=1, train_size=0.8)
+    return model
+
+
+@pytest.fixture
+def trained_gat_model(adata_with_spatial):
+    return _train_gat(adata_with_spatial, convolution_type="gat"), adata_with_spatial
+
+
+def _pattern_minus_diag(conn):
+    conn = sp.csr_matrix(conn != 0, dtype=np.float32)
+    conn.setdiag(0)
+    conn.eliminate_zeros()
+    return conn != 0
+
+
+def test_attention_shape_and_pattern(trained_gat_model):
+    model, adata = trained_gat_model
+    obsp_before = set(adata.obsp.keys())
+
+    att = model.get_attention_weights(batch_size=64)
+
+    assert sorted(att) == list(range(model.n_layers))
+    expected = _pattern_minus_diag(adata.obsp["spatial_connectivities"])
+    for layer, mat in att.items():
+        assert sp.issparse(mat)
+        assert mat.shape == (adata.n_obs, adata.n_obs)
+        assert mat.dtype == np.float32
+        assert ((mat != 0) != expected).nnz == 0, f"layer {layer} pattern != graph"
+
+    assert set(adata.obsp.keys()) == obsp_before, "key_added=None must not touch adata"
+
+    model.get_attention_weights(batch_size=64, key_added="gat_att")
+    for layer in att:
+        assert adata.obsp[f"gat_att_l{layer}"].shape == (adata.n_obs, adata.n_obs)
+
+
+def test_attention_orientation(adata_with_spatial):
+    """Asymmetric input graph: row = destination and the pattern is the symmetrised graph."""
+    n_obs = adata_with_spatial.n_obs
+    rows = np.repeat(np.arange(n_obs), 3)
+    cols = (rows + np.tile([1, 2, 3], n_obs)) % n_obs
+    conn = sp.csr_matrix((np.ones(rows.size), (rows, cols)), shape=(n_obs, n_obs))
+    assert (conn != conn.T).nnz > 0
+    adata_with_spatial.obsp["spatial_connectivities"] = conn
+
+    with pytest.warns(UserWarning, match="not symmetric"):
+        model = _train_gat(adata_with_spatial)
+    att = model.get_attention_weights(batch_size=64)
+
+    expected = _pattern_minus_diag(conn.maximum(conn.T))
+    for layer, mat in att.items():
+        assert ((mat != 0) != expected).nnz == 0
+        np.testing.assert_allclose(np.asarray(mat.sum(axis=1)).ravel(), 1.0, atol=1e-4)
+
+
+def test_attention_rows_sum_to_one(adata_with_spatial):
+    """Rows sum to 1 for cells with neighbours and to 0 for an isolated cell."""
+    conn = adata_with_spatial.obsp["spatial_connectivities"].tolil()
+    conn[0, :] = 0
+    conn[:, 0] = 0
+    conn = conn.tocsr()
+    conn.eliminate_zeros()
+    adata_with_spatial.obsp["spatial_connectivities"] = conn
+    model = _train_gat(adata_with_spatial)
+
+    has_nb = np.asarray((conn != 0).sum(axis=1)).ravel() > 0
+    assert not has_nb[0] and has_nb[1:].all()
+    for mat in model.get_attention_weights(batch_size=64).values():
+        row_sums = np.asarray(mat.sum(axis=1)).ravel()
+        np.testing.assert_allclose(row_sums[has_nb], 1.0, atol=1e-4)
+        assert row_sums[0] == 0
+
+
+def test_attention_batching_invariance(trained_gat_model):
+    model, adata = trained_gat_model
+    small = model.get_attention_weights(batch_size=8)
+    full = model.get_attention_weights(batch_size=adata.n_obs)
+    for layer in small:
+        np.testing.assert_allclose(
+            small[layer].toarray(), full[layer].toarray(), rtol=1e-4, atol=1e-6
+        )
+
+
+def test_attention_raises_for_non_gat(adata_with_spatial):
+    model = _train_gat(adata_with_spatial, convolution_type="gcn")
+    with pytest.raises(NotImplementedError, match="gcn"):
+        model.get_attention_weights(batch_size=64)
+
+    from cellina._spatial_encoder import GCNLayers
+    layers = GCNLayers(n_in=4, n_out=4, n_layers=1, convolution_type="gcn")
+    with pytest.raises(NotImplementedError, match="gcn"):
+        layers(
+            torch.zeros(3, 4),
+            torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            return_attention_weights=True,
+        )
+
+
+def test_attention_raises_on_sampling(trained_gat_model):
+    model, adata = trained_gat_model
+    max_in_degree = int(np.asarray((adata.obsp["spatial_connectivities"] != 0).sum(0)).max())
+    assert max_in_degree > 1
+
+    fanout = [1] * model.n_layers
+    with pytest.raises(ValueError, match=str(max_in_degree)):
+        model.get_attention_weights(batch_size=64, num_neighbors=fanout)
+    att = model.get_attention_weights(batch_size=64, num_neighbors=fanout, allow_sampling=True)
+    assert sorted(att) == list(range(model.n_layers))
+
+    with pytest.raises(ValueError, match="one entry per GAT layer"):
+        model.get_attention_weights(
+            num_neighbors=[-1] * (model.n_layers + 1), allow_sampling=True
+        )
+
+
+def test_attention_subset_indices(trained_gat_model):
+    model, adata = trained_gat_model
+    subset = np.arange(0, adata.n_obs, 7)
+    full = model.get_attention_weights(batch_size=64)
+    partial = model.get_attention_weights(batch_size=64, indices=subset)
+
+    others = np.setdiff1d(np.arange(adata.n_obs), subset)
+    for layer, mat in partial.items():
+        assert mat.shape == (adata.n_obs, adata.n_obs)
+        assert mat[others].nnz == 0
+        np.testing.assert_allclose(
+            mat[subset].toarray(), full[layer][subset].toarray(), rtol=1e-4, atol=1e-6
+        )
+
+    with pytest.raises(ValueError, match="unique"):
+        model.get_attention_weights(indices=[0, 0, 1])
+    with pytest.raises(ValueError, match="integer"):
+        model.get_attention_weights(indices=np.ones(adata.n_obs, dtype=bool))
+
+
+def test_attention_by_group(trained_gat_model, monkeypatch):
+    model, adata = trained_gat_model
+    cats = list(adata.obs["cell_labels"].astype("category").cat.categories)
+
+    enr = model.attention_by_group("cell_labels", batch_size=64)
+    assert enr.shape == (len(cats), len(cats))
+    assert list(enr.index) == cats and list(enr.columns) == cats
+    assert (enr.index.name, enr.columns.name) == ("receiver", "sender")
+
+    mass = model.attention_by_group("cell_labels", normalize=False, batch_size=64)
+    np.testing.assert_allclose(mass.sum(axis=1), 1.0, atol=1e-4)
+
+    last = model.attention_by_group("cell_labels", layer=model.n_layers - 1, batch_size=64)
+    np.testing.assert_allclose(enr.to_numpy(), last.to_numpy(), atol=1e-5)
+
+    # Uniform attention over the graph must give log2 enrichment of exactly 0.
+    P = _pattern_minus_diag(adata.obsp["spatial_connectivities"]).astype(np.float32)
+    uniform = sp.csr_matrix(P.multiply(1.0 / P.sum(axis=1)), dtype=np.float32)
+    monkeypatch.setattr(model, "get_attention_weights", lambda **kw: {0: uniform, 1: uniform})
+    zero = model.attention_by_group("cell_labels")
+    np.testing.assert_allclose(zero.to_numpy(), 0.0, atol=1e-5)

@@ -143,7 +143,21 @@ class GCNLayers(nn.Module):
         edge_index: torch.Tensor,
         *cat_list: int,
         cont: torch.Tensor | None = None,
+        return_attention_weights: bool = False,
     ):
+        """Run the graph convolutions.
+
+        Returns ``x``, or ``(x, attentions)`` when ``return_attention_weights=True``
+        (``convolution_type="gat"`` only): one ``SparseTensor`` per layer with
+        ``row = destination``, ``col = source``, so ``.coo()`` yields ``(dst, src, alpha)``
+        and ``alpha`` sums to 1 per destination.
+        """
+        if return_attention_weights and self.convolution_type != "gat":
+            raise NotImplementedError(
+                "return_attention_weights=True is only supported for "
+                f"convolution_type='gat', got '{self.convolution_type}'."
+            )
+
         one_hot_cat_list = []
         cont_list = [cont] if cont is not None else []
         cat_list = cat_list or []
@@ -172,8 +186,14 @@ class GCNLayers(nn.Module):
         else:
             adj = edge_index
 
+        attentions = []
         for i, gcn_layer in enumerate(self.gcn_layers):
-            x = gcn_layer(x, adj)
+            if return_attention_weights:
+                # With a SparseTensor adj, GATv2Conv returns (out, adj with alpha as values).
+                x, att = gcn_layer(x, adj, return_attention_weights=True)
+                attentions.append(att)
+            else:
+                x = gcn_layer(x, adj)
             if self.cov_layers[i] is not None and cov_list:
                 cov = torch.cat(cov_list, dim=-1)
                 x = x + self.cov_layers[i](cov.float())
@@ -182,6 +202,8 @@ class GCNLayers(nn.Module):
             if self.dropout is not None:
                 x = self.dropout(x)
 
+        if return_attention_weights:
+            return x, attentions
         return x
 
 
@@ -263,8 +285,19 @@ class GraphEncoder(nn.Module):
         *cat_list: int,
         batch_size: int,
         return_neighbor_means: bool = False,
+        return_attention_weights: bool = False,
     ):
-        q = self.encoder(x, edge_index, *cat_list)
+        """Encode node features into the spatial latent space.
+
+        With ``return_attention_weights=True`` (``convolution_type="gat"`` only), the
+        per-layer attention (``list[SparseTensor]`` over *all* sampled nodes,
+        ``row = destination``) is appended as one trailing element to the usual return
+        tuple.
+        """
+        if return_attention_weights:
+            q, attentions = self.encoder(x, edge_index, *cat_list, return_attention_weights=True)
+        else:
+            q = self.encoder(x, edge_index, *cat_list)
         q_seed = q[:batch_size]
         if self.bn is not None:
             q_seed = self.bn(q_seed)
@@ -277,6 +310,7 @@ class GraphEncoder(nn.Module):
         dist = Normal(q_m, q_v.sqrt())
         latent = self.z_transformation(dist.rsample())
 
-        if self.return_dist:
-            return dist, latent, neighbor_means
-        return q_m, q_v, latent, neighbor_means
+        out = (dist, latent, neighbor_means) if self.return_dist else (q_m, q_v, latent, neighbor_means)
+        if return_attention_weights:
+            return (*out, attentions)
+        return out
