@@ -44,6 +44,9 @@ class GraphBatchLoader:
             'X': _gather_dense_rows(self.x_sparse, nid),
             'edge_index': node_batch.edge_index,
             'node_indices': node_batch.input_id,
+            # local -> global id for every sampled node (seeds first); maps per-edge
+            # quantities such as GAT attention back onto adata's indexing.
+            'n_id': node_batch.n_id,
             'batch_size': node_batch.batch_size,
             'batch_label': node_batch.batch_labels,
             REGISTRY_KEYS.LABELS_KEY: node_batch.labels,
@@ -187,10 +190,13 @@ class GraphJointDataSplitter(DataSplitter):
             )
         return x_sp.tocsr()
 
-    def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last):
+    def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last,
+                              num_neighbors=None):
+        # An explicit num_neighbors overrides the fan-out for this loader only; the
+        # splitter is cached and shared, so it is never mutated.
         return NeighborLoader(
             self.pyg_data,
-            num_neighbors=self.num_neighbors,
+            num_neighbors=self.num_neighbors if num_neighbors is None else num_neighbors,
             input_nodes=torch.tensor(node_indices, dtype=torch.long),
             batch_size=batch_size,
             shuffle=shuffle,
@@ -216,15 +222,17 @@ class GraphJointDataSplitter(DataSplitter):
         return None
 
     def create_inference_loader(self, indices, batch_size=None, shuffle=False,
-                                x_spatial_override=None):
+                                x_spatial_override=None, num_neighbors=None):
         """Create a node-only loader for inference.
 
         ``x_spatial_override`` lets callers reuse this splitter's cached graph and base
         X store while swapping in a different spatial feature store (e.g. a perturbation
-        ``cf_layer``), avoiding a full splitter rebuild.
+        ``cf_layer``), avoiding a full splitter rebuild. ``num_neighbors`` overrides the
+        fan-out for this loader only.
         """
         batch_size = batch_size or self.batch_size
-        node_loader = self._make_neighbor_loader(indices, batch_size, shuffle, drop_last=False)
+        node_loader = self._make_neighbor_loader(indices, batch_size, shuffle, drop_last=False,
+                                                 num_neighbors=num_neighbors)
         spatial_store = (
             x_spatial_override if x_spatial_override is not None else self._x_spatial_sparse
         )
