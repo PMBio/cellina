@@ -129,6 +129,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             precomputed: bool = True,
             n_neighbours: int = 50,
             connectivity_key: str = "spatial_connectivities",
+            layer: Optional[str] = None,
         ):
             """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
             return make_counterfactual_adata(
@@ -140,6 +141,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 precomputed=precomputed,
                 n_neighbours=n_neighbours,
                 connectivity_key=connectivity_key,
+                layer=layer,
             )
 
 
@@ -156,6 +158,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         precomputed: bool = True,
         n_neighbours: int = 50,
         connectivity_key: str = "spatial_connectivities",
+        layer: Optional[str] = None,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
@@ -180,6 +183,12 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Which latent to return: ``'shifted'``, ``'z'``, or ``'s'``.
         seed
             Random seed for neighbour sampling.
+        layer
+            Key in ``adata.layers`` holding the expression representation aggregated
+            over the rewired graph when ``precomputed=False``. ``None`` (default) uses
+            ``adata.X``. Must match the representation used to build the training
+            ``spatial_x`` (e.g. a ``'lognorm'`` layer with log1p(CP10K) while
+            ``adata.X`` holds raw counts).
 
         Returns
         -------
@@ -191,6 +200,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
+            layer=layer,
         )
         return self.get_latent_representation(
             adata=adata_cf, indices=None, give_mean=give_mean,
@@ -210,6 +220,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         precomputed: bool = True,
         n_neighbours: int = 50,
         connectivity_key: str = "spatial_connectivities",
+        layer: Optional[str] = None,
     ) -> np.ndarray:
         """
         Predict gene expression under a counterfactual spatial neighbourhood.
@@ -234,6 +245,12 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             (uses inferred library size, returning ``px_rate``).
         return_numpy
             Passed to :meth:`get_normalized_expression`.
+        layer
+            Key in ``adata.layers`` holding the expression representation aggregated
+            over the rewired graph when ``precomputed=False``. ``None`` (default) uses
+            ``adata.X``. Must match the representation used to build the training
+            ``spatial_x`` (e.g. a ``'lognorm'`` layer with log1p(CP10K) while
+            ``adata.X`` holds raw counts).
 
         Returns
         -------
@@ -245,6 +262,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
+            layer=layer,
         )
         return self.get_normalized_expression(
             adata=adata_cf, indices=None, batch_size=batch_size,

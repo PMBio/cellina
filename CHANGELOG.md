@@ -7,6 +7,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-09-29
+### Added
+- `make_counterfactual_adata` gained a `layer` argument (threaded through
+  `Cellina._make_counterfactual_adata`, `Cellina.get_counterfactual_latents` and
+  `Cellina.get_counterfactual_expression`). When `precomputed=False`, the
+  counterfactual spatial features are aggregated from `adata.layers[layer]`
+  instead of `adata.X`. This fixes a train/inference mismatch: the training
+  `spatial_x` is typically built from log1p(CP10K) while `adata.X` is reset to
+  raw counts for the model, so edge-perturbation counterfactuals silently
+  aggregated raw counts. Default `None` keeps the previous behaviour.
+- `make_neighbor_perturbation` and `make_perturbed_expression` gained an optional
+  source `layer` argument: the perturbation is applied to `adata.layers[layer]`
+  instead of `adata.X` when given.
+- `compute_spatial_features` warns (`UserWarning`) when `layer is None` and
+  `adata.X` looks like raw counts (sampled non-zero entries are integer-valued
+  with a maximum above 50), pointing at `layer=` for the normalized
+  representation used at training time.
+
+### Changed
+- `docs/tutorial.ipynb` stores the normalized expression in
+  `adata.layers['lognorm']` and passes `layer='lognorm'` to the edge- and
+  node-perturbation calls, so both now aggregate the same representation the
+  model was trained on (previously the edge-perturbation section aggregated raw
+  counts).
+
 ## [1.1.1] — 2026-09-05
 ### Removed
 - **Breaking**: `condition_on_intrinsic` parameter removed from `Cellina`,
