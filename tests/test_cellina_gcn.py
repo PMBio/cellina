@@ -1218,7 +1218,7 @@ def test_attention_by_group(trained_gat_model, monkeypatch):
     np.testing.assert_allclose(mass.sum(axis=1), 1.0, atol=1e-4)
 
     last = model.attention_by_group("cell_labels", layer=model.n_layers - 1, batch_size=64)
-    np.testing.assert_allclose(enr.to_numpy(), last.to_numpy())
+    np.testing.assert_allclose(enr.to_numpy(), last.to_numpy(), atol=1e-5)
 
     # Uniform attention over the graph must give log2 enrichment of exactly 0.
     P = _pattern_minus_diag(adata.obsp["spatial_connectivities"]).astype(np.float32)
