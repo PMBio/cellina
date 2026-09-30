@@ -656,6 +656,30 @@ def test_node_perturbation_row_sum_invariance():
         )
 
 
+def test_node_perturbation_fraction():
+    """perturb_fraction perturbs a seeded random subset of rows; 1.0 is the old behaviour."""
+    from cellina._spatial_utils import _node_perturbation
+
+    rng = np.random.default_rng(0)
+    X = rng.random((100, 5)).astype(np.float32)
+    var_idx = {f"gene{i}": i for i in range(5)}
+    pert = {"gene0": 1.0}
+
+    def run(**kw):
+        return _node_perturbation(X, var_idx, pert, add_shift=True, **kw).toarray()
+
+    np.testing.assert_array_equal(run(perturb_fraction=1.0), run())
+    np.testing.assert_array_equal(run(perturb_fraction=0.0), X)
+
+    half = run(perturb_fraction=0.5, random_state=1)
+    assert (half != X).any(axis=1).sum() == 50
+    np.testing.assert_array_equal(half, run(perturb_fraction=0.5, random_state=1))
+
+    for bad in (-0.1, 1.1):
+        with pytest.raises(ValueError):
+            _node_perturbation(X, var_idx, pert, perturb_fraction=bad)
+
+
 def test_make_neighbor_perturbation_unknown(adata_with_spatial):
     """Unknown cell-type key in perturbations raises ValueError."""
     import pandas as pd
