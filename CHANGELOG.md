@@ -7,24 +7,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
-- `CellinaGCN.get_counterfactual_expression`, `get_counterfactual_latents` and
-  `_make_counterfactual_loader` accept a per-focal-cell donor specification for
-  `neighbour_indices`: instead of a single 1-D donor pool that every seed subsamples,
-  a list/tuple holding one 1-D integer array per entry of `indices` gives each focal
-  cell its own complete donor set. Such donor sets are used verbatim, so
-  `n_neighbors_per_seed` and `seed` are ignored for that call, and donors may repeat
-  across cells. Each donor array must be non-empty, of integer dtype and must not
-  contain its own focal cell. The 1-D pool path is unchanged, including its RNG
-  consumption order.
-- `cellina.sample_anchor_donors`: the "anchor" (cached-niche) donor draw for
-  edge-perturbation counterfactuals. Each focal cell is paired with one anchor drawn
-  uniformly with replacement from `anchor_indices` and inherits that anchor's complete
-  neighbourhood in the given connectivity matrix, minus `exclude` and minus itself,
-  as its donor set. Returns the per-cell list accepted by
-  `CellinaGCN.get_counterfactual_expression` / `get_counterfactual_latents`
-  (optionally together with the drawn anchors). An inherited donor set that would be
-  empty raises unless `fallback_pool` is given, in which case `n_fallback` donors are
-  drawn from that pool instead.
+- `anchor_donors` for `CellinaGCN.get_counterfactual_expression` /
+  `get_counterfactual_latents` (default `True`): `neighbour_indices` are *anchor* cells;
+  each focal cell is paired with one anchor drawn uniformly with replacement and inherits
+  that anchor's neighbours in `adata.obsp[connectivity_key]` (new argument, default: the
+  graph registered in `setup_anndata`), minus `exclude_indices` (new argument) and itself,
+  as its donors; anchors with no neighbour left (homotypic) are skipped with a warning.
+  `anchor_donors=False` is the previous behaviour: `neighbour_indices` is a
+  donor pool from which each focal cell draws `n_neighbors` donors uniformly without
+  replacement (`exclude_indices` is removed from the pool). `neighbour_indices` may also
+  be a list/tuple with one 1-D integer array per focal cell, used verbatim.
+
+### Changed
+- `Cellina.get_counterfactual_expression` / `get_counterfactual_latents` /
+  `_make_counterfactual_adata` and `make_counterfactual_adata`: `precomputed` is renamed
+  `anchor_donors` and `n_neighbours` is renamed `n_neighbors` (same semantics and
+  defaults, no behaviour change). `CellinaGCN`'s `n_neighbors_per_seed` is renamed
+  `n_neighbors`. No aliases are kept.
 
 ## [1.1.2] — 2026-09-29
 ### Added

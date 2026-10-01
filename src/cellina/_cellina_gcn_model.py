@@ -25,6 +25,7 @@ from torch_geometric.loader import NeighborLoader
 from ._cellina_gcn_module import CellinaGCNModule
 from ._constants import DOMAINS_KEY, SPATIAL_CONNECTIVITIES_KEY
 from ._edge_data_splitter import GraphBatchLoader, GraphJointDataSplitter
+from ._spatial_utils import _sample_anchor_donors
 from ._training_plan import CellinaAdversarialTrainingPlan
 
 logger = logging.getLogger(__name__)
@@ -192,22 +193,30 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
-        n_neighbors_per_seed: int,
+        n_neighbors: int = 20,
         batch_size: int = 128,
         seed: int = 0,
         subgraph_type: Optional[str] = None,
+        anchor_donors: bool = True,
+        connectivity_key: Optional[str] = None,
+        exclude_indices: Optional[np.ndarray] = None,
     ):
-        """Build a loader over the graph with the seeds' neighbourhoods replaced by donors.
+        """Loader over the graph with the focal cells' edges replaced by donor -> cell edges.
 
-        ``neighbour_indices`` is either a 1-D donor pool -- each seed then draws
-        ``n_neighbors_per_seed`` donors from it uniformly without replacement -- or a
-        list/tuple of one 1-D donor array per entry of ``indices``, which is used as given
-        (no subsampling, ``n_neighbors_per_seed`` and ``seed`` unused).
+        See :meth:`get_counterfactual_latents` for how ``neighbour_indices`` is read.
         """
         # None inherits the model's subgraph_type (single source of truth); an explicit
         # value overrides per call. Validated against the shared allowed set either way.
         subgraph_type = _validate_subgraph_type(subgraph_type or self._subgraph_type)
         indices = np.asarray(indices)
+        if exclude_indices is not None:
+            exclude_indices = np.asarray(exclude_indices)
+            if exclude_indices.ndim != 1 or not np.issubdtype(exclude_indices.dtype, np.integer):
+                raise ValueError("exclude_indices must be a 1-D integer array (not a boolean mask).")
+            if exclude_indices.size and (
+                exclude_indices.min() < 0 or exclude_indices.max() >= self.adata.n_obs
+            ):
+                raise ValueError(f"exclude_indices contains cells outside [0, {self.adata.n_obs}).")
         # Reuse the cached graph + sparse X store; only the edges are rewired below.
         splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
@@ -220,25 +229,29 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         if _is_per_cell_donor_spec(neighbour_indices):
             # One explicit donor set per focal cell: used verbatim, so no RNG is drawn.
             donors = _validate_per_cell_donors(indices, neighbour_indices)
-            donors_per_seed = np.fromiter(
-                (len(d) for d in donors), dtype=np.int64, count=len(donors)
+        elif anchor_donors:
+            key = connectivity_key or self.adata.uns[SPATIAL_CONNECTIVITIES_KEY]
+            if key not in self.adata.obsp:
+                raise KeyError(f"connectivity_key {key!r} not found in adata.obsp.")
+            donors = _sample_anchor_donors(
+                self.adata.obsp[key], indices, neighbour_indices,
+                exclude=exclude_indices, seed=seed,
             )
         else:
             rng = np.random.default_rng(seed)
-            neighbour_indices = np.asarray(neighbour_indices)
-
-            if n_neighbors_per_seed >= len(neighbour_indices):
+            pool = np.asarray(neighbour_indices)
+            if exclude_indices is not None and exclude_indices.size:
+                pool = pool[~np.isin(pool, exclude_indices)]
+            if n_neighbors >= len(pool):
                 raise ValueError(
-                    f"n_neighbors_per_seed ({n_neighbors_per_seed}) must be less than "
-                    f"len(neighbour_indices) ({len(neighbour_indices)})"
+                    f"n_neighbors ({n_neighbors}) must be less than the size of the donor "
+                    f"pool ({len(pool)})"
                 )
-
             # Same RNG stream / draw order as before, so seeds reproduce the same donor sets.
-            donors = [rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
-                      for _ in indices]
-            donors_per_seed = n_neighbors_per_seed
+            donors = [rng.choice(pool, size=n_neighbors, replace=False) for _ in indices]
 
-        cf_src = np.repeat(indices, donors_per_seed)
+        donors_per_cell = np.fromiter((len(d) for d in donors), dtype=np.int64, count=len(donors))
+        cf_src = np.repeat(indices, donors_per_cell)
         cf_dst = np.concatenate(donors)
 
         # Donor -> seed only. Bidirectional edges let donors aggregate over the (control)
@@ -276,31 +289,50 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
-        n_neighbors_per_seed: int = 20,
+        n_neighbors: int = 20,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "s",
         seed: int = 0,
         subgraph_type: Optional[str] = None,
+        anchor_donors: bool = True,
+        connectivity_key: Optional[str] = None,
+        exclude_indices: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
 
+        Each cell in ``indices`` loses its own edges and receives donor -> cell edges
+        instead; intrinsic ``z`` is unchanged, spatial ``s`` is computed from the donors.
+
         Parameters
         ----------
         indices
-            Cell indices to compute counterfactual latents for.
+            Cells to compute counterfactual latents for.
         neighbour_indices
-            Either a 1-D donor pool shared by every seed, or a list/tuple with one 1-D
-            integer array per entry of ``indices`` giving that focal cell's complete donor
-            set. Per-cell donor sets are used as given -- no subsampling -- so
-            ``n_neighbors_per_seed`` and ``seed`` are ignored for such a call; donors may
-            repeat across cells but must be non-empty and exclude their own focal cell.
-            :func:`cellina.sample_anchor_donors` builds such lists for the anchor
-            (cached-niche) draw.
-        n_neighbors_per_seed
-            Donors per seed, drawn uniformly without replacement from a 1-D pool. Raises
-            ValueError if >= len(neighbour_indices). Unused for per-cell donor sets.
+            Anchor cells when ``anchor_donors=True``, donor pool when ``False``. A
+            list/tuple with one 1-D integer array per entry of ``indices`` instead gives
+            each cell its donor set verbatim (``anchor_donors``, ``n_neighbors`` and
+            ``seed`` are then ignored).
+        anchor_donors
+            If True (default), each cell in ``indices`` is paired with one anchor drawn
+            uniformly with replacement from ``neighbour_indices`` (seeded by ``seed``) and
+            inherits that anchor's neighbours in ``adata.obsp[connectivity_key]``, minus
+            ``exclude_indices`` and itself, as its donors. Anchors with no neighbour left
+            (homotypic) are skipped with a warning. If False, ``neighbour_indices`` is a
+            donor pool: each cell gets ``n_neighbors`` donors drawn uniformly without
+            replacement.
+        n_neighbors
+            Donors per cell when ``anchor_donors=False``; must be smaller than the pool
+            left after ``exclude_indices`` is removed. The pool is not checked against
+            ``indices``, so a cell in both can draw itself.
+        connectivity_key
+            ``adata.obsp`` key read for the anchors' neighbours. ``None`` (default) uses the
+            graph registered in ``setup_anndata``; pass the unmasked graph when the anchors
+            were masked out of the training graph.
+        exclude_indices
+            1-D integer array of cells never used as donors (e.g. every cell of the
+            held-out type).
         give_mean
             Return posterior mean rather than a sample.
         batch_size
@@ -308,13 +340,11 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         latent_key
             ``'shifted'``, ``'z'``, or ``'s'``.
         seed
-            Random seed.
+            Seed of the anchor / donor draw.
         subgraph_type
-            Counterfactual subgraph sampling mode. ``None`` (default) inherits the model's
-            ``subgraph_type``; pass ``'directional'`` to keep only sampling-path edges
-            (lower VRAM, output-equivalent for counterfactuals) or ``'induced'`` to
-            materialise the full induced subgraph. "directional" has not been tested with
-            the contrastive loss and may result in undersampled negatives.
+            ``None`` (default) inherits the model's ``subgraph_type``; ``'directional'``
+            keeps only sampling-path edges (lower VRAM, output-equivalent for
+            counterfactuals); ``'induced'`` materialises the full induced subgraph.
         """
         if latent_key not in ['shifted', 'z', 's']:
             raise ValueError(f"latent_key must be 'shifted', 'z', or 's', got {latent_key}")
@@ -325,8 +355,9 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 128
 
         scdl = self._make_counterfactual_loader(
-            indices, neighbour_indices, n_neighbors_per_seed, batch_size, seed,
-            subgraph_type=subgraph_type,
+            indices, neighbour_indices, n_neighbors, batch_size, seed,
+            subgraph_type=subgraph_type, anchor_donors=anchor_donors,
+            connectivity_key=connectivity_key, exclude_indices=exclude_indices,
         )
 
         latent = []
@@ -352,35 +383,30 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         indices: np.ndarray,
         neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
-        n_neighbors_per_seed: int = 20,
+        n_neighbors: int = 20,
         batch_size: Optional[int] = None,
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
         subgraph_type: Optional[str] = None,
+        anchor_donors: bool = True,
+        connectivity_key: Optional[str] = None,
+        exclude_indices: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Predict gene expression under a counterfactual spatial neighbourhood.
 
-        ``subgraph_type`` selects the counterfactual graph construction: ``None`` (default)
-        inherits the model's ``subgraph_type``; ``'directional'`` keeps only sampling-path
-        edges (lower VRAM, output-equivalent for counterfactuals); ``'induced'`` materialises
-        the full induced subgraph (higher VRAM).
-
-        ``neighbour_indices`` is either a 1-D donor pool, from which each seed draws
-        ``n_neighbors_per_seed`` donors uniformly without replacement, or a list/tuple with
-        one 1-D integer array per entry of ``indices`` holding that focal cell's complete
-        donor set. Per-cell donor sets are used verbatim, so ``n_neighbors_per_seed`` and
-        ``seed`` are ignored for such a call. :func:`cellina.sample_anchor_donors` builds
-        such lists for the anchor (cached-niche) draw, in which each focal cell inherits
-        the real neighbourhood of one randomly drawn anchor cell.
+        The neighbourhood is built as in :meth:`get_counterfactual_latents` (same
+        ``neighbour_indices`` / ``anchor_donors`` / ``n_neighbors`` / ``connectivity_key`` /
+        ``exclude_indices`` / ``seed`` / ``subgraph_type`` semantics); ``library_size`` and
+        ``return_numpy`` are passed to the decoder as in :meth:`get_normalized_expression`.
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
             batch_size = 128
         scdl = self._make_counterfactual_loader(
-            np.asarray(indices), neighbour_indices,
-            n_neighbors_per_seed, batch_size, seed,
-            subgraph_type=subgraph_type,
+            np.asarray(indices), neighbour_indices, n_neighbors, batch_size, seed,
+            subgraph_type=subgraph_type, anchor_donors=anchor_donors,
+            connectivity_key=connectivity_key, exclude_indices=exclude_indices,
         )
         return self._compute_expression(scdl, library_size, return_numpy)
 

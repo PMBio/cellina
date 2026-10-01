@@ -372,8 +372,8 @@ def test_s_encoder_spatial_only_input(adata_with_spatial):
     assert inference_outputs["shifted"].shape[1] == 2 * n_latent
 
 def test_make_counterfactual_adata(adata_with_spatial):
-    """Test make_counterfactual_adata with precomputed=False and precomputed=True."""
-    # Compute spatial_x from gene expression so feature dim matches precomputed=False output
+    """Test make_counterfactual_adata with anchor_donors=False and anchor_donors=True."""
+    # Compute spatial_x from gene expression so feature dim matches anchor_donors=False output
     compute_spatial_features(adata_with_spatial, connectivity_key="spatial_connectivities", obsm_key="spatial_x")
 
     to_dense = lambda x: x.toarray() if hasattr(x, "toarray") else np.asarray(x)
@@ -388,44 +388,44 @@ def test_make_counterfactual_adata(adata_with_spatial):
             adata_with_spatial, indices_basal, indices_cf, spatial_col, **kw
         )
 
-    # precomputed=False: rebuild via compute_spatial_features
-    adata_cf = _cf(precomputed=False)
+    # anchor_donors=False: rebuild via compute_spatial_features
+    adata_cf = _cf(anchor_donors=False)
     assert adata_cf.n_obs == len(indices_basal)
     assert adata_cf.n_vars == adata_with_spatial.n_vars
     assert adata_cf.obsm[spatial_col].shape[0] == len(indices_basal)
     np.testing.assert_array_equal(adata_cf.X, adata_with_spatial[indices_basal].X)
 
-    # reproducibility: with n_neighbours the RNG is used; same random_state → same result
+    # reproducibility: with n_neighbors the RNG is used; same random_state → same result
     np.testing.assert_array_equal(
-        to_dense(_cf(precomputed=False, n_neighbours=3, random_state=7).obsm[spatial_col]),
-        to_dense(_cf(precomputed=False, n_neighbours=3, random_state=7).obsm[spatial_col]),
+        to_dense(_cf(anchor_donors=False, n_neighbors=3, random_state=7).obsm[spatial_col]),
+        to_dense(_cf(anchor_donors=False, n_neighbors=3, random_state=7).obsm[spatial_col]),
     )
 
-    # precomputed=True: rows sampled from existing obsm; reproducible with same random_state
-    adata_cf_pre = _cf(precomputed=True, random_state=0)
+    # anchor_donors=True: rows sampled from existing obsm; reproducible with same random_state
+    adata_cf_pre = _cf(anchor_donors=True, random_state=0)
     np.testing.assert_array_equal(
         to_dense(adata_cf_pre.obsm[spatial_col]),
-        to_dense(_cf(precomputed=True, random_state=0).obsm[spatial_col]),
+        to_dense(_cf(anchor_donors=True, random_state=0).obsm[spatial_col]),
     )
     cf_rows = to_dense(adata_with_spatial.obsm[spatial_col][indices_cf])
     result_rows = to_dense(adata_cf_pre.obsm[spatial_col])
     assert np.all(
         np.any(np.all(cf_rows[:, None] == result_rows[None], axis=-1), axis=0)
-    ), "precomputed=True rows must come from counterfactual obsm rows"
+    ), "anchor_donors=True rows must come from counterfactual obsm rows"
 
-    # precomputed=True also writes spatial_x_cf; rows must come from the cf pool
-    assert "spatial_x_cf" in adata_cf_pre.obsm, "spatial_x_cf should exist for precomputed=True"
+    # anchor_donors=True also writes spatial_x_cf; rows must come from the cf pool
+    assert "spatial_x_cf" in adata_cf_pre.obsm, "spatial_x_cf should exist for anchor_donors=True"
     cf_obsm_rows = to_dense(adata_cf_pre.obsm["spatial_x_cf"])
     assert np.all(
         np.any(np.all(cf_rows[:, None] == cf_obsm_rows[None], axis=-1), axis=0)
     ), "spatial_x_cf rows must come from counterfactual obsm rows"
 
-    # Regardless of n_neighbours, the per-gene mean of spatial_x_cf should be close to
+    # Regardless of n_neighbors, the per-gene mean of spatial_x_cf should be close to
     # the full-neighbourhood result (law of large numbers over basal cells).
-    mean_full = to_dense(_cf(precomputed=False, n_neighbours=50, random_state=0).obsm[spatial_col]).mean(axis=0)
-    mean_sub = to_dense(_cf(precomputed=False, n_neighbours=10, random_state=0).obsm[spatial_col]).mean(axis=0)
+    mean_full = to_dense(_cf(anchor_donors=False, n_neighbors=50, random_state=0).obsm[spatial_col]).mean(axis=0)
+    mean_sub = to_dense(_cf(anchor_donors=False, n_neighbors=10, random_state=0).obsm[spatial_col]).mean(axis=0)
     np.testing.assert_allclose(mean_sub, mean_full, atol=1.0, err_msg=(
-        "Per-gene mean of spatial_x_cf should be similar regardless of n_neighbours"
+        "Per-gene mean of spatial_x_cf should be similar regardless of n_neighbors"
     ))
 
 
@@ -753,8 +753,8 @@ def test_counterfactual_layer_aggregates_named_layer(adata):
         indices_basal,
         indices_counterfactual,
         spatial_column="spatial_x",
-        precomputed=False,
-        n_neighbours=5,
+        anchor_donors=False,
+        n_neighbors=5,
         random_state=0,
         layer="lognorm",
     )
@@ -786,8 +786,8 @@ def test_counterfactual_layer_none_matches_previous_behaviour(adata):
             indices_basal,
             indices_counterfactual,
             spatial_column="spatial_x",
-            precomputed=False,
-            n_neighbours=5,
+            anchor_donors=False,
+            n_neighbors=5,
             random_state=0,
         )
 

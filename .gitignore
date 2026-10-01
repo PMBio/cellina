@@ -210,3 +210,5 @@ __marimo__/
 scvi_log
 
 /data
+# local slurm test logs
+.testlogs/

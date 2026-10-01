@@ -126,8 +126,8 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             neighbour_indices: np.ndarray,
             seed: int = 0,
             adata: Optional[AnnData] = None,
-            precomputed: bool = True,
-            n_neighbours: int = 50,
+            anchor_donors: bool = True,
+            n_neighbors: int = 50,
             connectivity_key: str = "spatial_connectivities",
             layer: Optional[str] = None,
         ):
@@ -138,8 +138,8 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 neighbour_indices,
                 spatial_column=self._spatial_obsm_key,
                 random_state=seed,
-                precomputed=precomputed,
-                n_neighbours=n_neighbours,
+                anchor_donors=anchor_donors,
+                n_neighbors=n_neighbors,
                 connectivity_key=connectivity_key,
                 layer=layer,
             )
@@ -155,24 +155,37 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         latent_key: str = "shifted",
         seed: int = 0,
-        precomputed: bool = True,
-        n_neighbours: int = 50,
+        anchor_donors: bool = True,
+        n_neighbors: int = 50,
         connectivity_key: str = "spatial_connectivities",
         layer: Optional[str] = None,
     ) -> np.ndarray:
         """
         Return latent representations under a counterfactual spatial neighbourhood.
 
-        Intrinsic ``z`` is computed from each cell's own counts (unchanged).
-        Spatial ``s`` is computed via the neighbors of ``neighbour_indices`` instead of
-        their real spatial neighbours.
+        Intrinsic ``z`` is computed from each cell's own counts (unchanged); spatial ``s``
+        from the counterfactual neighbourhood given by ``neighbour_indices``.
 
         Parameters
         ----------
         indices
             Cell indices to compute counterfactual latents for.
         neighbour_indices
-            Indices of donor cells to sample spatial information from.
+            Anchor cells when ``anchor_donors=True``, donor pool when ``False``.
+        anchor_donors
+            If True (default), each cell in ``indices`` is paired with one anchor drawn
+            uniformly with replacement from ``neighbour_indices`` (seeded by ``seed``) and
+            takes over that anchor's stored spatial features, so the anchors must have had
+            neighbours when those features were computed (after masking them out with
+            ``spatial_neighbors(test_indices=...)`` use ``anchor_donors=False``). If False,
+            ``neighbour_indices`` is a donor pool: each cell is rewired to ``n_neighbors``
+            donors drawn uniformly without replacement and its spatial features are
+            re-aggregated over the rewired graph.
+        n_neighbors
+            Donors per cell when ``anchor_donors=False``; must be
+            ``< len(neighbour_indices)``.
+        connectivity_key
+            ``adata.obsp`` key of the graph rewired when ``anchor_donors=False``.
         adata
             Optional AnnData to use instead of self.adata for generating the counterfactual loader.
         give_mean
@@ -184,10 +197,9 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed
             Random seed for neighbour sampling.
         layer
-            Key in ``adata.layers`` holding the expression representation aggregated
-            over the rewired graph when ``precomputed=False``. ``None`` (default) uses
-            ``adata.X``. Must match the representation used to build the training
-            ``spatial_x`` (e.g. a ``'lognorm'`` layer with log1p(CP10K) while
+            ``adata.layers`` key aggregated over the rewired graph when
+            ``anchor_donors=False`` (``None``: ``adata.X``). Must match the representation
+            the training spatial features were built from (e.g. log1p(CP10K) while
             ``adata.X`` holds raw counts).
 
         Returns
@@ -199,7 +211,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 512
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
-            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
+            anchor_donors=anchor_donors, n_neighbors=n_neighbors, connectivity_key=connectivity_key,
             layer=layer,
         )
         return self.get_latent_representation(
@@ -217,8 +229,8 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed: int = 0,
         library_size: Union[float, str] = "latent",
         return_numpy: bool = True,
-        precomputed: bool = True,
-        n_neighbours: int = 50,
+        anchor_donors: bool = True,
+        n_neighbors: int = 50,
         connectivity_key: str = "spatial_connectivities",
         layer: Optional[str] = None,
     ) -> np.ndarray:
@@ -233,7 +245,21 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices
             Cell indices to predict counterfactual expression for.
         neighbour_indices
-            Indices of donor cells to sample spatial information from.
+            Anchor cells when ``anchor_donors=True``, donor pool when ``False``.
+        anchor_donors
+            If True (default), each cell in ``indices`` is paired with one anchor drawn
+            uniformly with replacement from ``neighbour_indices`` (seeded by ``seed``) and
+            takes over that anchor's stored spatial features, so the anchors must have had
+            neighbours when those features were computed (after masking them out with
+            ``spatial_neighbors(test_indices=...)`` use ``anchor_donors=False``). If False,
+            ``neighbour_indices`` is a donor pool: each cell is rewired to ``n_neighbors``
+            donors drawn uniformly without replacement and its spatial features are
+            re-aggregated over the rewired graph.
+        n_neighbors
+            Donors per cell when ``anchor_donors=False``; must be
+            ``< len(neighbour_indices)``.
+        connectivity_key
+            ``adata.obsp`` key of the graph rewired when ``anchor_donors=False``.
         adata
             Optional AnnData to use instead of ``self.adata``.
         batch_size
@@ -246,10 +272,9 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return_numpy
             Passed to :meth:`get_normalized_expression`.
         layer
-            Key in ``adata.layers`` holding the expression representation aggregated
-            over the rewired graph when ``precomputed=False``. ``None`` (default) uses
-            ``adata.X``. Must match the representation used to build the training
-            ``spatial_x`` (e.g. a ``'lognorm'`` layer with log1p(CP10K) while
+            ``adata.layers`` key aggregated over the rewired graph when
+            ``anchor_donors=False`` (``None``: ``adata.X``). Must match the representation
+            the training spatial features were built from (e.g. log1p(CP10K) while
             ``adata.X`` holds raw counts).
 
         Returns
@@ -261,7 +286,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             batch_size = 512
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
-            precomputed=precomputed, n_neighbours=n_neighbours, connectivity_key=connectivity_key,
+            anchor_donors=anchor_donors, n_neighbors=n_neighbors, connectivity_key=connectivity_key,
             layer=layer,
         )
         return self.get_normalized_expression(
