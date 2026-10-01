@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [Unreleased]
+## [1.2.0] - 01.10.2026
 ### Added
 - `anchor_donors` for `CellinaGCN.get_counterfactual_expression` /
   `get_counterfactual_latents` (default `True`): `neighbour_indices` are *anchor* cells;
@@ -17,16 +17,6 @@ All notable changes to this project will be documented in this file.
   donor pool from which each focal cell draws `n_neighbors` donors uniformly without
   replacement (`exclude_indices` is removed from the pool). `neighbour_indices` may also
   be a list/tuple with one 1-D integer array per focal cell, used verbatim.
-
-### Changed
-- `Cellina.get_counterfactual_expression` / `get_counterfactual_latents` /
-  `_make_counterfactual_adata` and `make_counterfactual_adata`: `precomputed` is renamed
-  `anchor_donors` and `n_neighbours` is renamed `n_neighbors` (same semantics and
-  defaults, no behaviour change). `CellinaGCN`'s `n_neighbors_per_seed` is renamed
-  `n_neighbors`. No aliases are kept.
-
-## [1.1.2] — 2026-09-29
-### Added
 - `make_counterfactual_adata` gained a `layer` argument (threaded through
   `Cellina._make_counterfactual_adata`, `Cellina.get_counterfactual_latents` and
   `Cellina.get_counterfactual_expression`). When `precomputed=False`, the
@@ -58,6 +48,12 @@ All notable changes to this project will be documented in this file.
   node-perturbation calls, so both now aggregate the same representation the
   model was trained on (previously the edge-perturbation section aggregated raw
   counts).
+
+- `Cellina.get_counterfactual_expression` / `get_counterfactual_latents` /
+  `_make_counterfactual_adata` and `make_counterfactual_adata`: `precomputed` is renamed
+  `anchor_donors` and `n_neighbours` is renamed `n_neighbors` (same semantics and
+  defaults, no behaviour change). `CellinaGCN`'s `n_neighbors_per_seed` is renamed
+  `n_neighbors`. No aliases are kept.
 
 ## [1.1.1] — 2026-09-05
 ### Removed
