@@ -6,6 +6,25 @@ All notable changes to this project will be documented in this file.
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
+### Added
+- `CellinaGCN.get_counterfactual_expression`, `get_counterfactual_latents` and
+  `_make_counterfactual_loader` accept a per-focal-cell donor specification for
+  `neighbour_indices`: instead of a single 1-D donor pool that every seed subsamples,
+  a list/tuple holding one 1-D integer array per entry of `indices` gives each focal
+  cell its own complete donor set. Such donor sets are used verbatim, so
+  `n_neighbors_per_seed` and `seed` are ignored for that call, and donors may repeat
+  across cells. Each donor array must be non-empty, of integer dtype and must not
+  contain its own focal cell. The 1-D pool path is unchanged, including its RNG
+  consumption order.
+- `cellina.sample_anchor_donors`: the "anchor" (cached-niche) donor draw for
+  edge-perturbation counterfactuals. Each focal cell is paired with one anchor drawn
+  uniformly with replacement from `anchor_indices` and inherits that anchor's complete
+  neighbourhood in the given connectivity matrix, minus `exclude` and minus itself,
+  as its donor set. Returns the per-cell list accepted by
+  `CellinaGCN.get_counterfactual_expression` / `get_counterfactual_latents`
+  (optionally together with the drawn anchors). An inherited donor set that would be
+  empty raises unless `fallback_pool` is given, in which case `n_fallback` donors are
+  drawn from that pool instead.
 
 ## [1.1.2] — 2026-09-29
 ### Added

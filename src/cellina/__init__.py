@@ -14,6 +14,7 @@ from ._spatial_utils import (
     make_counterfactual_adata,
     make_neighbor_perturbation,
     make_perturbed_expression,
+    sample_anchor_donors,
     spatial_neighbors,
 )
 
@@ -43,6 +44,7 @@ __all__ = [
     "make_counterfactual_adata",
     "make_neighbor_perturbation",
     "make_perturbed_expression",
+    "sample_anchor_donors",
     "spatial_neighbors",
 ]
 

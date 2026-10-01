@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from anndata import AnnData
@@ -712,3 +712,140 @@ def make_perturbed_expression(
         adata.layers[layer_key] = result
         return None
     return result
+
+
+def sample_anchor_donors(
+    connectivity,
+    indices,
+    anchor_indices,
+    exclude=None,
+    seed: int = 0,
+    fallback_pool=None,
+    n_fallback: int = 20,
+    return_anchors: bool = False,
+) -> Union[List[np.ndarray], Tuple[List[np.ndarray], np.ndarray]]:
+    """Per-focal-cell donor sets inherited from randomly drawn *anchor* cells.
+
+    This is the "anchor" (cached-niche) donor draw for edge-perturbation
+    counterfactuals: instead of giving every focal cell ``n`` donors sampled
+    uniformly from one pooled donor set, each focal cell is paired with one
+    anchor cell drawn uniformly (with replacement) from ``anchor_indices`` and
+    inherits that anchor's **complete real neighbourhood** in ``connectivity``
+    -- minus ``exclude`` and minus the focal cell itself -- as its donor set.
+    The result is a list that can be passed directly as ``neighbour_indices`` to
+    :meth:`CellinaGCN.get_counterfactual_expression` /
+    :meth:`CellinaGCN.get_counterfactual_latents`, which use such per-cell donor
+    sets verbatim.
+
+    Typical use is a leave-one-cell-type-out transfer: ``indices`` are the
+    held-out-type cells in the control domain, ``anchor_indices`` the
+    held-out-type cells in the target domain, ``exclude`` every cell of the
+    held-out type, and ``connectivity`` the *unmasked* spatial graph (so that the
+    anchors' neighbourhoods are their real ones even when the model was trained
+    on a graph with the target cells masked out).
+
+    Parameters
+    ----------
+    connectivity
+        ``(n_obs, n_obs)`` adjacency matrix (sparse or dense); row ``i`` holds the
+        neighbours of cell ``i``. Explicitly stored zeros are not neighbours.
+    indices
+        1-D integer array of focal cells, one donor set is returned per entry.
+    anchor_indices
+        1-D non-empty integer array of cells whose neighbourhoods may be
+        inherited. Anchors are drawn with replacement, so one anchor can serve
+        several focal cells.
+    exclude
+        Optional 1-D integer array of cells that are never used as donors
+        (e.g. all cells of the held-out type, including the anchors themselves).
+    seed
+        Seed of the ``numpy.random.default_rng`` used to draw the anchors (and
+        the fallback donors).
+    fallback_pool
+        Optional 1-D integer array. A focal cell whose inherited donor set would
+        be empty (anchor isolated after ``exclude``) instead receives
+        ``min(n_fallback, len(fallback_pool) - 1)`` donors sampled uniformly
+        without replacement from ``fallback_pool`` minus the focal cell. When
+        ``None`` (default) an empty donor set raises a ``ValueError`` -- the
+        caller should drop such focal cells from ``indices`` or supply a pool.
+    n_fallback
+        Donors drawn from ``fallback_pool`` for each fallback cell.
+    return_anchors
+        If True, also return the anchor drawn for each focal cell.
+
+    Returns
+    -------
+    donors : list of 1-D int64 arrays, one per entry of ``indices``
+    anchors : 1-D int64 array, only when ``return_anchors=True``
+    """
+    indices = np.asarray(indices)
+    anchor_indices = np.asarray(anchor_indices)
+    for name, arr in (("indices", indices), ("anchor_indices", anchor_indices)):
+        if arr.ndim != 1:
+            raise ValueError(f"{name} must be 1-D, got shape {arr.shape}.")
+        if not np.issubdtype(arr.dtype, np.integer):
+            raise ValueError(f"{name} must have an integer dtype, got {arr.dtype}.")
+    if anchor_indices.size == 0:
+        raise ValueError("anchor_indices is empty; at least one anchor cell is required.")
+
+    conn = csr_matrix(connectivity)
+    if conn.ndim != 2 or conn.shape[0] != conn.shape[1]:
+        raise ValueError(f"connectivity must be a square matrix, got shape {conn.shape}.")
+    n_obs = conn.shape[0]
+    for name, arr in (("indices", indices), ("anchor_indices", anchor_indices)):
+        if arr.size and (arr.min() < 0 or arr.max() >= n_obs):
+            raise ValueError(f"{name} contains cells outside [0, {n_obs}).")
+    conn.eliminate_zeros()
+
+    excluded = np.zeros(n_obs, dtype=bool)
+    if exclude is not None:
+        exclude = np.asarray(exclude)
+        if exclude.size:
+            if exclude.ndim != 1 or not np.issubdtype(exclude.dtype, np.integer):
+                raise ValueError("exclude must be a 1-D integer array.")
+            excluded[exclude] = True
+
+    pool = None
+    if fallback_pool is not None:
+        pool = np.unique(np.asarray(fallback_pool))
+        if pool.ndim != 1 or not np.issubdtype(pool.dtype, np.integer):
+            raise ValueError("fallback_pool must be a 1-D integer array.")
+        if n_fallback < 1:
+            raise ValueError(f"n_fallback must be >= 1, got {n_fallback}.")
+
+    rng = np.random.default_rng(seed)
+    anchors = rng.choice(anchor_indices, size=len(indices), replace=True)
+
+    neigh_cache = {}
+    donors, n_empty = [], 0
+    for pos, (focal, anchor) in enumerate(zip(indices, anchors)):
+        nb = neigh_cache.get(anchor)
+        if nb is None:
+            nb = conn.indices[conn.indptr[anchor]:conn.indptr[anchor + 1]]
+            nb = nb[~excluded[nb]]
+            neigh_cache[anchor] = nb
+        nb = nb[nb != focal]
+        if nb.size == 0:
+            if pool is None:
+                n_empty += 1
+                donors.append(nb)
+                continue
+            cand = pool[pool != focal]
+            if cand.size == 0:
+                raise ValueError(
+                    f"fallback_pool holds no donor other than focal cell {focal} "
+                    f"(indices[{pos}])."
+                )
+            nb = rng.choice(cand, size=min(n_fallback, cand.size), replace=False)
+        donors.append(np.ascontiguousarray(nb, dtype=np.int64))
+
+    if n_empty:
+        empty_pos = [i for i, d in enumerate(donors) if d.size == 0][:10]
+        raise ValueError(
+            f"{n_empty} focal cell(s) inherited an empty donor set (their anchor has no "
+            f"neighbour outside `exclude`); first positions {empty_pos}. Pass "
+            "`fallback_pool` or drop these cells from `indices`."
+        )
+    if return_anchors:
+        return donors, anchors.astype(np.int64, copy=False)
+    return donors

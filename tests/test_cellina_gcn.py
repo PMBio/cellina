@@ -1226,3 +1226,253 @@ def test_attention_by_group(trained_gat_model, monkeypatch):
     monkeypatch.setattr(model, "get_attention_weights", lambda **kw: {0: uniform, 1: uniform})
     zero = model.attention_by_group("cell_labels")
     np.testing.assert_allclose(zero.to_numpy(), 0.0, atol=1e-5)
+
+
+def _cf_expr(model, indices, donors, **kw):
+    """Counterfactual expression with the decoder's draw pinned, so only the graph varies."""
+    torch.manual_seed(0)
+    return model.get_counterfactual_expression(indices, donors, library_size=1e4, **kw)
+
+
+def test_counterfactual_per_cell_donor_lists_match_the_pool_draw(trained_model):
+    """A per-cell donor list reproducing the pool path's draws gives an identical result.
+
+    The pool path is checked against a list rather than against the whole pool
+    (``n_neighbors_per_seed = len(pool)``) because drawing every donor is rejected by the
+    ``n_neighbors_per_seed >= len(neighbour_indices)`` guard; replaying the RNG gives the
+    same "same donors, different API" comparison without touching that contract.
+    """
+    model, adata = trained_model
+    # CUDA scatter-add over the rewired edges is non-deterministic at the ULP level.
+    model.module.to("cpu")
+    indices = np.arange(40)
+    pool = np.arange(60, adata.n_obs)
+    k = 7
+
+    from_pool = _cf_expr(model, indices, pool, n_neighbors_per_seed=k, seed=3)
+
+    rng = np.random.default_rng(3)
+    per_cell = [rng.choice(pool, size=k, replace=False) for _ in indices]
+    from_list = _cf_expr(model, indices, per_cell)
+
+    assert np.array_equal(from_pool, from_list), \
+        "the same donor sets must give the same counterfactual, however they are passed"
+
+    # The whole pool for every cell is a legal (and ignored-n_neighbors_per_seed) call.
+    whole_pool = [pool.copy() for _ in indices]
+    full_a = _cf_expr(model, indices, whole_pool, n_neighbors_per_seed=2)
+    full_b = _cf_expr(model, indices, whole_pool, n_neighbors_per_seed=999, seed=17)
+    assert np.array_equal(full_a, full_b), \
+        "per-cell donor sets are used verbatim; n_neighbors_per_seed and seed are ignored"
+    assert full_a.shape == (len(indices), adata.n_vars)
+    assert np.isfinite(full_a).all() and (full_a >= 0).all()
+
+
+def test_counterfactual_per_cell_donor_lists_are_used_verbatim(trained_model):
+    """Per-cell lists that differ between cells move the result and are reproducible."""
+    model, adata = trained_model
+    model.module.to("cpu")
+    indices = np.arange(20)
+    pool = np.arange(60, adata.n_obs)
+    k = 5
+
+    # Cell i gets a deterministic, cell-specific slice of the pool.
+    per_cell = [pool[(np.arange(k) + 3 * i) % len(pool)] for i in range(len(indices))]
+
+    uniform = _cf_expr(model, indices, pool, n_neighbors_per_seed=k, seed=0)
+    listed_a = _cf_expr(model, indices, per_cell)
+    listed_b = _cf_expr(model, indices, list(per_cell))
+
+    assert np.array_equal(listed_a, listed_b), "per-cell donor lists must be deterministic"
+    assert not np.array_equal(listed_a, uniform), \
+        "explicit per-cell donors must differ from the uniform draw"
+
+    # ... and the rewired edges are exactly the requested donor -> seed edges.
+    loader = model._make_counterfactual_loader(indices, per_cell, n_neighbors_per_seed=99,
+                                               batch_size=10)
+    src, dst = loader.node_loader.data.edge_index.numpy()
+    assert not np.isin(src, indices).any(), "seeds must not be message sources"
+    into_seeds = np.isin(dst, indices)
+    for pos, seed_id in enumerate(indices):
+        got = src[into_seeds & (dst == seed_id)]
+        np.testing.assert_array_equal(np.sort(got), np.sort(per_cell[pos]))
+
+
+def test_counterfactual_per_cell_donor_validation(trained_model):
+    """Malformed per-cell donor specifications raise a ValueError naming the position."""
+    model, adata = trained_model
+    indices = np.arange(5)
+    pool = np.arange(60, adata.n_obs)
+    ok = [pool[:4] for _ in indices]
+
+    with pytest.raises(ValueError, match="one donor array per focal cell"):
+        model.get_counterfactual_expression(indices, ok[:3])
+
+    empty = [pool[:4] for _ in indices]
+    empty[2] = np.array([], dtype=int)
+    with pytest.raises(ValueError, match=r"neighbour_indices\[2\] is empty"):
+        model.get_counterfactual_expression(indices, empty)
+
+    floats = [pool[:4] for _ in indices]
+    floats[1] = pool[:4].astype(float)
+    with pytest.raises(ValueError, match=r"neighbour_indices\[1\] must have an integer dtype"):
+        model.get_counterfactual_latents(indices, floats)
+
+    itself = [pool[:4] for _ in indices]
+    itself[3] = np.array([indices[3], pool[0]])
+    with pytest.raises(ValueError, match="contains its own focal cell"):
+        model.get_counterfactual_expression(indices, itself)
+
+    twod = [pool[:4] for _ in indices]
+    twod[0] = pool[:4].reshape(2, 2)
+    with pytest.raises(ValueError, match=r"neighbour_indices\[0\] must be a 1-D array"):
+        model.get_counterfactual_expression(indices, twod)
+
+
+def test_counterfactual_pool_path_is_unchanged(trained_model):
+    """The 1-D pool path still reproduces itself exactly and still rejects a full draw."""
+    model, adata = trained_model
+    model.module.to("cpu")
+    indices = np.arange(20)
+    pool = np.arange(60, adata.n_obs)
+
+    a = _cf_expr(model, indices, pool, seed=0)
+    b = _cf_expr(model, indices, pool, seed=0)
+    assert np.array_equal(a, b), "the same seed must reproduce the same counterfactual"
+    assert not np.array_equal(a, _cf_expr(model, indices, pool, seed=1))
+
+    # A flat python list is still read as a pool, not as per-cell donor sets.
+    c = _cf_expr(model, indices, list(pool), seed=0)
+    assert np.array_equal(a, c)
+
+    with pytest.raises(ValueError, match="must be less than"):
+        model.get_counterfactual_expression(indices, pool, n_neighbors_per_seed=len(pool))
+
+
+# --------------------------------------------------------------------------- anchor draw
+def _anchor_case(adata):
+    """Focal cells, anchors and an excluded group carved out of the fixture graph."""
+    n = adata.n_obs
+    focal = np.arange(0, 20)
+    anchors = np.arange(n - 15, n)
+    exclude = np.concatenate([focal, anchors])          # "held-out type": focal + anchors
+    conn = adata.obsp["spatial_connectivities"].tocsr()
+    return focal, anchors, exclude, conn
+
+
+def test_sample_anchor_donors_inherits_the_anchor_neighbourhood(trained_model):
+    from cellina import sample_anchor_donors
+
+    _, adata = trained_model
+    focal, anchors, exclude, conn = _anchor_case(adata)
+
+    donors, drawn = sample_anchor_donors(conn, focal, anchors, exclude=exclude, seed=0,
+                                         return_anchors=True)
+    assert len(donors) == len(focal) and drawn.shape == (len(focal),)
+    assert np.isin(drawn, anchors).all(), "anchors must come from anchor_indices"
+    for pos, (f, a) in enumerate(zip(focal, drawn)):
+        expected = conn.indices[conn.indptr[a]:conn.indptr[a + 1]]
+        expected = expected[~np.isin(expected, exclude)]
+        expected = expected[expected != f]
+        np.testing.assert_array_equal(np.sort(donors[pos]), np.sort(expected))
+        assert donors[pos].dtype == np.int64
+        assert f not in donors[pos] and not np.isin(donors[pos], exclude).any()
+
+    # Same seed -> same anchors and donors; different seed -> different pairing.
+    again, drawn_again = sample_anchor_donors(conn, focal, anchors, exclude=exclude, seed=0,
+                                              return_anchors=True)
+    np.testing.assert_array_equal(drawn, drawn_again)
+    assert all(np.array_equal(a, b) for a, b in zip(donors, again))
+    _, drawn_other = sample_anchor_donors(conn, focal, anchors, exclude=exclude, seed=1,
+                                          return_anchors=True)
+    assert not np.array_equal(drawn, drawn_other)
+
+    # Sparse and dense connectivity give the same answer; explicit zeros are not edges.
+    dense = conn.toarray()
+    from_dense = sample_anchor_donors(dense, focal, anchors, exclude=exclude, seed=0)
+    assert all(np.array_equal(a, b) for a, b in zip(donors, from_dense))
+    a0 = int(drawn[0])
+    zero_col = next(j for j in range(adata.n_obs)
+                    if j not in exclude and j != a0 and conn[a0, j] == 0)
+    coo = conn.tocoo()
+    with_zeros = sp.csr_matrix(
+        (np.append(coo.data, 0.0), (np.append(coo.row, a0), np.append(coo.col, zero_col))),
+        shape=conn.shape)
+    assert with_zeros.nnz == conn.nnz + 1, "fixture must carry one explicit zero"
+    from_zeros = sample_anchor_donors(with_zeros, focal, anchors, exclude=exclude, seed=0)
+    assert zero_col not in from_zeros[0]
+    assert all(np.array_equal(a, b) for a, b in zip(donors, from_zeros))
+
+
+def test_sample_anchor_donors_empty_sets_and_fallback(trained_model):
+    from cellina import sample_anchor_donors
+
+    _, adata = trained_model
+    focal, anchors, exclude, conn = _anchor_case(adata)
+    n = adata.n_obs
+
+    # Isolate one anchor (after exclusion) by excluding everything it is connected to.
+    a_iso = anchors[0]
+    a_nb = conn.indices[conn.indptr[a_iso]:conn.indptr[a_iso + 1]]
+    exclude_iso = np.unique(np.concatenate([exclude, a_nb]))
+    only_iso = np.array([a_iso])
+
+    with pytest.raises(ValueError, match="empty donor set"):
+        sample_anchor_donors(conn, focal, only_iso, exclude=exclude_iso, seed=0)
+
+    pool = np.setdiff1d(np.arange(n), exclude_iso)
+    donors = sample_anchor_donors(conn, focal, only_iso, exclude=exclude_iso, seed=0,
+                                  fallback_pool=pool, n_fallback=5)
+    for f, d in zip(focal, donors):
+        assert d.shape == (5,) and len(np.unique(d)) == 5
+        assert np.isin(d, pool).all() and f not in d
+    # n_fallback larger than the pool is capped at the pool size (minus the focal cell).
+    small = pool[:3]
+    donors = sample_anchor_donors(conn, focal, only_iso, exclude=exclude_iso, seed=0,
+                                  fallback_pool=small, n_fallback=50)
+    assert all(d.shape == (3,) for d in donors)
+    with pytest.raises(ValueError, match="no donor other than focal cell"):
+        sample_anchor_donors(conn, np.array([int(small[0])]), only_iso,
+                             exclude=exclude_iso, fallback_pool=small[:1])
+
+    # Argument validation.
+    with pytest.raises(ValueError, match="anchor_indices is empty"):
+        sample_anchor_donors(conn, focal, np.array([], dtype=int))
+    with pytest.raises(ValueError, match="integer dtype"):
+        sample_anchor_donors(conn, focal.astype(float), anchors)
+    with pytest.raises(ValueError, match="must be 1-D"):
+        sample_anchor_donors(conn, focal.reshape(2, -1), anchors)
+    with pytest.raises(ValueError, match="outside"):
+        sample_anchor_donors(conn, focal, np.array([n + 3]))
+    with pytest.raises(ValueError, match="square"):
+        sample_anchor_donors(conn[:, :10], focal, anchors)
+    with pytest.raises(ValueError, match="n_fallback"):
+        sample_anchor_donors(conn, focal, anchors, fallback_pool=pool, n_fallback=0)
+
+
+def test_counterfactual_expression_with_anchor_donors(trained_model):
+    """The anchor draw plugs straight into the GAT counterfactual and rewires as drawn."""
+    from cellina import sample_anchor_donors
+
+    model, adata = trained_model
+    model.module.to("cpu")
+    focal, anchors, exclude, conn = _anchor_case(adata)
+    pool = np.setdiff1d(np.arange(adata.n_obs), exclude)
+
+    donors = sample_anchor_donors(conn, focal, anchors, exclude=exclude, seed=0)
+    anchored = _cf_expr(model, focal, donors)
+    assert anchored.shape == (len(focal), adata.n_vars)
+    assert np.isfinite(anchored).all() and (anchored >= 0).all()
+    assert np.array_equal(anchored, _cf_expr(model, focal, donors)), "deterministic"
+
+    pooled = _cf_expr(model, focal, pool, n_neighbors_per_seed=5, seed=0)
+    assert not np.array_equal(anchored, pooled), "anchor and pooled draws differ"
+
+    loader = model._make_counterfactual_loader(focal, donors, n_neighbors_per_seed=99,
+                                               batch_size=10)
+    src, dst = loader.node_loader.data.edge_index.numpy()
+    assert not np.isin(src, focal).any(), "focal cells must not be message sources"
+    assert not np.isin(src[np.isin(dst, focal)], exclude).any(), \
+        "excluded cells must never feed a focal cell"
+    for pos, f in enumerate(focal):
+        np.testing.assert_array_equal(np.sort(src[dst == f]), np.sort(donors[pos]))

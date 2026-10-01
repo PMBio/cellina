@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -191,15 +191,23 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     def _make_counterfactual_loader(
         self,
         indices: np.ndarray,
-        neighbour_indices: np.ndarray,
+        neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
         n_neighbors_per_seed: int,
         batch_size: int = 128,
         seed: int = 0,
         subgraph_type: Optional[str] = None,
     ):
+        """Build a loader over the graph with the seeds' neighbourhoods replaced by donors.
+
+        ``neighbour_indices`` is either a 1-D donor pool -- each seed then draws
+        ``n_neighbors_per_seed`` donors from it uniformly without replacement -- or a
+        list/tuple of one 1-D donor array per entry of ``indices``, which is used as given
+        (no subsampling, ``n_neighbors_per_seed`` and ``seed`` unused).
+        """
         # None inherits the model's subgraph_type (single source of truth); an explicit
         # value overrides per call. Validated against the shared allowed set either way.
         subgraph_type = _validate_subgraph_type(subgraph_type or self._subgraph_type)
+        indices = np.asarray(indices)
         # Reuse the cached graph + sparse X store; only the edges are rewired below.
         splitter = self._get_cached_splitter(batch_size)
         pyg_data = splitter.pyg_data
@@ -209,19 +217,28 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         keep_mask = ~(np.isin(src, indices) | np.isin(dst, indices))
         filtered_edges = edge_index[:, keep_mask]
 
-        rng = np.random.default_rng(seed)
-        neighbour_indices = np.asarray(neighbour_indices)
-
-        if n_neighbors_per_seed >= len(neighbour_indices):
-            raise ValueError(
-                f"n_neighbors_per_seed ({n_neighbors_per_seed}) must be less than "
-                f"len(neighbour_indices) ({len(neighbour_indices)})"
+        if _is_per_cell_donor_spec(neighbour_indices):
+            # One explicit donor set per focal cell: used verbatim, so no RNG is drawn.
+            donors = _validate_per_cell_donors(indices, neighbour_indices)
+            donors_per_seed = np.fromiter(
+                (len(d) for d in donors), dtype=np.int64, count=len(donors)
             )
+        else:
+            rng = np.random.default_rng(seed)
+            neighbour_indices = np.asarray(neighbour_indices)
 
-        # Same RNG stream / draw order as before, so seeds reproduce the same donor sets.
-        donors = [rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
-                  for _ in indices]
-        cf_src = np.repeat(indices, n_neighbors_per_seed)
+            if n_neighbors_per_seed >= len(neighbour_indices):
+                raise ValueError(
+                    f"n_neighbors_per_seed ({n_neighbors_per_seed}) must be less than "
+                    f"len(neighbour_indices) ({len(neighbour_indices)})"
+                )
+
+            # Same RNG stream / draw order as before, so seeds reproduce the same donor sets.
+            donors = [rng.choice(neighbour_indices, size=n_neighbors_per_seed, replace=False)
+                      for _ in indices]
+            donors_per_seed = n_neighbors_per_seed
+
+        cf_src = np.repeat(indices, donors_per_seed)
         cf_dst = np.concatenate(donors)
 
         # Donor -> seed only. Bidirectional edges let donors aggregate over the (control)
@@ -258,7 +275,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     def get_counterfactual_latents(
         self,
         indices: np.ndarray,
-        neighbour_indices: np.ndarray,
+        neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
         n_neighbors_per_seed: int = 20,
         give_mean: bool = False,
         batch_size: Optional[int] = None,
@@ -274,9 +291,16 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices
             Cell indices to compute counterfactual latents for.
         neighbour_indices
-            Donor neighbourhood pool indices.
+            Either a 1-D donor pool shared by every seed, or a list/tuple with one 1-D
+            integer array per entry of ``indices`` giving that focal cell's complete donor
+            set. Per-cell donor sets are used as given -- no subsampling -- so
+            ``n_neighbors_per_seed`` and ``seed`` are ignored for such a call; donors may
+            repeat across cells but must be non-empty and exclude their own focal cell.
+            :func:`cellina.sample_anchor_donors` builds such lists for the anchor
+            (cached-niche) draw.
         n_neighbors_per_seed
-            Donors per seed. Raises ValueError if >= len(neighbour_indices).
+            Donors per seed, drawn uniformly without replacement from a 1-D pool. Raises
+            ValueError if >= len(neighbour_indices). Unused for per-cell donor sets.
         give_mean
             Return posterior mean rather than a sample.
         batch_size
@@ -297,7 +321,6 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         self._check_if_trained(warn=False)
         indices = np.asarray(indices)
-        neighbour_indices = np.asarray(neighbour_indices)
         if batch_size is None:
             batch_size = 128
 
@@ -328,7 +351,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     def get_counterfactual_expression(
         self,
         indices: np.ndarray,
-        neighbour_indices: np.ndarray,
+        neighbour_indices: Union[np.ndarray, Sequence[np.ndarray]],
         n_neighbors_per_seed: int = 20,
         batch_size: Optional[int] = None,
         seed: int = 0,
@@ -342,12 +365,20 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         inherits the model's ``subgraph_type``; ``'directional'`` keeps only sampling-path
         edges (lower VRAM, output-equivalent for counterfactuals); ``'induced'`` materialises
         the full induced subgraph (higher VRAM).
+
+        ``neighbour_indices`` is either a 1-D donor pool, from which each seed draws
+        ``n_neighbors_per_seed`` donors uniformly without replacement, or a list/tuple with
+        one 1-D integer array per entry of ``indices`` holding that focal cell's complete
+        donor set. Per-cell donor sets are used verbatim, so ``n_neighbors_per_seed`` and
+        ``seed`` are ignored for such a call. :func:`cellina.sample_anchor_donors` builds
+        such lists for the anchor (cached-niche) draw, in which each focal cell inherits
+        the real neighbourhood of one randomly drawn anchor cell.
         """
         self._check_if_trained(warn=False)
         if batch_size is None:
             batch_size = 128
         scdl = self._make_counterfactual_loader(
-            np.asarray(indices), np.asarray(neighbour_indices),
+            np.asarray(indices), neighbour_indices,
             n_neighbors_per_seed, batch_size, seed,
             subgraph_type=subgraph_type,
         )
@@ -913,6 +944,60 @@ def _validate_subgraph_type(subgraph_type: str) -> str:
             f"subgraph_type must be one of {_VALID_SUBGRAPH_TYPES}, got {subgraph_type!r}"
         )
     return subgraph_type
+
+
+def _is_per_cell_donor_spec(neighbour_indices) -> bool:
+    """Tell a per-focal-cell donor specification from a single shared donor pool.
+
+    A list/tuple whose every element is itself array-like is read as one donor set per
+    focal cell; anything else (an ``np.ndarray``, a flat list of ints, an empty list) is
+    the shared 1-D pool that gets subsampled.
+    """
+    if isinstance(neighbour_indices, np.ndarray) or not isinstance(neighbour_indices, (list, tuple)):
+        return False
+    return len(neighbour_indices) > 0 and all(np.ndim(el) > 0 for el in neighbour_indices)
+
+
+def _validate_per_cell_donors(indices: np.ndarray, neighbour_indices) -> List[np.ndarray]:
+    """Check a per-focal-cell donor specification and return it as 1-D int64 arrays.
+
+    ``neighbour_indices[i]`` is the complete donor set of focal cell ``indices[i]``; it is
+    used as given (no subsampling). Donors may repeat across focal cells.
+    """
+    if len(neighbour_indices) != len(indices):
+        raise ValueError(
+            f"neighbour_indices was given as a per-cell donor list of length "
+            f"{len(neighbour_indices)}, but indices has length {len(indices)}; a per-cell "
+            "donor list must hold exactly one donor array per focal cell."
+        )
+    donors = []
+    for pos, donor_set in enumerate(neighbour_indices):
+        arr = np.asarray(donor_set)
+        if arr.ndim != 1:
+            raise ValueError(
+                f"neighbour_indices[{pos}] must be a 1-D array of donor indices, got "
+                f"{arr.ndim}-D (shape {arr.shape})."
+            )
+        if not np.issubdtype(arr.dtype, np.integer):
+            raise ValueError(
+                f"neighbour_indices[{pos}] must have an integer dtype, got {arr.dtype}."
+            )
+        if arr.size == 0:
+            # The seed's own edges are deleted before rewiring, so an empty donor set
+            # would leave it isolated -- which is a different experiment, not "no
+            # perturbation". Make the caller say so by dropping the cell from `indices`.
+            raise ValueError(
+                f"neighbour_indices[{pos}] is empty; every focal cell needs at least one "
+                "donor (a seed's original edges are removed first, so an empty donor set "
+                "would isolate it). Drop that cell from `indices` instead."
+            )
+        if (arr == indices[pos]).any():
+            raise ValueError(
+                f"neighbour_indices[{pos}] contains its own focal cell ({indices[pos]}); "
+                "a cell cannot be its own donor."
+            )
+        donors.append(arr.astype(np.int64, copy=False))
+    return donors
 
 
 def _resolve_num_neighbors(num_neighbors: Optional[List[int]], n_layers: int) -> List[int]:

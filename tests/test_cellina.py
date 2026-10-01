@@ -1,16 +1,28 @@
+import warnings
+
 import numpy as np
+import pandas as pd
 import pytest
 import torch
+from anndata import AnnData
+from scipy.sparse import csr_matrix, issparse
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
+from sklearn.neighbors import NearestNeighbors
 
 from cellina import Cellina
+from cellina._spatial_utils import (
+    _node_perturbation,
+    compute_spatial_features,
+    make_counterfactual_adata,
+    make_neighbor_perturbation,
+    spatial_neighbors,
+)
 
 
 @pytest.fixture
 def adata_with_spatial():
     """Create synthetic AnnData with spatial features and connectivity."""
-    from cellina._spatial_utils import spatial_neighbors
     adata = synthetic_iid()
     rng = np.random.default_rng(0)
     adata.obsm["spatial_x"] = rng.standard_normal((adata.n_obs, 20)).astype(np.float32)
@@ -213,9 +225,6 @@ def test_cellina_latent_representation(adata_with_spatial):
 
 def test_spatial_neighbors(adata_with_spatial):
     """Test spatial_neighbors function."""
-    from cellina._spatial_utils import spatial_neighbors
-    from scipy.sparse import issparse
-
     n_obs = adata_with_spatial.n_obs
 
     # Test basic functionality
@@ -256,9 +265,6 @@ def test_spatial_neighbors(adata_with_spatial):
 
 def test_spatial_neighbors_test_indices(adata_with_spatial):
     """Test that test_indices cells have zero connectivity (no edges in or out)."""
-    from cellina._spatial_utils import spatial_neighbors
-    import numpy as np
-
     test_idx = [0, 1, 2]
     conn = spatial_neighbors(
         adata_with_spatial,
@@ -283,8 +289,6 @@ def test_spatial_neighbors_test_indices(adata_with_spatial):
 
 def test_compute_spatial_features(adata_with_spatial):
     """Test compute_spatial_features function (pseudobulk mode)."""
-    from cellina._spatial_utils import compute_spatial_features, spatial_neighbors
-
     n_obs = adata_with_spatial.n_obs
 
     # Add cell type labels
@@ -369,9 +373,6 @@ def test_s_encoder_spatial_only_input(adata_with_spatial):
 
 def test_make_counterfactual_adata(adata_with_spatial):
     """Test make_counterfactual_adata with precomputed=False and precomputed=True."""
-    from cellina._spatial_utils import make_counterfactual_adata
-    from cellina._spatial_utils import compute_spatial_features
-
     # Compute spatial_x from gene expression so feature dim matches precomputed=False output
     compute_spatial_features(adata_with_spatial, connectivity_key="spatial_connectivities", obsm_key="spatial_x")
 
@@ -606,9 +607,6 @@ def test_get_perturbed_expression(adata_with_spatial):
 
 def test_make_neighbor_perturbation(adata_with_spatial):
     """Partial perturbations dict (only some cell types) runs without error."""
-    import pandas as pd
-    from cellina._spatial_utils import make_neighbor_perturbation
-
     genes = list(adata_with_spatial.var_names[:3])
     perturbations = {"0": pd.Series([1.0, -0.5, 0.5], index=genes)}  # only cell type "0"
 
@@ -640,9 +638,6 @@ def test_make_neighbor_perturbation(adata_with_spatial):
 
 def test_node_perturbation_row_sum_invariance():
     """_node_perturbation preserves row sums for both add_shift modes."""
-    from scipy.sparse import csr_matrix
-    from cellina._spatial_utils import _node_perturbation
-
     rng = np.random.default_rng(42)
     X = csr_matrix(rng.random((10, 5)).astype(np.float32))
     var_idx = {f"gene{i}": i for i in range(5)}
@@ -658,8 +653,6 @@ def test_node_perturbation_row_sum_invariance():
 
 def test_node_perturbation_fraction():
     """perturb_fraction perturbs a seeded random subset of rows; 1.0 is the old behaviour."""
-    from cellina._spatial_utils import _node_perturbation
-
     rng = np.random.default_rng(0)
     X = rng.random((100, 5)).astype(np.float32)
     var_idx = {f"gene{i}": i for i in range(5)}
@@ -682,9 +675,6 @@ def test_node_perturbation_fraction():
 
 def test_make_neighbor_perturbation_unknown(adata_with_spatial):
     """Unknown cell-type key in perturbations raises ValueError."""
-    import pandas as pd
-    from cellina._spatial_utils import make_neighbor_perturbation
-
     perturbations = {"nonexistent_type": pd.Series([1.0], index=[adata_with_spatial.var_names[0]])}
 
     with pytest.raises(ValueError, match="nonexistent_type"):
@@ -693,3 +683,226 @@ def test_make_neighbor_perturbation_unknown(adata_with_spatial):
             perturbations=perturbations,
             groupby="cell_labels",
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for the explicit ``layer`` argument on the counterfactual /
+# perturbation helpers.
+#
+# The training ``spatial_x`` is usually built from a normalized representation
+# (log1p of CP10K) while ``adata.X`` is reset to raw counts for the model. These
+# tests pin down that the counterfactual and node-perturbation helpers aggregate
+# the representation the caller asks for.
+# ---------------------------------------------------------------------------
+
+N_OBS = 60
+N_VARS = 20
+
+
+def _to_dense(x):
+    return np.asarray(x.toarray() if issparse(x) else x, dtype=np.float64)
+
+
+@pytest.fixture
+def adata():
+    rng = np.random.default_rng(0)
+    counts = rng.poisson(lam=8.0, size=(N_OBS, N_VARS)).astype(np.float32)
+    # make sure the raw-count heuristic triggers (integer valued, max > 50)
+    counts[0, 0] = 120.0
+    coords = rng.uniform(0, 100, size=(N_OBS, 2))
+
+    adata = AnnData(X=csr_matrix(counts))
+    adata.obs_names = [f"cell_{i}" for i in range(N_OBS)]
+    adata.var_names = [f"gene_{i}" for i in range(N_VARS)]
+    adata.obsm["spatial"] = coords
+    adata.layers["counts"] = csr_matrix(counts)
+
+    # log1p(CP10K) "training" representation
+    lognorm = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1e-8) * 1e4
+    lognorm = np.log1p(lognorm).astype(np.float32)
+    adata.layers["lognorm"] = csr_matrix(lognorm)
+
+    # simple kNN connectivity (binary, symmetric)
+    nn = NearestNeighbors(n_neighbors=6).fit(coords)
+    conn = nn.kneighbors_graph(coords, mode="connectivity")
+    conn.setdiag(0)
+    conn.eliminate_zeros()
+    conn = conn.maximum(conn.T).tocsr().astype(np.float32)
+    adata.obsp["spatial_connectivities"] = conn
+
+    # training spatial features come from the lognorm layer
+    compute_spatial_features(adata, obsm_key="spatial_x", layer="lognorm")
+    return adata
+
+
+def _expected_aggregation(conn, matrix):
+    """Degree-normalized neighbour mean of ``matrix`` over ``conn``."""
+    C = csr_matrix(conn)
+    result = _to_dense(C @ csr_matrix(matrix))
+    degree = np.asarray(C.sum(axis=1)).ravel()
+    denom = 1.0 / np.where(degree == 0, 1.0, degree)
+    return result * denom[:, None]
+
+
+def test_counterfactual_layer_aggregates_named_layer(adata):
+    indices_basal = np.arange(0, 10)
+    indices_counterfactual = np.arange(30, 60)
+
+    adata_cf = make_counterfactual_adata(
+        adata,
+        indices_basal,
+        indices_counterfactual,
+        spatial_column="spatial_x",
+        precomputed=False,
+        n_neighbours=5,
+        random_state=0,
+        layer="lognorm",
+    )
+
+    # reuse the cf connectivity the function wrote back to the source adata
+    expected = _expected_aggregation(
+        adata.obsp["spatial_connectivities_cf"], adata.layers["lognorm"]
+    )[indices_basal]
+    np.testing.assert_allclose(
+        _to_dense(adata_cf.obsm["spatial_x"]), expected, rtol=1e-5, atol=1e-6
+    )
+
+    # and it is *not* the raw-count aggregation
+    raw_expected = _expected_aggregation(
+        adata.obsp["spatial_connectivities_cf"], adata.X
+    )[indices_basal]
+    assert not np.allclose(_to_dense(adata_cf.obsm["spatial_x"]), raw_expected)
+
+
+def test_counterfactual_layer_none_matches_previous_behaviour(adata):
+    """``layer=None`` keeps the 1.1.1 behaviour: ``adata.X`` is aggregated."""
+    indices_basal = np.arange(0, 10)
+    indices_counterfactual = np.arange(30, 60)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        adata_cf = make_counterfactual_adata(
+            adata,
+            indices_basal,
+            indices_counterfactual,
+            spatial_column="spatial_x",
+            precomputed=False,
+            n_neighbours=5,
+            random_state=0,
+        )
+
+    expected = _expected_aggregation(
+        adata.obsp["spatial_connectivities_cf"], adata.X
+    )[indices_basal]
+    np.testing.assert_allclose(
+        _to_dense(adata_cf.obsm["spatial_x"]), expected, rtol=1e-5, atol=1e-6
+    )
+
+
+def test_raw_counts_warning(adata):
+    with pytest.warns(UserWarning, match="raw counts"):
+        compute_spatial_features(adata, obsm_key="spatial_x_warn")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        compute_spatial_features(adata, obsm_key="spatial_x_nowarn", layer="lognorm")
+
+
+def test_neighbor_perturbation_sources_from_layer(adata):
+    perturbations = {"gene_0": 1.0, "gene_1": -0.5}
+
+    make_neighbor_perturbation(
+        adata,
+        perturbations=perturbations,
+        obsm_key_out="spatial_x_cf",
+        layer_key="pert_lognorm",
+        add_shift=True,
+        renormalize=False,
+        layer="lognorm",
+    )
+
+    lognorm = _to_dense(adata.layers["lognorm"])
+    shift = np.zeros(N_VARS)
+    shift[0] = 1.0
+    shift[1] = -0.5
+    expected_pert = np.clip(lognorm + shift, 0, None)
+    np.testing.assert_allclose(
+        _to_dense(adata.layers["pert_lognorm"]), expected_pert, rtol=1e-5, atol=1e-6
+    )
+
+    expected_cf = _expected_aggregation(
+        adata.obsp["spatial_connectivities"], expected_pert
+    )
+    np.testing.assert_allclose(
+        _to_dense(adata.obsm["spatial_x_cf"]), expected_cf, rtol=1e-5, atol=1e-5
+    )
+
+    # sourcing from X (raw counts) gives a different perturbed matrix
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        make_neighbor_perturbation(
+            adata,
+            perturbations=perturbations,
+            obsm_key_out="spatial_x_cf_raw",
+            layer_key="pert_raw",
+            add_shift=True,
+            renormalize=False,
+        )
+    assert not np.allclose(
+        _to_dense(adata.layers["pert_raw"]), _to_dense(adata.layers["pert_lognorm"])
+    )
+
+
+def test_neighbor_perturbation_layer_and_fraction_compose(adata):
+    """``layer=`` (#41) and ``perturb_fraction=`` (#39) work together."""
+    perturbations = {"gene_0": 1.0, "gene_1": -0.5}
+    perturb_fraction = 0.5
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        make_neighbor_perturbation(
+            adata,
+            perturbations=perturbations,
+            obsm_key_out="spatial_x_cf_frac",
+            layer_key="pert_lognorm_frac",
+            add_shift=True,
+            renormalize=False,
+            perturb_fraction=perturb_fraction,
+            random_state=0,
+            layer="lognorm",
+        )
+
+    lognorm = _to_dense(adata.layers["lognorm"])
+    perturbed = _to_dense(adata.layers["pert_lognorm_frac"])
+    assert perturbed.shape == (N_OBS, N_VARS)
+
+    shift = np.zeros(N_VARS)
+    shift[0] = 1.0
+    shift[1] = -0.5
+    full_expected = np.clip(lognorm + shift, 0, None)
+
+    changed = ~np.isclose(perturbed, lognorm, rtol=1e-5, atol=1e-6).all(axis=1)
+    # exactly the requested fraction of cells is perturbed
+    assert changed.sum() == int(round(perturb_fraction * N_OBS))
+    # perturbed cells carry the layer-sourced shift, the rest keep the layer values
+    np.testing.assert_allclose(
+        perturbed[changed], full_expected[changed], rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        perturbed[~changed], lognorm[~changed], rtol=1e-5, atol=1e-6
+    )
+
+    # the aggregated features follow the partially perturbed layer, and sit
+    # strictly between "nothing perturbed" and "everything perturbed"
+    expected_cf = _expected_aggregation(
+        adata.obsp["spatial_connectivities"], perturbed
+    )
+    np.testing.assert_allclose(
+        _to_dense(adata.obsm["spatial_x_cf_frac"]), expected_cf, rtol=1e-5, atol=1e-5
+    )
+    assert not np.allclose(
+        _to_dense(adata.obsm["spatial_x_cf_frac"]),
+        _expected_aggregation(adata.obsp["spatial_connectivities"], full_expected),
+        rtol=1e-5,
+        atol=1e-5,
+    )
