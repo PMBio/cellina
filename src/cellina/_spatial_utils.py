@@ -347,6 +347,23 @@ def _warn_if_raw_counts(matrix) -> None:
         )
 
 
+def _aggregate_spatial_features(C, X) -> csr_matrix:
+    """Degree-normalised neighbourhood mean of ``X`` over ``C``, as csr float32.
+
+    Core of :func:`compute_spatial_features`, shared with the anchor branch of
+    :func:`make_counterfactual_adata` so both produce bit-identical rows. ``C`` may have
+    fewer rows than columns (e.g. only the anchor rows); the per-row maths is identical
+    either way. Note that the normalisation is by the summed edge *weight* of a row, not
+    by its neighbour count.
+    """
+    result = C @ X
+    degree = np.asarray(C.sum(axis=1))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        denom = 1.0 / np.where(degree == 0, 1.0, degree)
+        result = result.multiply(denom) if issparse(result) else result * denom
+    return csr_matrix(result).astype(np.float32)
+
+
 def compute_spatial_features(
     adata: AnnData,
     connectivity_key: str = "spatial_connectivities",
@@ -383,12 +400,7 @@ def compute_spatial_features(
         var_idx = {g: i for i, g in enumerate(adata.var_names)}
         gene_idx = [var_idx[g] for g in neighbor_genes if g in var_idx]
         X = X[:, gene_idx]
-    result = C @ X
-    degree = np.asarray(C.sum(axis=1))
-    with np.errstate(divide='ignore', invalid='ignore'):
-        denom = 1.0 / np.where(degree == 0, 1.0, degree)
-        result = result.multiply(denom) if issparse(result) else result * denom
-    adata.obsm[obsm_key] = csr_matrix(result).astype(np.float32)
+    adata.obsm[obsm_key] = _aggregate_spatial_features(C, X)
 
 
 def make_neighbor_perturbation(
@@ -489,8 +501,8 @@ def make_neighbor_perturbation(
 
 def make_counterfactual_adata(
     adata,
-    indices_basal,
-    indices_counterfactual,
+    indices,
+    neighbour_indices,
     spatial_column,
     anchor_donors: bool = True,
     n_neighbors: int = 50,
@@ -499,81 +511,177 @@ def make_counterfactual_adata(
     cf_conn_key: str = "spatial_connectivities_cf",
     cf_obsm_key: str = "spatial_x_cf",
     layer: Optional[str] = None,
+    exclude_indices: Optional[np.ndarray] = None,
 ):
-    """Counterfactual AnnData: ``indices_basal`` with their spatial features replaced.
+    """Counterfactual AnnData: ``indices`` with their spatial features replaced.
 
     Parameters
     ----------
     adata
         Original AnnData.
-    indices_basal
+    indices
         Cells to keep; their ``.obsm[spatial_column]`` is replaced.
-    indices_counterfactual
+    neighbour_indices
         Anchor cells when ``anchor_donors=True``, donor pool when ``False``.
     spatial_column
         ``.obsm`` key of the spatial features.
     anchor_donors
-        If True (default), each basal cell is paired with one anchor drawn uniformly with
-        replacement from ``indices_counterfactual`` and takes over that anchor's stored
-        spatial features, so the anchors must have had neighbours when those features were
-        computed (after masking them out with ``spatial_neighbors(test_indices=...)`` use
-        ``anchor_donors=False``). If False, ``indices_counterfactual`` is a donor pool: every edge
-        incident on a basal cell is removed from ``adata.obsp[connectivity_key]``, the cell
-        is rewired (bidirectionally) to ``n_neighbors`` donors drawn uniformly without
-        replacement, and its spatial features are re-aggregated over the rewired graph.
+        If True (default), each cell in ``indices`` is paired with one anchor drawn uniformly with
+        replacement from ``neighbour_indices`` and takes over that anchor's spatial
+        features. Those features are *recomputed* from
+        ``adata.obsp[connectivity_key]`` with the columns of ``exclude_indices`` removed: under leave-one-out the anchors
+        are masked out of the training graph (``spatial_neighbors(test_indices=...)``) and
+        their stored rows are all-zero. 
     n_neighbors
-        Donors per basal cell when ``anchor_donors=False``; must be
-        ``< len(indices_counterfactual)``.
+        Donors per cell when ``anchor_donors=False``; must be
+        ``< len(neighbour_indices)``.
     random_state
         Seed for the anchor / donor draw.
     connectivity_key
-        ``.obsp`` key of the graph rewired when ``anchor_donors=False``.
+        ``.obsp`` key of the graph: the anchors' neighbourhoods are read from it when
+        ``anchor_donors=True``, and it is rewired when ``anchor_donors=False``. Unlike
+        ``CellinaGCN``, ``Cellina.setup_anndata`` registers no graph, so this must name an
+        existing key of ``adata.obsp``.
     cf_conn_key
         ``.obsp`` key the rewired graph is written to (``anchor_donors=False`` only).
     cf_obsm_key
         ``.obsm`` key the counterfactual spatial features are written to.
     layer
-        ``adata.layers`` key aggregated over the rewired graph when ``anchor_donors=False``
-        (``None``: ``adata.X``). Must match the representation the training spatial
+        ``adata.layers`` key aggregated over the anchors' neighbourhoods
+        (``anchor_donors=True``) or over the rewired graph (``anchor_donors=False``);
+        ``None`` uses ``adata.X``. Must match the representation the training spatial
         features were built from (e.g. log1p(CP10K) while ``adata.X`` holds raw counts).
+    exclude_indices
+        1-D integer array of cells that never contribute to an anchor's neighbourhood:
+        their columns are zeroed in ``connectivity_key`` before aggregating. Typically
+        every cell of the held-out type. Unlike ``CellinaGCN``, the focal cell itself is
+        *not* removed from an anchor's neighbourhood automatically, so under hold-out pass
+        every cell of the held-out type (which includes the focal cells). Only valid with
+        ``anchor_donors=True``; with ``anchor_donors=False`` it raises, filter the donor
+        pool yourself.
 
     Returns
     -------
-    AnnData of the basal cells with counterfactual ``.obsm[spatial_column]``.
+    AnnData of ``indices`` with counterfactual ``.obsm[spatial_column]``.
     """
     if anchor_donors:
+        indices = np.asarray(indices)
+        anchors = np.asarray(neighbour_indices)
+        if anchors.ndim != 1:
+            raise ValueError(f"neighbour_indices must be 1-D, got shape {anchors.shape}.")
+        if not np.issubdtype(anchors.dtype, np.integer):
+            raise ValueError(
+                f"neighbour_indices must have an integer dtype, got {anchors.dtype}."
+            )
+        if anchors.size == 0:
+            raise ValueError(
+                "neighbour_indices is empty; at least one anchor cell is required."
+            )
+        if connectivity_key not in adata.obsp:
+            raise KeyError(f"connectivity_key {connectivity_key!r} not found in adata.obsp.")
+
+        C = csr_matrix(adata.obsp[connectivity_key])
+        if C.ndim != 2 or C.shape[0] != C.shape[1]:
+            raise ValueError(f"connectivity must be a square matrix, got shape {C.shape}.")
+        n_obs = C.shape[0]
+        if anchors.min() < 0 or anchors.max() >= n_obs:
+            raise ValueError(f"neighbour_indices contains cells outside [0, {n_obs}).")
+        # Row-slice first: only the anchor rows are ever aggregated, and the slice already
+        # copies, so the cleanup below never touches the caller's adata.obsp and no copy of
+        # the full graph is made. The cleanup is per-entry and row-independent, so the
+        # result is the same as masking the whole graph and slicing afterwards.
+        C_anchor = C[anchors]
+        C_anchor.sum_duplicates()
+        C_anchor.eliminate_zeros()
+
+        if exclude_indices is not None:
+            exclude = np.asarray(exclude_indices)
+            if exclude.size:
+                if exclude.ndim != 1 or not np.issubdtype(exclude.dtype, np.integer):
+                    raise ValueError(
+                        "exclude_indices must be a 1-D integer array (not a boolean mask)."
+                    )
+                if exclude.min() < 0 or exclude.max() >= n_obs:
+                    raise ValueError(f"exclude_indices contains cells outside [0, {n_obs}).")
+                # Zero the excluded *columns*: an excluded cell never contributes to any
+                # anchor's neighbourhood (the graph has no diagonal, so this also removes
+                # the anchors' own columns when the anchors are of the excluded type).
+                excluded = np.zeros(n_obs, dtype=bool)
+                excluded[exclude] = True
+                C_anchor.data = np.where(excluded[C_anchor.indices], 0, C_anchor.data)
+                C_anchor.eliminate_zeros()
+
+        usable = np.diff(C_anchor.indptr) > 0
+        n_homotypic = int((~usable).sum())
+        if n_homotypic == anchors.size:
+            raise ValueError(
+                "All anchors are homotypic: no neighbour left outside `exclude_indices`. "
+                "Check `connectivity_key` (an anchor masked out of the training graph has "
+                "no neighbours there)."
+            )
+        if n_homotypic:
+            warnings.warn(
+                f"{n_homotypic} of {anchors.size} anchors are homotypic (no neighbour "
+                "outside `exclude_indices`) and were not used. Check `connectivity_key` "
+                "(an anchor masked out of the training graph has no neighbours there).",
+                UserWarning, stacklevel=2,
+            )
+
+        raw = adata.layers[layer] if layer is not None else adata.X
+        if layer is None:
+            _warn_if_raw_counts(raw)
+        X = raw if isinstance(raw, csr_matrix) else csr_matrix(raw)
+        # Same aggregation as compute_spatial_features, restricted to the kept anchor rows.
+        features = _aggregate_spatial_features(C_anchor[usable], X)
+
+        if spatial_column in adata.obsm:
+            n_stored = adata.obsm[spatial_column].shape[1]
+            if n_stored != features.shape[1]:
+                source = f"adata.layers[{layer!r}]" if layer is not None else "adata.X"
+                raise ValueError(
+                    f"anchor_donors=True recomputes the anchors' spatial features over all "
+                    f"{features.shape[1]} genes of {source}, but adata.obsm"
+                    f"[{spatial_column!r}] has {n_stored} columns. The anchor path cannot "
+                    "reproduce spatial features built from a `neighbor_genes` subset or a "
+                    "dimensionality-reduced representation; rebuild them with "
+                    "`compute_spatial_features` over all genes, or use `anchor_donors=False`."
+                )
+
         rng = np.random.default_rng(random_state)
-        n_basal = len(indices_basal)
-        adata_cf = adata[indices_basal].copy()
-        spatial_counts_cf = adata.obsm[spatial_column][indices_counterfactual]
-        idx = rng.integers(0, len(indices_counterfactual), size=n_basal)
-        sampled = spatial_counts_cf[idx]
+        idx = rng.integers(0, features.shape[0], size=len(indices))
+        sampled = features[idx]
+        adata_cf = adata[indices].copy()
         adata_cf.obsm[cf_obsm_key] = sampled
         adata_cf.obsm[spatial_column] = sampled
         return adata_cf
 
     # anchor_donors=False: rewire connectivity graph, recompute spatial features
-    indices_basal = np.asarray(indices_basal)
-    indices_counterfactual = np.asarray(indices_counterfactual)
-    n_cf = len(indices_counterfactual)
+    if exclude_indices is not None:
+        raise ValueError(
+            "exclude_indices is only used when anchor_donors=True; filter the donor pool "
+            "yourself."
+        )
+    indices = np.asarray(indices)
+    neighbour_indices = np.asarray(neighbour_indices)
+    n_cf = len(neighbour_indices)
     rng = np.random.default_rng(random_state)
 
-    # Remove all edges incident on seed (basal) nodes
+    # Remove all edges incident on the cells in ``indices``
     C_coo = csr_matrix(adata.obsp[connectivity_key]).tocoo()
     src_arr, dst_arr, data_arr = C_coo.row, C_coo.col, C_coo.data
-    keep = ~(np.isin(src_arr, indices_basal) | np.isin(dst_arr, indices_basal))
+    keep = ~(np.isin(src_arr, indices) | np.isin(dst_arr, indices))
     src_f, dst_f, data_f = src_arr[keep], dst_arr[keep], data_arr[keep]
 
     # Build counterfactual edges: seed <-> counterfactual pool
     if n_neighbors is None or n_neighbors >= n_cf:
         raise ValueError(
             f"n_neighbors must be a finite value < n_cf ({n_cf}); got {n_neighbors}. "
-            f"Connecting every basal cell to the full counterfactual pool is not supported."
+            f"Connecting every cell to the full counterfactual pool is not supported."
         )
     cf_src_parts, cf_dst_parts = [], []
-    for s in indices_basal:
-        chosen = rng.choice(indices_counterfactual, size=n_neighbors, replace=False)
-        cf_src_parts.append(np.full(n_neighbors, s, dtype=indices_basal.dtype))
+    for s in indices:
+        chosen = rng.choice(neighbour_indices, size=n_neighbors, replace=False)
+        cf_src_parts.append(np.full(n_neighbors, s, dtype=indices.dtype))
         cf_dst_parts.append(chosen)
     cf_src = np.concatenate(cf_src_parts)
     cf_dst = np.concatenate(cf_dst_parts)
@@ -593,7 +701,7 @@ def make_counterfactual_adata(
     adata.obsp[cf_conn_key] = C_cf
     compute_spatial_features(adata, connectivity_key=cf_conn_key, obsm_key=cf_obsm_key,
                              layer=layer)
-    adata_cf = adata[indices_basal].copy()
+    adata_cf = adata[indices].copy()
     adata_cf.obsm[spatial_column] = adata_cf.obsm[cf_obsm_key]
 
     return adata_cf
@@ -708,8 +816,8 @@ def _sample_anchor_donors(connectivity, indices, anchor_indices, exclude=None, s
     """Per-cell donor sets for the anchor draw: one random anchor per focal cell, whose
     neighbours in ``connectivity`` (minus ``exclude`` and the focal cell) become the donors.
 
-    Anchors with no neighbour outside ``exclude`` (homotypic anchors) are dropped with a
-    warning and never drawn. Returns a list of 1-D int64 arrays, one per entry of
+    Anchors with no neighbour outside ``exclude`` (homotypic anchors) are not used, with a
+    warning, and never drawn. Returns a list of 1-D int64 arrays, one per entry of
     ``indices``. Raises if no anchor is left.
     """
     indices = np.asarray(indices)
@@ -757,7 +865,8 @@ def _sample_anchor_donors(connectivity, indices, anchor_indices, exclude=None, s
     if n_homotypic:
         warnings.warn(
             f"{n_homotypic} of {anchor_indices.size} anchors are homotypic (no neighbour "
-            "outside `exclude_indices`) and were not used.",
+            "outside `exclude_indices`) and were not used. Check `connectivity_key` "
+            "(an anchor masked out of the training graph has no neighbours there).",
             UserWarning, stacklevel=3,
         )
     valid_anchors = anchor_indices[usable]
