@@ -129,6 +129,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             anchor_donors: bool = True,
             n_neighbors: int = 50,
             connectivity_key: str = "spatial_connectivities",
+            exclude_indices: Optional[np.ndarray] = None,
             layer: Optional[str] = None,
         ):
             """Build a counterfactual AnnData with spatial features sampled from neighbour_indices."""
@@ -141,6 +142,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
                 anchor_donors=anchor_donors,
                 n_neighbors=n_neighbors,
                 connectivity_key=connectivity_key,
+                exclude_indices=exclude_indices,
                 layer=layer,
             )
 
@@ -158,6 +160,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         anchor_donors: bool = True,
         n_neighbors: int = 50,
         connectivity_key: str = "spatial_connectivities",
+        exclude_indices: Optional[np.ndarray] = None,
         layer: Optional[str] = None,
     ) -> np.ndarray:
         """
@@ -175,9 +178,14 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         anchor_donors
             If True (default), each cell in ``indices`` is paired with one anchor drawn
             uniformly with replacement from ``neighbour_indices`` (seeded by ``seed``) and
-            takes over that anchor's stored spatial features, so the anchors must have had
-            neighbours when those features were computed (after masking them out with
-            ``spatial_neighbors(test_indices=...)`` use ``anchor_donors=False``). If False,
+            takes over that anchor's spatial features. Those features are always recomputed
+            from ``adata.obsp[connectivity_key]`` with the columns of ``exclude_indices``
+            removed, never read back from ``adata.obsm``: under leave-one-out the anchors are
+            masked out of the training graph and their stored rows are all-zero. Pass
+            ``connectivity_key='spatial_connectivities_orig'`` (the unmasked graph) together
+            with ``exclude_indices=<all held-out-type cells>``, and the ``layer`` the
+            training spatial features were built from. Anchors with no neighbour left
+            (homotypic) are not used, with a warning. If False,
             ``neighbour_indices`` is a donor pool: each cell is rewired to ``n_neighbors``
             donors drawn uniformly without replacement and its spatial features are
             re-aggregated over the rewired graph.
@@ -185,7 +193,16 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Donors per cell when ``anchor_donors=False``; must be
             ``< len(neighbour_indices)``.
         connectivity_key
-            ``adata.obsp`` key of the graph rewired when ``anchor_donors=False``.
+            ``adata.obsp`` key of the graph: the anchors' neighbourhoods are read from it
+            when ``anchor_donors=True``, and it is rewired when ``anchor_donors=False``.
+            Unlike ``CellinaGCN``, ``setup_anndata`` registers no graph, so this must name
+            an existing key of ``adata.obsp``.
+        exclude_indices
+            1-D integer array of cells that never contribute to an anchor's neighbourhood,
+            e.g. every cell of the held-out type. Unlike ``CellinaGCN``, the focal cell
+            itself is *not* removed from an anchor's neighbourhood automatically, so under
+            hold-out pass every cell of the held-out type (which includes ``indices``).
+            Only valid with ``anchor_donors=True``.
         adata
             Optional AnnData to use instead of self.adata for generating the counterfactual loader.
         give_mean
@@ -197,8 +214,9 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         seed
             Random seed for neighbour sampling.
         layer
-            ``adata.layers`` key aggregated over the rewired graph when
-            ``anchor_donors=False`` (``None``: ``adata.X``). Must match the representation
+            ``adata.layers`` key aggregated over the anchors' neighbourhoods
+            (``anchor_donors=True``) or over the rewired graph (``anchor_donors=False``);
+            ``None`` uses ``adata.X``. Must match the representation
             the training spatial features were built from (e.g. log1p(CP10K) while
             ``adata.X`` holds raw counts).
 
@@ -212,7 +230,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             anchor_donors=anchor_donors, n_neighbors=n_neighbors, connectivity_key=connectivity_key,
-            layer=layer,
+            exclude_indices=exclude_indices, layer=layer,
         )
         return self.get_latent_representation(
             adata=adata_cf, indices=None, give_mean=give_mean,
@@ -232,6 +250,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         anchor_donors: bool = True,
         n_neighbors: int = 50,
         connectivity_key: str = "spatial_connectivities",
+        exclude_indices: Optional[np.ndarray] = None,
         layer: Optional[str] = None,
     ) -> np.ndarray:
         """
@@ -249,9 +268,14 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         anchor_donors
             If True (default), each cell in ``indices`` is paired with one anchor drawn
             uniformly with replacement from ``neighbour_indices`` (seeded by ``seed``) and
-            takes over that anchor's stored spatial features, so the anchors must have had
-            neighbours when those features were computed (after masking them out with
-            ``spatial_neighbors(test_indices=...)`` use ``anchor_donors=False``). If False,
+            takes over that anchor's spatial features. Those features are always recomputed
+            from ``adata.obsp[connectivity_key]`` with the columns of ``exclude_indices``
+            removed, never read back from ``adata.obsm``: under leave-one-out the anchors are
+            masked out of the training graph and their stored rows are all-zero. Pass
+            ``connectivity_key='spatial_connectivities_orig'`` (the unmasked graph) together
+            with ``exclude_indices=<all held-out-type cells>``, and the ``layer`` the
+            training spatial features were built from. Anchors with no neighbour left
+            (homotypic) are not used, with a warning. If False,
             ``neighbour_indices`` is a donor pool: each cell is rewired to ``n_neighbors``
             donors drawn uniformly without replacement and its spatial features are
             re-aggregated over the rewired graph.
@@ -259,7 +283,16 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Donors per cell when ``anchor_donors=False``; must be
             ``< len(neighbour_indices)``.
         connectivity_key
-            ``adata.obsp`` key of the graph rewired when ``anchor_donors=False``.
+            ``adata.obsp`` key of the graph: the anchors' neighbourhoods are read from it
+            when ``anchor_donors=True``, and it is rewired when ``anchor_donors=False``.
+            Unlike ``CellinaGCN``, ``setup_anndata`` registers no graph, so this must name
+            an existing key of ``adata.obsp``.
+        exclude_indices
+            1-D integer array of cells that never contribute to an anchor's neighbourhood,
+            e.g. every cell of the held-out type. Unlike ``CellinaGCN``, the focal cell
+            itself is *not* removed from an anchor's neighbourhood automatically, so under
+            hold-out pass every cell of the held-out type (which includes ``indices``).
+            Only valid with ``anchor_donors=True``.
         adata
             Optional AnnData to use instead of ``self.adata``.
         batch_size
@@ -272,8 +305,9 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return_numpy
             Passed to :meth:`get_normalized_expression`.
         layer
-            ``adata.layers`` key aggregated over the rewired graph when
-            ``anchor_donors=False`` (``None``: ``adata.X``). Must match the representation
+            ``adata.layers`` key aggregated over the anchors' neighbourhoods
+            (``anchor_donors=True``) or over the rewired graph (``anchor_donors=False``);
+            ``None`` uses ``adata.X``. Must match the representation
             the training spatial features were built from (e.g. log1p(CP10K) while
             ``adata.X`` holds raw counts).
 
@@ -287,7 +321,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         adata_cf = self._make_counterfactual_adata(
             np.asarray(indices), np.asarray(neighbour_indices), seed=seed, adata=adata,
             anchor_donors=anchor_donors, n_neighbors=n_neighbors, connectivity_key=connectivity_key,
-            layer=layer,
+            exclude_indices=exclude_indices, layer=layer,
         )
         return self.get_normalized_expression(
             adata=adata_cf, indices=None, batch_size=batch_size,

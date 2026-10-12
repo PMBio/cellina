@@ -37,12 +37,28 @@ All notable changes to this project will be documented in this file.
   the perturbation before re-aggregation, so each focal cell effectively sees
   `~perturb_fraction` of its neighbours perturbed. `perturb_fraction=1.0`
   (default) keeps the previous behaviour of perturbing every cell.
+- `exclude_indices` on `Cellina.get_counterfactual_expression` /
+  `get_counterfactual_latents` (and `Cellina._make_counterfactual_adata` /
+  `make_counterfactual_adata`): a 1-D integer array of cells that never contribute to an
+  anchor's neighbourhood when `anchor_donors=True` — their columns are zeroed in
+  `connectivity_key` before the anchors' spatial features are aggregated. Mirrors the
+  argument of the same name on `CellinaGCN`, except that the focal cell itself is not
+  removed automatically; with `anchor_donors=False` it raises rather than being ignored.
 - `CellinaGCN` can return GATv2 attention weights: `get_attention_weights` extracts the
   per-edge attention of the spatial encoder's GATv2 layers and
   `attention_by_group` aggregates them by an `adata.obs` grouping, with a new
   section 3.1 in `docs/tutorial_gat.ipynb` showing the workflow.
 
 ### Changed
+- `make_counterfactual_adata(..., anchor_donors=True)` (and therefore
+  `Cellina.get_counterfactual_expression` / `get_counterfactual_latents`) now recomputes
+  each anchor's spatial features from `adata.obsp[connectivity_key]` with the columns of
+  `exclude_indices` removed, aggregating `adata.layers[layer]` (or `adata.X`), instead of
+  copying the stored `adata.obsm[spatial_column]` rows verbatim. The stored rows are
+  all-zero for anchors masked out of the training graph with
+  `spatial_neighbors(test_indices=...)`, so the previous behaviour silently fed the model
+  empty neighbourhoods under leave-one-out. `connectivity_key` and `layer` are now used in
+  both branches.
 - `docs/tutorial.ipynb` stores the normalized expression in
   `adata.layers['lognorm']` and passes `layer='lognorm'` to the edge- and
   node-perturbation calls, so both now aggregate the same representation the
@@ -53,7 +69,10 @@ All notable changes to this project will be documented in this file.
   `_make_counterfactual_adata` and `make_counterfactual_adata`: `precomputed` is renamed
   `anchor_donors` and `n_neighbours` is renamed `n_neighbors` (same semantics and
   defaults, no behaviour change). `CellinaGCN`'s `n_neighbors_per_seed` is renamed
-  `n_neighbors`. No aliases are kept.
+  `n_neighbors`. `make_counterfactual_adata`'s first two positional parameters
+  `indices_basal` / `indices_counterfactual` are renamed `indices` / `neighbour_indices`,
+  the names `Cellina.get_counterfactual_*` and `CellinaGCN.get_counterfactual_*` already
+  use. No aliases are kept.
 
 ## [1.1.1] — 2026-09-05
 ### Removed

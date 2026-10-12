@@ -379,21 +379,21 @@ def test_make_counterfactual_adata(adata_with_spatial):
     to_dense = lambda x: x.toarray() if hasattr(x, "toarray") else np.asarray(x)
 
     n_obs = adata_with_spatial.n_obs
-    indices_basal = np.arange(0, n_obs // 2)
+    indices = np.arange(0, n_obs // 2)
     indices_cf = np.arange(n_obs // 2, n_obs)
     spatial_col = "spatial_x"
 
     def _cf(**kw):
         return make_counterfactual_adata(
-            adata_with_spatial, indices_basal, indices_cf, spatial_col, **kw
+            adata_with_spatial, indices, indices_cf, spatial_col, **kw
         )
 
     # anchor_donors=False: rebuild via compute_spatial_features
     adata_cf = _cf(anchor_donors=False)
-    assert adata_cf.n_obs == len(indices_basal)
+    assert adata_cf.n_obs == len(indices)
     assert adata_cf.n_vars == adata_with_spatial.n_vars
-    assert adata_cf.obsm[spatial_col].shape[0] == len(indices_basal)
-    np.testing.assert_array_equal(adata_cf.X, adata_with_spatial[indices_basal].X)
+    assert adata_cf.obsm[spatial_col].shape[0] == len(indices)
+    np.testing.assert_array_equal(adata_cf.X, adata_with_spatial[indices].X)
 
     # reproducibility: with n_neighbors the RNG is used; same random_state → same result
     np.testing.assert_array_equal(
@@ -542,6 +542,9 @@ def test_get_normalized_expression(adata_with_spatial):
 def test_get_counterfactual_latents(adata_with_spatial):
     """get_counterfactual_latents returns correct shape for all latent_key options."""
     n_latent = 5
+    # anchor_donors=True re-aggregates the anchors' neighbourhoods, so the registered
+    # spatial features must be a neighbourhood aggregation of the same expression matrix.
+    compute_spatial_features(adata_with_spatial, obsm_key="spatial_x")
     Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
     model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
@@ -559,6 +562,7 @@ def test_get_counterfactual_latents(adata_with_spatial):
 def test_get_counterfactual_expression(adata_with_spatial):
     """get_counterfactual_expression returns (n_indices, n_vars) of non-negative values."""
     n_latent = 5
+    compute_spatial_features(adata_with_spatial, obsm_key="spatial_x")
     Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x", domains_key="domain")
     model = Cellina(adata_with_spatial, n_latent=n_latent, classifier_lambda=0.0, discriminator_lambda=0.0)
     model.train(max_epochs=1, train_size=0.5)
@@ -745,13 +749,13 @@ def _expected_aggregation(conn, matrix):
 
 
 def test_counterfactual_layer_aggregates_named_layer(adata):
-    indices_basal = np.arange(0, 10)
-    indices_counterfactual = np.arange(30, 60)
+    indices = np.arange(0, 10)
+    neighbour_indices = np.arange(30, 60)
 
     adata_cf = make_counterfactual_adata(
         adata,
-        indices_basal,
-        indices_counterfactual,
+        indices,
+        neighbour_indices,
         spatial_column="spatial_x",
         anchor_donors=False,
         n_neighbors=5,
@@ -762,7 +766,7 @@ def test_counterfactual_layer_aggregates_named_layer(adata):
     # reuse the cf connectivity the function wrote back to the source adata
     expected = _expected_aggregation(
         adata.obsp["spatial_connectivities_cf"], adata.layers["lognorm"]
-    )[indices_basal]
+    )[indices]
     np.testing.assert_allclose(
         _to_dense(adata_cf.obsm["spatial_x"]), expected, rtol=1e-5, atol=1e-6
     )
@@ -770,21 +774,21 @@ def test_counterfactual_layer_aggregates_named_layer(adata):
     # and it is *not* the raw-count aggregation
     raw_expected = _expected_aggregation(
         adata.obsp["spatial_connectivities_cf"], adata.X
-    )[indices_basal]
+    )[indices]
     assert not np.allclose(_to_dense(adata_cf.obsm["spatial_x"]), raw_expected)
 
 
 def test_counterfactual_layer_none_matches_previous_behaviour(adata):
     """``layer=None`` keeps the 1.1.1 behaviour: ``adata.X`` is aggregated."""
-    indices_basal = np.arange(0, 10)
-    indices_counterfactual = np.arange(30, 60)
+    indices = np.arange(0, 10)
+    neighbour_indices = np.arange(30, 60)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         adata_cf = make_counterfactual_adata(
             adata,
-            indices_basal,
-            indices_counterfactual,
+            indices,
+            neighbour_indices,
             spatial_column="spatial_x",
             anchor_donors=False,
             n_neighbors=5,
@@ -793,7 +797,7 @@ def test_counterfactual_layer_none_matches_previous_behaviour(adata):
 
     expected = _expected_aggregation(
         adata.obsp["spatial_connectivities_cf"], adata.X
-    )[indices_basal]
+    )[indices]
     np.testing.assert_allclose(
         _to_dense(adata_cf.obsm["spatial_x"]), expected, rtol=1e-5, atol=1e-6
     )
@@ -906,3 +910,250 @@ def test_neighbor_perturbation_layer_and_fraction_compose(adata):
         rtol=1e-5,
         atol=1e-5,
     )
+
+# ------------------------------------------------- anchor draw: recomputed anchor features
+def _anchor_case(adata):
+    """Focal cells, anchors and the 'held-out type' (focal + anchors) of the fixture graph."""
+    n = adata.n_obs
+    focal = np.arange(0, 10)
+    anchors = np.arange(n - 15, n)
+    exclude = np.concatenate([focal, anchors])
+    return focal, anchors, exclude
+
+
+def _mask_cols(conn, idx):
+    """Copy of ``conn`` with the columns in ``idx`` zeroed (and dropped from the pattern)."""
+    C = csr_matrix(conn, copy=True)
+    excluded = np.zeros(C.shape[1], dtype=bool)
+    excluded[np.asarray(idx)] = True
+    C.data = np.where(excluded[C.indices], 0, C.data)
+    C.eliminate_zeros()
+    return C
+
+
+def _mask_rows_cols(conn, idx):
+    """Drop every edge touching ``idx`` — what ``spatial_neighbors(test_indices=...)`` does."""
+    coo = csr_matrix(conn).tocoo()
+    keep = ~(np.isin(coo.row, idx) | np.isin(coo.col, idx))
+    return csr_matrix((coo.data[keep], (coo.row[keep], coo.col[keep])), shape=coo.shape)
+
+
+def _loo_adata(adata, exclude):
+    """Mask ``exclude`` out of the registered graph, keeping the unmasked graph aside."""
+    conn = csr_matrix(adata.obsp["spatial_connectivities"])
+    adata.obsp["spatial_connectivities_orig"] = conn
+    adata.obsp["spatial_connectivities"] = _mask_rows_cols(conn, exclude)
+    compute_spatial_features(adata, obsm_key="spatial_x", layer="lognorm")
+    return adata
+
+
+def _anchor_cf(adata, focal, anchors, exclude, **kw):
+    opts = dict(
+        anchor_donors=True,
+        connectivity_key="spatial_connectivities_orig",
+        exclude_indices=exclude,
+        layer="lognorm",
+        random_state=0,
+    )
+    opts.update(kw)
+    return make_counterfactual_adata(adata, focal, anchors, "spatial_x", **opts)
+
+
+def _expected_anchor_rows(adata, anchors, exclude, n_draw, seed=0):
+    """What the anchor draw must produce: compute_spatial_features over the masked graph."""
+    adata.obsp["_masked"] = _mask_cols(adata.obsp["spatial_connectivities_orig"], exclude)
+    compute_spatial_features(adata, connectivity_key="_masked", obsm_key="_ref", layer="lognorm")
+    kept = np.diff(csr_matrix(adata.obsp["_masked"])[anchors].indptr) > 0
+    ref = _to_dense(csr_matrix(adata.obsm["_ref"])[anchors[kept]])
+    idx = np.random.default_rng(seed).integers(0, kept.sum(), size=n_draw)
+    return ref[idx], ref, kept
+
+
+def test_anchor_rows_match_compute_spatial_features(adata):
+    """Anchor features are bit-identical to compute_spatial_features on the masked graph."""
+    focal, anchors, exclude = _anchor_case(adata)
+    _loo_adata(adata, exclude)
+
+    # the masked anchors' *stored* rows are all-zero: the old verbatim copy fed zeros
+    assert csr_matrix(adata.obsm["spatial_x"])[anchors].nnz == 0
+
+    adata_cf = _anchor_cf(adata, focal, anchors, exclude)
+    expected, ref, kept = _expected_anchor_rows(adata, anchors, exclude, len(focal))
+    assert kept.all(), "fixture must have no homotypic anchor here"
+    assert ref.any(), "reference anchor rows are all zero — vacuous check"
+
+    got = adata_cf.obsm["spatial_x"]
+    assert issparse(got) and got.dtype == np.float32
+    np.testing.assert_array_equal(_to_dense(got), expected)
+    np.testing.assert_array_equal(_to_dense(adata_cf.obsm["spatial_x_cf"]), expected)
+    assert adata_cf.n_obs == len(focal) and adata_cf.n_vars == adata.n_vars
+    # and it is emphatically not the stored (zero) copy the old code handed over
+    assert _to_dense(got).any()
+
+
+def test_anchor_excluded_cells_never_reach_the_counterfactual(adata):
+    """Excluded cells are inert: scrambling their expression leaves the cf features intact."""
+    focal, anchors, exclude = _anchor_case(adata)
+    _loo_adata(adata, exclude)
+
+    base = _to_dense(_anchor_cf(adata, focal, anchors, exclude).obsm["spatial_x"])
+    _, ref, kept = _expected_anchor_rows(adata, anchors, exclude, len(focal))
+    # every drawn row is one of the (kept) anchors' neighbourhood rows
+    assert all(np.any(np.all(ref == row, axis=1)) for row in base)
+
+    # positive control: without the exclusion the excluded cells do contribute
+    leaky = _to_dense(_anchor_cf(adata, focal, anchors, exclude, exclude_indices=None)
+                      .obsm["spatial_x"])
+    assert not np.allclose(leaky, base)
+
+    lognorm = _to_dense(adata.layers["lognorm"])
+    scrambled = lognorm.copy()
+    scrambled[exclude] = np.random.default_rng(1).permutation(scrambled[exclude], axis=0) + 3.0
+    assert not np.allclose(scrambled[exclude], lognorm[exclude]), "scramble was a no-op"
+    adata.layers["lognorm"] = csr_matrix(scrambled.astype(np.float32))
+
+    after = _to_dense(_anchor_cf(adata, focal, anchors, exclude).obsm["spatial_x"])
+    np.testing.assert_array_equal(
+        base, after,
+        err_msg="excluded cells' expression changed the counterfactual features",
+    )
+
+
+def test_anchor_homotypic_anchors_are_dropped(adata):
+    """An anchor with only excluded neighbours warns, is never drawn, and alone raises."""
+    focal, anchors, exclude = _anchor_case(adata)
+    _loo_adata(adata, exclude)
+    conn = csr_matrix(adata.obsp["spatial_connectivities_orig"])
+    masked = _mask_cols(conn, exclude)
+
+    # pick the anchor with the fewest surviving neighbours and exclude them too
+    deg = np.diff(masked[anchors].indptr)
+    a_iso = int(anchors[np.argmin(deg)])
+    nb = masked.indices[masked.indptr[a_iso]:masked.indptr[a_iso + 1]]
+    exclude_iso = np.unique(np.concatenate([exclude, nb]))
+
+    with pytest.warns(UserWarning, match="1 of 15 anchors are homotypic"):
+        cf = _anchor_cf(adata, focal, anchors, exclude_iso)
+    good = _anchor_cf(adata, focal, anchors[anchors != a_iso], exclude_iso)
+    # dropping the homotypic anchor by hand gives exactly the same draw
+    np.testing.assert_array_equal(_to_dense(cf.obsm["spatial_x"]),
+                                  _to_dense(good.obsm["spatial_x"]))
+    assert _to_dense(cf.obsm["spatial_x"]).any(), "no all-zero (homotypic) row may be drawn"
+    assert (_to_dense(cf.obsm["spatial_x"]) != 0).any(axis=1).all()
+
+    with pytest.raises(ValueError, match="All anchors are homotypic"):
+        _anchor_cf(adata, focal, np.array([a_iso]), exclude_iso)
+    with pytest.raises(ValueError, match="at least one anchor"):
+        _anchor_cf(adata, focal, np.array([], dtype=int), exclude)
+    with pytest.raises(ValueError, match="1-D integer"):
+        _anchor_cf(adata, focal, anchors, np.isin(np.arange(adata.n_obs), exclude))
+    with pytest.raises(ValueError, match="outside"):
+        _anchor_cf(adata, focal, anchors, np.array([adata.n_obs]))
+    with pytest.raises(KeyError, match="connectivity_key"):
+        _anchor_cf(adata, focal, anchors, exclude, connectivity_key="no_such_graph")
+
+
+def test_anchor_unmasked_graph_reproduces_stored_spatial_x(adata):
+    """Backward compatibility: unmasked graph, no exclusion, matching layer -> stored rows."""
+    focal, anchors, _ = _anchor_case(adata)
+    stored = _to_dense(csr_matrix(adata.obsm["spatial_x"])[anchors])
+
+    adata_cf = make_counterfactual_adata(
+        adata, focal, anchors, "spatial_x", anchor_donors=True, random_state=0,
+        layer="lognorm",
+    )
+    idx = np.random.default_rng(0).integers(0, len(anchors), size=len(focal))
+    np.testing.assert_array_equal(_to_dense(adata_cf.obsm["spatial_x"]), stored[idx])
+    # the source AnnData is untouched
+    assert "spatial_x_cf" not in adata.obsm
+    assert "spatial_connectivities_cf" not in adata.obsp
+
+
+def test_anchor_draw_is_seeded(adata):
+    focal, anchors, exclude = _anchor_case(adata)
+    _loo_adata(adata, exclude)
+    a = _to_dense(_anchor_cf(adata, focal, anchors, exclude, random_state=3).obsm["spatial_x"])
+    b = _to_dense(_anchor_cf(adata, focal, anchors, exclude, random_state=3).obsm["spatial_x"])
+    c = _to_dense(_anchor_cf(adata, focal, anchors, exclude, random_state=4).obsm["spatial_x"])
+    np.testing.assert_array_equal(a, b)
+    assert not np.array_equal(a, c)
+
+
+def test_anchor_exclude_indices_threaded_through_the_model(adata_with_spatial):
+    """exclude_indices reaches make_counterfactual_adata from both model entry points."""
+    adata = adata_with_spatial
+    focal, anchors, exclude = _anchor_case(adata)
+    conn = csr_matrix(adata.obsp["spatial_connectivities"])
+    adata.obsp["spatial_connectivities_orig"] = conn
+    adata.obsp["spatial_connectivities"] = _mask_rows_cols(conn, exclude)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        compute_spatial_features(adata, obsm_key="spatial_x")
+
+    Cellina.setup_anndata(adata, batch_key="batch", spatial_obsm_key="spatial_x",
+                          domains_key="domain")
+    model = Cellina(adata, n_latent=5, classifier_lambda=0.0, discriminator_lambda=0.0)
+    model.train(max_epochs=1, train_size=0.5)
+
+    kw = dict(connectivity_key="spatial_connectivities_orig", exclude_indices=exclude)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        expr = model.get_counterfactual_expression(focal, anchors, **kw)
+        lat = model.get_counterfactual_latents(focal, anchors, latent_key="s", **kw)
+        cf = model._make_counterfactual_adata(focal, anchors, seed=0, **kw)
+        leaky = model.get_counterfactual_expression(
+            focal, anchors, connectivity_key="spatial_connectivities_orig",
+            exclude_indices=None,
+        )
+    assert expr.shape == (len(focal), adata.n_vars) and np.all(expr >= 0)
+    assert lat.shape == (len(focal), 5)
+    assert _to_dense(cf.obsm["spatial_x"]).any(), "model path still handed over zero rows"
+    assert not np.allclose(expr, leaky), \
+        "exclude_indices had no effect when passed through the model"
+
+
+def test_anchor_exclude_indices_rejected_by_the_pooled_branch(adata):
+    """exclude_indices is anchor-only: the pooled draw refuses it instead of ignoring it."""
+    focal, anchors, exclude = _anchor_case(adata)
+    with pytest.raises(ValueError, match="only used when anchor_donors=True"):
+        make_counterfactual_adata(
+            adata, focal, np.arange(20, 50), "spatial_x", anchor_donors=False,
+            n_neighbors=5, layer="lognorm", exclude_indices=exclude,
+        )
+
+
+def test_anchor_rejects_a_narrower_stored_spatial_representation(adata):
+    """A reduced / gene-subset spatial_x cannot be reproduced by the anchor path."""
+    focal, anchors, _ = _anchor_case(adata)
+    adata.obsm["spatial_reduced"] = np.zeros((adata.n_obs, 5), dtype=np.float32)
+    with pytest.raises(ValueError, match="neighbor_genes"):
+        make_counterfactual_adata(
+            adata, focal, anchors, "spatial_reduced", anchor_donors=True,
+            random_state=0, layer="lognorm",
+        )
+    # the gene-subset case the message points at
+    compute_spatial_features(adata, obsm_key="spatial_subset", layer="lognorm",
+                             neighbor_genes=list(adata.var_names[:4]))
+    with pytest.raises(ValueError, match="4 columns"):
+        make_counterfactual_adata(
+            adata, focal, anchors, "spatial_subset", anchor_donors=True,
+            random_state=0, layer="lognorm",
+        )
+
+
+def test_anchor_layer_must_match_the_stored_spatial_features(adata):
+    """``layer`` must name the representation spatial_x was built from, else rows differ."""
+    focal, anchors, _ = _anchor_case(adata)
+    # the fixture builds spatial_x from layers['lognorm'] while adata.X holds counts
+    stored = _to_dense(csr_matrix(adata.obsm["spatial_x"])[anchors])
+    idx = np.random.default_rng(0).integers(0, len(anchors), size=len(focal))
+
+    matched = make_counterfactual_adata(adata, focal, anchors, "spatial_x",
+                                        anchor_donors=True, random_state=0, layer="lognorm")
+    np.testing.assert_array_equal(_to_dense(matched.obsm["spatial_x"]), stored[idx])
+
+    with pytest.warns(UserWarning, match="raw counts"):
+        mismatched = make_counterfactual_adata(adata, focal, anchors, "spatial_x",
+                                               anchor_donors=True, random_state=0)
+    assert not np.allclose(_to_dense(mismatched.obsm["spatial_x"]), stored[idx]), \
+        "layer=None must not silently reproduce features built from a layer"
