@@ -1157,3 +1157,93 @@ def test_anchor_layer_must_match_the_stored_spatial_features(adata):
                                                anchor_donors=True, random_state=0)
     assert not np.allclose(_to_dense(mismatched.obsm["spatial_x"]), stored[idx]), \
         "layer=None must not silently reproduce features built from a layer"
+
+
+# ── Autoencoder variant (variational=False) ──────────────────────────────────
+
+
+def test_cellina_ae_inference_is_deterministic(adata_with_spatial):
+    """AE encoders are point estimates: no variances, and z/s equal their means."""
+    n_latent = 5
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x",
+                          labels_key="cell_labels", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, variational=False)
+    assert not model.module.variational
+    assert not any("var_encoder" in name for name, _ in model.module.named_parameters())
+
+    batch = next(iter(model._make_data_loader(adata_with_spatial, batch_size=32)))
+    model.module.eval()
+    with torch.no_grad():
+        out1 = model.module.inference(**model.module._get_inference_input(batch))
+        out2 = model.module.inference(**model.module._get_inference_input(batch))
+
+    assert out1["z"].shape[1] == n_latent and out1["s"].shape[1] == n_latent
+    assert out1["qzv"] is None and out1["qsv"] is None
+    assert torch.equal(out1["z"], out1["qzm"]) and torch.equal(out1["s"], out1["qsm"])
+    assert torch.equal(out1["shifted"], out2["shifted"])
+
+
+@pytest.mark.parametrize("use_observed_lib_size", [True, False])
+def test_cellina_ae_losses(adata_with_spatial, use_observed_lib_size):
+    """AE loss is reconstruction only: all KL terms are zero."""
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x",
+                          labels_key="cell_labels", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=5, variational=False,
+                    use_observed_lib_size=use_observed_lib_size)
+
+    batch = next(iter(model._make_data_loader(adata_with_spatial, batch_size=32)))
+    _, _, loss_output = model.module(batch)
+
+    for key in ("kl_divergence_z", "kl_divergence_s", "kl_divergence_l"):
+        assert torch.all(loss_output.kl_local[key] == 0)
+    reconst = loss_output.reconstruction_loss["reconstruction_loss"]
+    assert torch.isclose(loss_output.extra_metrics["vae_loss"], reconst.mean())
+    assert loss_output.extra_metrics["classifier_loss"] > 0
+
+
+def test_cellina_ae_train_save_load(adata_with_spatial, tmp_path):
+    """AE trains with the adversarial plan, round-trips through save/load, and keeps the API."""
+    n_latent = 5
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x",
+                          labels_key="cell_labels", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=n_latent, variational=False)
+    model.train(max_epochs=2, check_val_every_n_epoch=1, train_size=0.5,
+                plan_kwargs={"normalize_losses": True})
+    assert "vae_loss_validation" in model.history
+
+    z = model.get_latent_representation(latent_key="z")
+    shifted = model.get_latent_representation()
+    assert z.shape == (adata_with_spatial.n_obs, n_latent)
+    assert shifted.shape == (adata_with_spatial.n_obs, 2 * n_latent)
+    # give_mean is a no-op for the deterministic model
+    np.testing.assert_allclose(shifted, model.get_latent_representation(give_mean=True))
+
+    expr = model.get_normalized_expression(library_size=1e4)
+    assert expr.shape == (adata_with_spatial.n_obs, adata_with_spatial.n_vars)
+    assert np.isfinite(expr).all()
+
+    with pytest.raises(NotImplementedError):
+        model.get_marginal_ll(n_mc_samples=2)
+
+    model.save(tmp_path / "ae", overwrite=True)
+    loaded = Cellina.load(tmp_path / "ae", adata=adata_with_spatial)
+    assert not loaded.module.variational
+    np.testing.assert_allclose(loaded.get_latent_representation(), shifted, rtol=1e-5, atol=1e-5)
+
+
+def test_cellina_ae_perturbations(adata_with_spatial):
+    """Counterfactual and node-perturbation entry points work unchanged for the AE."""
+    compute_spatial_features(adata_with_spatial, obsm_key="spatial_x")
+    Cellina.setup_anndata(adata_with_spatial, batch_key="batch", spatial_obsm_key="spatial_x",
+                          labels_key="cell_labels", domains_key="domain")
+    model = Cellina(adata_with_spatial, n_latent=5, variational=False)
+    model.train(max_epochs=1, train_size=0.5)
+
+    idx = np.arange(20)
+    donors = np.arange(50, 100)
+    cf = model.get_counterfactual_expression(idx, donors, anchor_donors=False, n_neighbors=10)
+    assert cf.shape == (len(idx), adata_with_spatial.n_vars)
+
+    adata_with_spatial.obsm["spatial_x_cf"] = adata_with_spatial.obsm["spatial_x"] * 2.0
+    pert = model.get_perturbed_expression(indices=idx, spatial_obsm_key="spatial_x_cf")
+    assert pert.shape == (len(idx), adata_with_spatial.n_vars)

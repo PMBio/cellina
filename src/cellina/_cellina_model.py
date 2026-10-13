@@ -45,6 +45,11 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         Number of hidden layers (shared by both encoders).
     discriminator_lambda
         Weight for adversarial domain forgetting. Set to 0 (default) to disable.
+    variational
+        If True (default), train a VAE (stochastic z and s with standard-normal priors).
+        If False, train a deterministic autoencoder: no sampling and no KL terms. The rest of
+        the API is unchanged; ``give_mean`` has no effect and :meth:`get_marginal_ll` is
+        unavailable.
     **model_kwargs
         Keyword args for :class:`~cellina.CellinaModule`
 
@@ -58,6 +63,8 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     >>> adata.obsm["X_cellina"] = model.get_latent_representation()  # Returns shifted = concat(z, s)
     >>> adata.obsm["X_cellina_z"] = model.get_latent_representation(latent_key='z')
     >>> adata.obsm["X_cellina_s"] = model.get_latent_representation(latent_key='s')
+    >>> # Autoencoder variant (deterministic encoders, no KL)
+    >>> ae_model = Cellina(adata, n_latent=10, variational=False)
     """
 
     def __init__(
@@ -70,6 +77,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         use_observed_lib_size: bool = True,
         classifier_lambda: float = 1.0,
         domain_classifier_lambda: float = 0.0,
+        variational: bool = True,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -96,19 +104,21 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             use_observed_lib_size=use_observed_lib_size,
             classifier_lambda=classifier_lambda,
             domain_classifier_lambda=domain_classifier_lambda,
+            variational=variational,
             **model_kwargs,
         )
 
         # Update summary string
+        model_type = "VAE" if variational else "autoencoder"
         train_mode = ""
         if discriminator_lambda > 0:
             train_mode = " with adversarial domain forgetting"
         self._model_summary_string = (
-            f"Cellina Model with {n_latent}-dim latent space (z and s encoders){train_mode}"
+            f"Cellina {model_type} with {n_latent}-dim latent space (z and s encoders){train_mode}"
         )
         self.init_params_ = self._get_init_params(locals())
 
-        logger.info(f"The Cellina model has been initialized{train_mode}")
+        logger.info(f"The Cellina {model_type} has been initialized{train_mode}")
 
         self._spatial_obsm_key = next(
             (f._attr_key for f in self.adata_manager.fields
@@ -460,6 +470,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             Indices of cells in adata to use.
         give_mean
             If True, return the mean of the latent distribution. Otherwise, sample.
+            No effect for the autoencoder (``variational=False``).
         batch_size
             Minibatch size for data loading into model.
         latent_key
@@ -601,8 +612,13 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         return_mean: bool = True,
     ):
         """Get marginal log-likelihood of the data.
-        ...
+
+        Only available for the variational model (``variational=True``).
         """
+        if not self.module.variational:
+            raise NotImplementedError(
+                "get_marginal_ll is only defined for the variational model (variational=True)."
+            )
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
 

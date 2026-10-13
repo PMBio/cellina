@@ -7,13 +7,47 @@ from scvi import REGISTRY_KEYS
 from scvi.distributions import NegativeBinomial, ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from scvi.module._classifier import Classifier
-from scvi.nn import DecoderSCVI, Encoder
+from scvi.nn import DecoderSCVI, Encoder, FCLayers
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
 
 from ._constants import DOMAINS_KEY
 
 TensorDict = Dict[str, torch.Tensor]
+
+
+class DeterministicEncoder(torch.nn.Module):
+    """
+    Deterministic counterpart of :class:`~scvi.nn.Encoder` used by the autoencoder variant.
+
+    Maps the input through fully-connected layers to a point estimate of the latent
+    (no variance head, no sampling).
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_output: int,
+        n_cat_list: Optional[list] = None,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        **kwargs,
+    ):
+        super().__init__()
+        self.encoder = FCLayers(
+            n_in=n_input,
+            n_out=n_hidden,
+            n_cat_list=n_cat_list,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            **kwargs,
+        )
+        self.mean_encoder = torch.nn.Linear(n_hidden, n_output)
+
+    def forward(self, x: torch.Tensor, *cat_list: int) -> torch.Tensor:
+        return self.mean_encoder(self.encoder(x, *cat_list))
 
 
 class CellinaModule(BaseModuleClass):
@@ -62,6 +96,10 @@ class CellinaModule(BaseModuleClass):
         Extra keyword args forwarded to domain discriminator Classifier.
     n_domains
         Number of domain labels. Automatically set from adata when domains_key is provided.
+    variational
+        If True (default), z and s are stochastic latents with standard-normal priors (VAE).
+        If False, the encoders are deterministic and no KL terms are used (autoencoder).
+        In that case ``qzm``/``qsm`` equal ``z``/``s`` and ``qzv``/``qsv`` are None.
     """
 
     def __init__(
@@ -85,8 +123,10 @@ class CellinaModule(BaseModuleClass):
         domain_classifier_lambda: float = 0.0,
         domain_classifier_kwargs: Optional[Dict[str, Any]] = None,
         use_observed_lib_size: bool = True,
+        variational: bool = True,
     ):
         super().__init__()
+        self.variational = variational
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.gene_likelihood = gene_likelihood
@@ -106,8 +146,10 @@ class CellinaModule(BaseModuleClass):
         # Batch injection setup
         cat_list = [n_batch] if n_batch > 0 else None
 
+        encoder_cls = Encoder if variational else DeterministicEncoder
+
         # Z encoder: counts -> z
-        self.z_encoder = Encoder(
+        self.z_encoder = encoder_cls(
             n_input,
             n_latent,
             n_cat_list=cat_list,
@@ -120,7 +162,7 @@ class CellinaModule(BaseModuleClass):
         )
 
         # S encoder: spatial_x -> s
-        self.s_encoder = Encoder(
+        self.s_encoder = encoder_cls(
             n_spatial_input,
             n_latent,
             n_cat_list=cat_list,
@@ -133,7 +175,7 @@ class CellinaModule(BaseModuleClass):
         )
 
         # Library encoder
-        self.l_encoder = Encoder(
+        self.l_encoder = encoder_cls(
             n_input,
             1,
             n_cat_list=cat_list,
@@ -239,14 +281,22 @@ class CellinaModule(BaseModuleClass):
         if self.use_observed_lib_size:
             library = torch.log(x.sum(1)).unsqueeze(1)
             qlm, qlv = None, None
-        else:
+        elif self.variational:
             qlm, qlv, library = self.l_encoder(x_, batch_index)
+        else:
+            library = qlm = self.l_encoder(x_, batch_index)
+            qlv = None
 
-        # Encode counts -> z
-        qzm, qzv, z = self.z_encoder(x_, batch_index)
-
-        # Encode spatial_x -> s
-        qsm, qsv, s = self.s_encoder(spatial_x, batch_index)
+        if self.variational:
+            # Encode counts -> z
+            qzm, qzv, z = self.z_encoder(x_, batch_index)
+            # Encode spatial_x -> s
+            qsm, qsv, s = self.s_encoder(spatial_x, batch_index)
+        else:
+            # Deterministic encoders: the point estimate is both the latent and its "mean"
+            z = qzm = self.z_encoder(x_, batch_index)
+            s = qsm = self.s_encoder(spatial_x, batch_index)
+            qzv, qsv = None, None
 
         # Compute shifted = concat(z, s)
         shifted = torch.cat([z, s], dim=-1)
@@ -411,19 +461,24 @@ class CellinaModule(BaseModuleClass):
         elif self.gene_likelihood == "nb":
             reconst_loss = -NegativeBinomial(mu=px_rate, theta=px_r).log_prob(x).sum(dim=-1)
 
-        # KL divergence for z
-        mean = torch.zeros_like(qzm)
-        scale = torch.ones_like(qzv)
-        kl_divergence_z = kl(Normal(qzm, torch.sqrt(qzv)), Normal(mean, scale)).sum(dim=1)
+        if self.variational:
+            # KL divergence for z
+            mean = torch.zeros_like(qzm)
+            scale = torch.ones_like(qzv)
+            kl_divergence_z = kl(Normal(qzm, torch.sqrt(qzv)), Normal(mean, scale)).sum(dim=1)
 
-        # KL divergence for s
-        mean_s = torch.zeros_like(qsm)
-        scale_s = torch.ones_like(qsv)
-        kl_divergence_s = kl(Normal(qsm, torch.sqrt(qsv)), Normal(mean_s, scale_s)).sum(dim=1)
+            # KL divergence for s
+            mean_s = torch.zeros_like(qsm)
+            scale_s = torch.ones_like(qsv)
+            kl_divergence_s = kl(Normal(qsm, torch.sqrt(qsv)), Normal(mean_s, scale_s)).sum(dim=1)
+        else:
+            # Autoencoder: no priors on z and s, so no KL terms
+            kl_divergence_z = torch.zeros_like(reconst_loss)
+            kl_divergence_s = torch.zeros_like(reconst_loss)
 
         # KL divergence for library
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        if not self.use_observed_lib_size:
+        if not self.use_observed_lib_size and self.variational:
             local_library_log_means, local_library_log_vars = self._get_local_library_params(batch_index)
             kl_divergence_l = kl(
                 Normal(qlm, torch.sqrt(qlv)),
@@ -567,6 +622,10 @@ class CellinaModule(BaseModuleClass):
         n_mc_samples
             Number of Monte Carlo samples for approximation
         """
+        if not self.variational:
+            raise NotImplementedError(
+                "marginal_ll is only defined for the variational model (variational=True)."
+            )
         sample_batch = tensors[REGISTRY_KEYS.X_KEY]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 

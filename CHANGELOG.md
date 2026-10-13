@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+### Added
+- Autoencoder variant of `Cellina`: pass `variational=False` to `Cellina` (or
+  `CellinaModule`) to replace the stochastic z, s (and latent library) encoders with
+  deterministic ones and drop all KL terms. The rest of the API is unchanged: the
+  reconstruction term is still logged as `vae_loss`, `give_mean` is a no-op, and
+  `get_marginal_ll` raises `NotImplementedError`. Default `True` keeps the VAE, and
+  existing checkpoints load as before. See `docs/tutorial_ae.ipynb`.
+
 ## [1.2.0] - 01.10.2026
 ### Added
 - `anchor_donors` for `CellinaGCN.get_counterfactual_expression` /
