@@ -1276,7 +1276,7 @@ def test_counterfactual_per_cell_donor_lists_match_the_pool_draw(trained_model):
 
     rng = np.random.default_rng(3)
     per_cell = [rng.choice(pool, size=k, replace=False) for _ in indices]
-    from_list = _cf_expr(model, indices, per_cell)
+    from_list = _cf_expr(model, indices, per_cell, seed=3)
 
     assert np.array_equal(from_pool, from_list), \
         "the same donor sets must give the same counterfactual, however they are passed"
@@ -1284,9 +1284,9 @@ def test_counterfactual_per_cell_donor_lists_match_the_pool_draw(trained_model):
     # The whole pool for every cell is a legal (and ignored-n_neighbors) call.
     whole_pool = [pool.copy() for _ in indices]
     full_a = _cf_expr(model, indices, whole_pool, n_neighbors=2)
-    full_b = _cf_expr(model, indices, whole_pool, n_neighbors=999, seed=17)
+    full_b = _cf_expr(model, indices, whole_pool, n_neighbors=999)
     assert np.array_equal(full_a, full_b), \
-        "per-cell donor sets are used verbatim; n_neighbors and seed are ignored"
+        "per-cell donor sets are used verbatim; n_neighbors is ignored"
     assert full_a.shape == (len(indices), adata.n_vars)
     assert np.isfinite(full_a).all() and (full_a >= 0).all()
 

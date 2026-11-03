@@ -280,9 +280,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             drop_last=False,
             subgraph_type=subgraph_type,
         )
-        # Counterfactual latents use base X features over the rewired graph (no spatial
-        # layer), matching the original behaviour before splitter caching.
-        return GraphBatchLoader(node_loader, splitter._x_sparse, None)
+        # Seeded so posterior/neighbour draws do not depend on call order.
+        return GraphBatchLoader(node_loader, splitter._x_sparse, None, seed=seed)
 
     @torch.inference_mode()
     def get_counterfactual_latents(
@@ -340,7 +339,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         latent_key
             ``'shifted'``, ``'z'``, or ``'s'``.
         seed
-            Seed of the anchor / donor draw.
+            Seed of the donor draw and of the loader (neighbour sampling, posterior draws).
         subgraph_type
             ``None`` (default) inherits the model's ``subgraph_type``; ``'directional'``
             keeps only sampling-path edges (lower VRAM, output-equivalent for
