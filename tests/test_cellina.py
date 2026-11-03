@@ -1157,3 +1157,15 @@ def test_anchor_layer_must_match_the_stored_spatial_features(adata):
                                                anchor_donors=True, random_state=0)
     assert not np.allclose(_to_dense(mismatched.obsm["spatial_x"]), stored[idx]), \
         "layer=None must not silently reproduce features built from a layer"
+
+
+@pytest.mark.skipif(
+    all(__import__("importlib").util.find_spec(m) for m in ("torch_geometric", "torch_sparse", "torch_scatter")),
+    reason="PyG installed; this guards the PyG-free (no `gat` extra) install",
+)
+def test_cellina_gcn_without_pyg_raises_install_hint():
+    import cellina
+
+    with pytest.raises(ImportError, match=r"cellina\[gat\]"):
+        cellina.CellinaGCN
+    exec("from cellina import *", {})  # star-import must not pull in CellinaGCN

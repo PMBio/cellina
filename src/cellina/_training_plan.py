@@ -7,7 +7,6 @@ import torch
 from scvi.train import TrainingPlan
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from ._cellina_gcn_module import CellinaGCNModule
 from ._constants import DOMAINS_KEY
 
 logger = logging.getLogger(__name__)
@@ -57,7 +56,7 @@ class CellinaAdversarialTrainingPlan(TrainingPlan):
         # Alias kept for backward compat with Cellina tests
         self._scale_domain_classifier = 1.0
 
-        self._is_graph_module = isinstance(module, CellinaGCNModule)
+        self._is_graph_module = getattr(module, "_is_graph_module", False)
 
     def _get_domain_labels(self, batch):
         """Extract domain labels from either graph-aware or standard batch."""

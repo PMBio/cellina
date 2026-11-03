@@ -2,6 +2,10 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 import torch
+
+for _m in ("torch_geometric", "torch_sparse", "torch_scatter"):
+    pytest.importorskip(_m)
+
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
@@ -65,6 +69,22 @@ def test_cellina_model(adata_with_spatial):
 
     print(model)
 
+
+
+def test_dense_x_and_spatial_layer(adata_with_spatial):
+    """Dense adata.X / x_spatial_layer are accepted (converted to CSR internally)."""
+    adata_with_spatial.X = adata_with_spatial.X.toarray()
+    adata_with_spatial.layers["spatial_feats"] = adata_with_spatial.X.copy()
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=5, x_spatial_layer="spatial_feats")
+    model.train(max_epochs=1, train_size=0.5)
+    assert model.get_latent_representation().shape == (adata_with_spatial.n_obs, 10)  # [z; s]
 
 def test_num_neighbors_resolution(adata_with_spatial):
     """num_neighbors contract: None -> [-1]*n_layers; mismatched length warns and is used as-is."""

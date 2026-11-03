@@ -1,6 +1,7 @@
 import logging
 import os
 from importlib.metadata import PackageNotFoundError, version
+from importlib.util import find_spec
 
 import scvi
 import torch
@@ -9,8 +10,6 @@ from rich.logging import RichHandler
 
 from ._cellina_model import Cellina
 from ._cellina_module import CellinaModule
-from ._cellina_gcn_model import CellinaGCN
-from ._cellina_gcn_module import CellinaGCNModule
 from ._training_plan import CellinaAdversarialTrainingPlan
 from ._spatial_utils import (
     compute_spatial_features,
@@ -19,6 +18,23 @@ from ._spatial_utils import (
     make_perturbed_expression,
     spatial_neighbors,
 )
+
+
+
+def __getattr__(name):
+    # CellinaGCN needs PyG (optional `gat` extra): import lazily so `Cellina` works without it.
+    if name in ("CellinaGCN", "CellinaGCNModule"):
+        try:
+            from ._cellina_gcn_model import CellinaGCN
+            from ._cellina_gcn_module import CellinaGCNModule
+        except ImportError as e:
+            raise ImportError(
+                f"{name} requires PyG (torch-geometric, torch-sparse, torch-scatter): "
+                'pip install "cellina[gat]"'
+            ) from e
+        return {"CellinaGCN": CellinaGCN, "CellinaGCNModule": CellinaGCNModule}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -52,8 +68,6 @@ def seed_everything(seed=0):
 __all__ = [
     "Cellina",
     "CellinaModule",
-    "CellinaGCN",
-    "CellinaGCNModule",
     "CellinaAdversarialTrainingPlan",
     "compute_spatial_features",
     "make_counterfactual_adata",
@@ -62,6 +76,9 @@ __all__ = [
     "spatial_neighbors",
     "seed_everything",
 ]
+
+if all(find_spec(m) for m in ("torch_geometric", "torch_sparse", "torch_scatter")):
+    __all__ += ["CellinaGCN", "CellinaGCNModule"]
 
 try:
     __version__ = version("cellina")

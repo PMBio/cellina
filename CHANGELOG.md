@@ -5,15 +5,20 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [Unreleased]
+## [1.3.0] - 03.11.2026
 ### Added
 - `cellina.seed_everything(seed)`: seeds python/numpy/torch/Lightning via
   `scvi.settings.seed` (so scvi's train/val split is seeded too), forces deterministic
   CUDA kernels. Training is bitwise reproducible with it; `scvi.settings.seed` alone is not on GPU.
 ### Changed
-- `give_mean` now defaults to `True` in all `get_*latents` / `get_latent_representation` methods.
-- Inference loaders seed neighbour sampling (`seed=0`), so `get_latent_representation` and
-  friends return the same result regardless of global RNG state.
+- Inference loaders seed neighbour sampling (`seed=0`), so neighbourhoods seen by
+  `get_latent_representation` and co no longer depend on global RNG state.
+- PyG (`torch-geometric`, `torch-sparse`, `torch-scatter`) is now an optional `gat` extra:
+  `Cellina` installs and runs without it; `CellinaGCN` needs `pip install "cellina[gat]"`
+  and raises an `ImportError` with that hint otherwise.
+- README shortened; links the NeurIPS paper and gives the citation (#42).
+### Fixed
+- `CellinaGCN` accepts dense `adata.X` / `x_spatial_layer` (previously `AttributeError: tocsr`).
 
 ## [1.2.0] - 01.10.2026
 ### Added

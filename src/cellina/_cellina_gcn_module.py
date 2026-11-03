@@ -61,6 +61,8 @@ class CellinaGCNModule(BaseModuleClass):
         GCN type: ``"gcn"``, ``"gat"``, ``"gin"``, ``"sg"``.
     """
 
+    _is_graph_module = True  # read by CellinaAdversarialTrainingPlan
+
     def __init__(
         self,
         n_input: int,

@@ -122,7 +122,7 @@ class GraphJointDataSplitter(DataSplitter):
         # Keep features sparse-resident; only sampled subgraph rows are densified per
         # batch (see GraphBatchLoader). Avoids materialising the full n_cells x n_genes
         # dense matrix, which otherwise dominates host RAM on large datasets.
-        self._x_sparse = x.tocsr()
+        self._x_sparse = sp.csr_matrix(x)  # accepts dense or any sparse format
         self._x_spatial_sparse = None
 
         n_cells = self._x_sparse.shape[0]
@@ -200,7 +200,7 @@ class GraphJointDataSplitter(DataSplitter):
                 f"x_spatial_layer shape {x_sp.shape} does not match X shape "
                 f"{self._x_sparse.shape}"
             )
-        return x_sp.tocsr()
+        return sp.csr_matrix(x_sp)
 
     def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last,
                               num_neighbors=None):
