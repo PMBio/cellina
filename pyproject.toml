@@ -23,7 +23,7 @@ maintainers = [
     {name = "Abdul Moeed", email = "abdul.moeed@dkfz-heidelberg.de"},
     {name = "Daniel Dimitrov", email = "daniel.dimitrov@embl.de"},
 ]
-urls.Documentation = "https://github.com/PMBio/cellina"
+urls.Documentation = "https://cellina.readthedocs.io"
 urls.Source = "https://github.com/PMBio/cellina"
 urls.Home-page = "https://github.com/PMBio/cellina"
 dependencies = [

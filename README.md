@@ -1,7 +1,5 @@
-<p align="center"><img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/banner.svg" alt="Cellina" width="75%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/PMBio/cellina/main/docs/banner.svg" alt="Cellina" width="80%"></p>
 <!-- docs-readme-start -->
-
-# Cellina
 
 [![Tests](https://github.com/PMBio/cellina/actions/workflows/test.yml/badge.svg)](https://github.com/PMBio/cellina/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/PMBio/cellina/branch/main/graph/badge.svg)](https://codecov.io/gh/PMBio/cellina)
