@@ -3,6 +3,11 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.3.0)"
+        required: true
 
 jobs:
   publish:
@@ -12,6 +17,8 @@ jobs:
       id-token: write  # PyPI trusted publishing (OIDC), no API token needed
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -19,7 +26,7 @@ jobs:
 
       - name: Check tag matches pyproject version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${{ inputs.tag || github.ref_name }}"; tag="${tag#v}"
           ver=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           [ "$tag" = "$ver" ] || { echo "tag $tag != pyproject version $ver"; exit 1; }
 
