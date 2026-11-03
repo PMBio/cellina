@@ -1,0 +1,29 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing (OIDC), no API token needed
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Check tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          [ "$tag" = "$ver" ] || { echo "tag $tag != pyproject version $ver"; exit 1; }
+
+      - name: Build sdist and wheel
+        run: pipx run build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
