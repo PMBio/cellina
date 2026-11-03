@@ -33,10 +33,13 @@ class GraphBatchLoader:
     the sampled subgraph's rows are densified per batch (via ``node_batch.n_id``).
     """
 
-    def __init__(self, node_loader, x_sparse, x_spatial_sparse=None):
+    def __init__(self, node_loader, x_sparse, x_spatial_sparse=None, seed=None):
         self.node_loader = node_loader
         self.x_sparse = x_sparse
         self.x_spatial_sparse = x_spatial_sparse
+        # Inference loaders are seeded so neighbour sampling (and posterior draws)
+        # do not depend on the global RNG state at call time; None = untouched (training).
+        self.seed = seed
 
     def _node_batch_to_dict(self, node_batch):
         nid = node_batch.n_id.cpu().numpy()
@@ -57,6 +60,15 @@ class GraphBatchLoader:
         return d
 
     def __iter__(self):
+        if self.seed is None:
+            yield from self._iter()
+            return
+        devices = [torch.cuda.current_device()] if torch.cuda.is_initialized() else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(self.seed)
+            yield from self._iter()
+
+    def _iter(self):
         for node_batch in self.node_loader:
             yield {'node_batch': self._node_batch_to_dict(node_batch)}
 
@@ -110,7 +122,7 @@ class GraphJointDataSplitter(DataSplitter):
         # Keep features sparse-resident; only sampled subgraph rows are densified per
         # batch (see GraphBatchLoader). Avoids materialising the full n_cells x n_genes
         # dense matrix, which otherwise dominates host RAM on large datasets.
-        self._x_sparse = x.tocsr()
+        self._x_sparse = sp.csr_matrix(x)  # accepts dense or any sparse format
         self._x_spatial_sparse = None
 
         n_cells = self._x_sparse.shape[0]
@@ -188,7 +200,7 @@ class GraphJointDataSplitter(DataSplitter):
                 f"x_spatial_layer shape {x_sp.shape} does not match X shape "
                 f"{self._x_sparse.shape}"
             )
-        return x_sp.tocsr()
+        return sp.csr_matrix(x_sp)
 
     def _make_neighbor_loader(self, node_indices, batch_size, shuffle, drop_last,
                               num_neighbors=None):
@@ -222,13 +234,14 @@ class GraphJointDataSplitter(DataSplitter):
         return None
 
     def create_inference_loader(self, indices, batch_size=None, shuffle=False,
-                                x_spatial_override=None, num_neighbors=None):
+                                x_spatial_override=None, num_neighbors=None, seed=0):
         """Create a node-only loader for inference.
 
         ``x_spatial_override`` lets callers reuse this splitter's cached graph and base
         X store while swapping in a different spatial feature store (e.g. a perturbation
         ``cf_layer``), avoiding a full splitter rebuild. ``num_neighbors`` overrides the
-        fan-out for this loader only.
+        fan-out for this loader only. ``seed`` makes neighbour sampling deterministic
+        regardless of global RNG state.
         """
         batch_size = batch_size or self.batch_size
         node_loader = self._make_neighbor_loader(indices, batch_size, shuffle, drop_last=False,
@@ -236,4 +249,4 @@ class GraphJointDataSplitter(DataSplitter):
         spatial_store = (
             x_spatial_override if x_spatial_override is not None else self._x_spatial_sparse
         )
-        return GraphBatchLoader(node_loader, self._x_sparse, spatial_store)
+        return GraphBatchLoader(node_loader, self._x_sparse, spatial_store, seed=seed)

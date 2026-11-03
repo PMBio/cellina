@@ -2,6 +2,10 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 import torch
+
+for _m in ("torch_geometric", "torch_sparse", "torch_scatter"):
+    pytest.importorskip(_m)
+
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import synthetic_iid
@@ -65,6 +69,22 @@ def test_cellina_model(adata_with_spatial):
 
     print(model)
 
+
+
+def test_dense_x_and_spatial_layer(adata_with_spatial):
+    """Dense adata.X / x_spatial_layer are accepted (converted to CSR internally)."""
+    adata_with_spatial.X = adata_with_spatial.X.toarray()
+    adata_with_spatial.layers["spatial_feats"] = adata_with_spatial.X.copy()
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    model = CellinaGCN(adata_with_spatial, n_latent=5, x_spatial_layer="spatial_feats")
+    model.train(max_epochs=1, train_size=0.5)
+    assert model.get_latent_representation().shape == (adata_with_spatial.n_obs, 10)  # [z; s]
 
 def test_num_neighbors_resolution(adata_with_spatial):
     """num_neighbors contract: None -> [-1]*n_layers; mismatched length warns and is used as-is."""
@@ -1256,7 +1276,7 @@ def test_counterfactual_per_cell_donor_lists_match_the_pool_draw(trained_model):
 
     rng = np.random.default_rng(3)
     per_cell = [rng.choice(pool, size=k, replace=False) for _ in indices]
-    from_list = _cf_expr(model, indices, per_cell)
+    from_list = _cf_expr(model, indices, per_cell, seed=3)
 
     assert np.array_equal(from_pool, from_list), \
         "the same donor sets must give the same counterfactual, however they are passed"
@@ -1264,9 +1284,9 @@ def test_counterfactual_per_cell_donor_lists_match_the_pool_draw(trained_model):
     # The whole pool for every cell is a legal (and ignored-n_neighbors) call.
     whole_pool = [pool.copy() for _ in indices]
     full_a = _cf_expr(model, indices, whole_pool, n_neighbors=2)
-    full_b = _cf_expr(model, indices, whole_pool, n_neighbors=999, seed=17)
+    full_b = _cf_expr(model, indices, whole_pool, n_neighbors=999)
     assert np.array_equal(full_a, full_b), \
-        "per-cell donor sets are used verbatim; n_neighbors and seed are ignored"
+        "per-cell donor sets are used verbatim; n_neighbors is ignored"
     assert full_a.shape == (len(indices), adata.n_vars)
     assert np.isfinite(full_a).all() and (full_a >= 0).all()
 
@@ -1619,3 +1639,31 @@ def test_anchor_donors_excluded_cells_never_reach_focal_cells(adata_with_spatial
             err_msg=f"n_layers={n_layers}: excluded cells' expression changed the "
                     "focal counterfactual — their features leak into the model input",
         )
+
+
+def test_inference_is_independent_of_global_rng(adata_with_spatial):
+    """Inference neighbour sampling is seeded, so results do not depend on RNG state."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    # Fan-out of 1 forces real sampling (every cell has >1 neighbour).
+    model = CellinaGCN(adata_with_spatial, n_latent=5, num_neighbors=[1, 1])
+    model.train(max_epochs=1, train_size=0.8)
+
+    a = model.get_latent_representation(latent_key="s")
+    torch.manual_seed(123)
+    torch.rand(1000)
+    b = model.get_latent_representation(latent_key="s")
+    # CUDA scatter is non-deterministic at the ULP level; the seed pins the sampled graph.
+    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
+
+    # Negative control: unseeded loaders sample different subgraphs.
+    splitter = model._get_cached_splitter(128)
+    idx = np.arange(adata_with_spatial.n_obs)
+    n_id = lambda seed: next(iter(splitter.create_inference_loader(idx, seed=seed)))["node_batch"]["n_id"]
+    assert torch.equal(n_id(0), n_id(0))
+    assert not torch.equal(n_id(None), n_id(None))
