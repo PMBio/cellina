@@ -153,7 +153,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         indices: np.ndarray,
         neighbour_indices: np.ndarray,
         adata: Optional[AnnData] = None,
-        give_mean: bool = True,
+        give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: str = "shifted",
         seed: int = 0,
@@ -445,7 +445,7 @@ class Cellina(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices: Optional[list] = None,
-        give_mean: bool = True,
+        give_mean: bool = False,
         batch_size: Optional[int] = None,
         latent_key: Optional[str] = "shifted",
     ):

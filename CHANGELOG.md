@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
-- `cellina.reproducibility.seed_everything(seed)`: seeds python/numpy/torch/Lightning via
+- `cellina.seed_everything(seed)`: seeds python/numpy/torch/Lightning via
   `scvi.settings.seed` (so scvi's train/val split is seeded too), forces deterministic
   CUDA kernels. Training is bitwise reproducible with it; `scvi.settings.seed` alone is not on GPU.
 ### Changed

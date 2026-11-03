@@ -1,6 +1,9 @@
 import logging
+import os
 from importlib.metadata import PackageNotFoundError, version
 
+import scvi
+import torch
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -33,6 +36,19 @@ logger.addHandler(ch)
 # Prevent double outputs
 logger.propagate = False
 
+
+def seed_everything(seed=0):
+    """Seed every RNG cellina touches and force deterministic CUDA kernels.
+
+    Call before any CUDA work so ``CUBLAS_WORKSPACE_CONFIG`` takes effect.
+    """
+    # Seeds python/numpy/torch(+CUDA)/Lightning, sets cudnn deterministic, and
+    # seeds scvi's train/val split (it reads ``scvi.settings.seed``).
+    scvi.settings.seed = seed
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+
 __all__ = [
     "Cellina",
     "CellinaModule",
@@ -44,6 +60,7 @@ __all__ = [
     "make_neighbor_perturbation",
     "make_perturbed_expression",
     "spatial_neighbors",
+    "seed_everything",
 ]
 
 try:
