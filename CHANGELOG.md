@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+### Added
+- `cellina.reproducibility.seed_everything(seed)`: seeds python/numpy/torch/Lightning via
+  `scvi.settings.seed` (so scvi's train/val split is seeded too), forces deterministic
+  CUDA kernels. Training is bitwise reproducible with it; `scvi.settings.seed` alone is not on GPU.
+### Changed
+- `give_mean` now defaults to `True` in all `get_*latents` / `get_latent_representation` methods.
+- Inference loaders seed neighbour sampling (`seed=0`), so `get_latent_representation` and
+  friends return the same result regardless of global RNG state.
+
 ## [1.2.0] - 01.10.2026
 ### Added
 - `anchor_donors` for `CellinaGCN.get_counterfactual_expression` /

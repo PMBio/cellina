@@ -426,7 +426,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices: Optional[list] = None,
-        give_mean: bool = False,
+        give_mean: bool = True,
         batch_size: Optional[int] = None,
         latent_key: str = "s",
         cf_layer: str = "counts_cf",
@@ -618,7 +618,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices: Optional[list] = None,
-        give_mean: bool = False,
+        give_mean: bool = True,
         batch_size: Optional[int] = None,
         latent_key: Optional[str] = "shifted",
     ):

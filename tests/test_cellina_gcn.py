@@ -1619,3 +1619,31 @@ def test_anchor_donors_excluded_cells_never_reach_focal_cells(adata_with_spatial
             err_msg=f"n_layers={n_layers}: excluded cells' expression changed the "
                     "focal counterfactual — their features leak into the model input",
         )
+
+
+def test_inference_is_independent_of_global_rng(adata_with_spatial):
+    """Inference neighbour sampling is seeded, so results do not depend on RNG state."""
+    CellinaGCN.setup_anndata(
+        adata_with_spatial,
+        batch_key="batch",
+        labels_key="cell_labels",
+        domains_key="domain",
+        spatial_connectivities_key="spatial_connectivities",
+    )
+    # Fan-out of 1 forces real sampling (every cell has >1 neighbour).
+    model = CellinaGCN(adata_with_spatial, n_latent=5, num_neighbors=[1, 1])
+    model.train(max_epochs=1, train_size=0.8)
+
+    a = model.get_latent_representation(latent_key="s")
+    torch.manual_seed(123)
+    torch.rand(1000)
+    b = model.get_latent_representation(latent_key="s")
+    # CUDA scatter is non-deterministic at the ULP level; the seed pins the sampled graph.
+    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
+
+    # Negative control: unseeded loaders sample different subgraphs.
+    splitter = model._get_cached_splitter(128)
+    idx = np.arange(adata_with_spatial.n_obs)
+    n_id = lambda seed: next(iter(splitter.create_inference_loader(idx, seed=seed)))["node_batch"]["n_id"]
+    assert torch.equal(n_id(0), n_id(0))
+    assert not torch.equal(n_id(None), n_id(None))
