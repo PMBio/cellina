@@ -13,6 +13,7 @@ from scvi.data import synthetic_iid
 from cellina import CellinaGCN, make_perturbed_expression
 from cellina._spatial_utils import _sample_anchor_donors
 from cellina._cellina_gcn_module import CellinaGCNModule
+from cellina._edge_data_splitter import _csr_to_device, _gather_dense_rows
 
 
 def _add_spatial_connectivity(adata, max_neighbors=5):
@@ -1621,19 +1622,20 @@ def test_anchor_donors_excluded_cells_never_reach_focal_cells(adata_with_spatial
 
         # (d) the excluded cells' features are therefore inert
         splitter = model._get_cached_splitter(128)
-        x0 = splitter._x_sparse
+        store0 = splitter._x_store
+        x0 = sp.csr_matrix(adata.X)
         base = _cf_expr(model, focal, anchors, exclude_indices=exclude, seed=0, **anchor_kw)
         # focal cells are their own seeds, so only the excluded non-focal rows are scrambled
         scram = np.setdiff1d(exclude, focal)
         order = np.arange(adata.n_obs)
         order[scram] = np.random.default_rng(1).permutation(scram)
-        splitter._x_sparse = x0[order].tocsr()
-        assert (splitter._x_sparse[scram] != x0[scram]).nnz > 0, "scramble was a no-op"
+        assert (x0[order][scram] != x0[scram]).nnz > 0, "scramble was a no-op"
+        splitter._x_store = _csr_to_device(x0[order], splitter.device)
         try:
             scrambled = _cf_expr(model, focal, anchors, exclude_indices=exclude, seed=0,
                                  **anchor_kw)
         finally:
-            splitter._x_sparse = x0
+            splitter._x_store = store0
         np.testing.assert_array_equal(
             base, scrambled,
             err_msg=f"n_layers={n_layers}: excluded cells' expression changed the "
@@ -1667,3 +1669,15 @@ def test_inference_is_independent_of_global_rng(adata_with_spatial):
     n_id = lambda seed: next(iter(splitter.create_inference_loader(idx, seed=seed)))["node_batch"]["n_id"]
     assert torch.equal(n_id(0), n_id(0))
     assert not torch.equal(n_id(None), n_id(None))
+
+
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def test_gather_dense_rows_matches_scipy(device):
+    """Device CSR gather == scipy row gather, incl. empty rows and repeated ids."""
+    x = sp.random(50, 30, density=0.2, format="csr", random_state=0, dtype=np.float32)
+    x[7] = 0  # an all-zero row
+    x.eliminate_zeros()
+    ids = torch.tensor([7, 3, 49, 3, 0])
+    out = _gather_dense_rows(_csr_to_device(x, device), ids)
+    assert out.device.type == device
+    np.testing.assert_array_equal(out.cpu().numpy(), x[ids.numpy()].toarray())
