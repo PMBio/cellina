@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [1.3.1] - 06.11.2026
+### Changed
+- `CellinaGCN` gathers node features on the training/inference device (CSR store on GPU)
+  instead of scipy on CPU: up to 5x faster training on crc_232 (2000 HVGs).
+
 ## [1.3.0] - 03.11.2026
 ### Added
 - `cellina.seed_everything(seed)`: seeds python/numpy/torch/Lightning via
