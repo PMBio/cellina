@@ -15,7 +15,7 @@ from scvi.data.fields import (
     LayerField,
     NumericalJointObsField,
 )
-from scvi.model._utils import _init_library_size
+from scvi.model._utils import _init_library_size, parse_device_args
 from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
 from scvi.utils import setup_anndata_dsp
 
@@ -147,18 +147,19 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
     def _get_cached_splitter(self, batch_size):
         """Build (once) and reuse the splitter for the model's own adata.
 
-        The splitter holds the spatial graph and a sparse-resident X store; rebuilding it
-        per inference call is what made host RAM climb across perturbation loops. The
-        per-call ``batch_size`` is supplied to ``create_inference_loader``, so a stale
-        cached ``batch_size`` is harmless.
+        The splitter holds the spatial graph and a CSR X store on the model's device;
+        rebuilding it per inference call is what made host RAM climb across perturbation
+        loops. The per-call ``batch_size`` is supplied to ``create_inference_loader``, so a
+        stale cached ``batch_size`` is harmless. Rebuilt if the model changed device.
         """
-        if self._cached_splitter is None:
+        if self._cached_splitter is None or self._cached_splitter.device != self.device:
             self._cached_splitter = GraphJointDataSplitter(
                 self.adata_manager,
                 num_neighbors=self._num_neighbors,
                 batch_size=batch_size,
                 x_spatial_layer=self._x_spatial_layer,
                 subgraph_type=self._subgraph_type,
+                device=self.device,
             )
         return self._cached_splitter
 
@@ -281,7 +282,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             subgraph_type=subgraph_type,
         )
         # Seeded so posterior/neighbour draws do not depend on call order.
-        return GraphBatchLoader(node_loader, splitter._x_sparse, None, seed=seed)
+        return GraphBatchLoader(node_loader, splitter._x_store, None, seed=seed)
 
     @torch.inference_mode()
     def get_counterfactual_latents(
@@ -586,7 +587,7 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
 
         datasplitter_kwargs = dict(datasplitter_kwargs or {})
         
-        forbidden = {"num_neighbors", "x_spatial_layer", "subgraph_type"} & datasplitter_kwargs.keys()
+        forbidden = {"num_neighbors", "x_spatial_layer", "subgraph_type", "device"} & datasplitter_kwargs.keys()
         if forbidden:
             raise ValueError(
                 f"{sorted(forbidden)} must be set on the CellinaGCN(...) constructor."
@@ -597,6 +598,8 @@ class CellinaGCN(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
             "num_neighbors": self._num_neighbors,
             "x_spatial_layer": self._x_spatial_layer,
             "subgraph_type": self._subgraph_type,
+            # X is gathered on the training device (see GraphJointDataSplitter).
+            "device": parse_device_args(accelerator, devices, return_device="torch")[2],
         }
 
         super().train(
